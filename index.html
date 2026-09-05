@@ -151,6 +151,14 @@
 </head>
 <body>
 
+  <!-- Persistent error banner - shown for any failed action, in addition to
+       (not instead of) the alert(), in case alert() is ever suppressed by
+       the browser (e.g. after several dialogs on one page) or the device. -->
+  <div id="error-banner" style="display:none; position:fixed; top:0; left:0; right:0; z-index:9999; background:#c0392b; color:#fff; padding:14px 16px; font-size:14px; line-height:1.4;">
+    <div id="error-banner-text" style="margin-bottom:8px;"></div>
+    <button onclick="document.getElementById('error-banner').style.display='none';" style="background:#fff; color:#c0392b; border:none; border-radius:6px; padding:6px 14px; font-weight:700;">Dismiss</button>
+  </div>
+
   <!-- ============================= LOGIN ============================= -->
   <div id="screen-login" class="screen active">
     <div class="topbar"><div class="title">Daily Fruit - Dispatch</div></div>
@@ -166,6 +174,7 @@
       <div style="text-align:center;">
         <button class="link-btn" onclick="openAdminGate()">Admin</button>
       </div>
+      <div style="text-align:center; margin-top:24px; font-size:11px; color:#bbb;" id="build-version-tag"></div>
     </div>
   </div>
 
@@ -403,6 +412,13 @@
     API_URL: 'https://script.google.com/macros/s/AKfycbwWm2aPQyzhsz6UIduYjVP4bhwHjPsM3KHREC9DWIiqutWOaVefpI_cY4EFKjwlGYmf/exec'
   };
 
+  // Bump this on every build sent to Shane - shown in tiny grey text at the
+  // bottom of the login screen, so we can both confirm which version is
+  // actually loaded on a device (rules cached/stale files in or out) rather
+  // than guessing from behavior alone.
+  var BUILD_VERSION = 'build-2026-09-05-3';
+  document.getElementById('build-version-tag').textContent = BUILD_VERSION;
+
   function callApi(action, params) {
     // Every call is a GET (see SETUP.md - Apps Script's /exec redirect drops
     // a POST body), which means browsers and some mobile/carrier proxies can
@@ -414,11 +430,27 @@
     var url = CONFIG.API_URL + '?action=' + encodeURIComponent(action) +
       '&params=' + encodeURIComponent(JSON.stringify(params || [])) +
       '&_=' + Date.now();
-    return fetch(url, { cache: 'no-store' })
-      .then(function (r) { return r.json(); })
+
+    // A request that never resolves (a stuck server-side lock, a dropped
+    // connection) used to look identical to "the button did nothing" - there
+    // was no timeout and no loading indicator. Now it surfaces as an actual
+    // error after 20s instead of hanging silently forever.
+    var controller = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+    var timeoutId = controller ? setTimeout(function () { controller.abort(); }, 20000) : null;
+
+    return fetch(url, { cache: 'no-store', signal: controller ? controller.signal : undefined })
+      .then(function (r) {
+        if (timeoutId) clearTimeout(timeoutId);
+        return r.json();
+      })
       .then(function (res) {
         if (!res.success) throw new Error(res.error || 'Request failed');
         return res.result;
+      })
+      .catch(function (err) {
+        if (timeoutId) clearTimeout(timeoutId);
+        if (err && err.name === 'AbortError') throw new Error('Request timed out after 20s (action: ' + action + '). Check your connection and try again.');
+        throw err;
       });
   }
 
@@ -627,12 +659,21 @@
   }
 
   function allocateOrderUi() {
+    // Immediate visible feedback the instant the tap registers, independent
+    // of the network request - so a slow/stuck request is obviously "still
+    // working" rather than looking identical to "nothing happened".
+    var btn = document.getElementById('allocate-order-btn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Allocating...'; }
+
     callApi('allocateOrderToTruck', [state.session.ID, state.currentOrderId]).then(function () {
       return callApi('getOrderForChecking', [state.session.ID, state.currentOrderId]);
     }).then(function (result) {
       state.currentOrder = result;
       renderOrderDetail();
-    }).catch(showFatalError);
+    }).catch(function (err) {
+      if (btn) { btn.disabled = false; btn.textContent = 'Allocate to This Truck'; }
+      showFatalError(err);
+    });
   }
 
   function renderOrderDetail() {
@@ -646,7 +687,7 @@
       document.getElementById('od-order-number').textContent = s.orderNumber;
       document.getElementById('od-customer').textContent = s.customer;
       el.innerHTML = '<div class="hint" style="margin-bottom:14px;">' + s.itemCount + ' item(s). This order has not been allocated to a truck yet - allocate it before checking items.</div>' +
-        '<button class="btn btn-primary btn-block" onclick="allocateOrderUi()">Allocate to This Truck</button>';
+        '<button class="btn btn-primary btn-block" id="allocate-order-btn" onclick="allocateOrderUi()">Allocate to This Truck</button>';
       doneBtn.style.display = 'none';
       return;
     }
@@ -974,7 +1015,16 @@
   }
 
   function showFatalError(err) {
-    alert('Something went wrong: ' + (err && err.message ? err.message : err));
+    var message = 'Something went wrong: ' + (err && err.message ? err.message : err);
+    // Belt and suspenders: an on-page banner that can't be silently
+    // suppressed the way a repeated alert() sometimes is, shown alongside
+    // (not instead of) the alert.
+    var banner = document.getElementById('error-banner');
+    if (banner) {
+      document.getElementById('error-banner-text').textContent = message;
+      banner.style.display = 'block';
+    }
+    try { alert(message); } catch (e) { /* some contexts block alert() entirely - the banner above still shows */ }
   }
 </script>
 </body>

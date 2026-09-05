@@ -319,13 +319,6 @@
 
       <div class="admin-pane" id="admin-trucks" style="display:none;">
         <div class="card">
-          <h3 style="margin-top:0;">Bulk import trucks</h3>
-          <p class="hint">Paste rows copied straight from a spreadsheet - one truck per line, columns in the order Registration, Type, Number (a header row, if pasted along with it, is skipped automatically). Already-added registrations are skipped, so it's safe to paste the same list again.</p>
-          <textarea id="bulk-truck-text" rows="6" style="width:100%;padding:12px;border:1px solid var(--border);border-radius:10px;font-family:monospace;font-size:13px;margin-bottom:12px;" placeholder="JR 53 BZ GP&#9;Dyna Toyota&#9;1&#10;JN 60 XY GP&#9;Dyna Toyota&#9;2"></textarea>
-          <button class="btn btn-primary btn-block" onclick="importTrucksUi()">Import</button>
-          <div class="hint" id="bulk-truck-result" style="margin-top:10px;"></div>
-        </div>
-        <div class="card">
           <h3 style="margin-top:0;">Add truck</h3>
           <input type="text" id="new-truck-name" placeholder="Name (e.g. Truck 12)">
           <input type="text" id="new-truck-registration" placeholder="Registration (optional)">
@@ -333,7 +326,7 @@
           <input type="text" id="new-truck-route" placeholder="Route / area (optional)">
           <button class="btn btn-primary btn-block" onclick="addTruckUi()">Add</button>
         </div>
-        <div class="card"><table id="trucks-table"></table></div>
+        <div class="card"><p class="hint">Click any field below to edit it - changes save automatically.</p><table id="trucks-table"></table></div>
       </div>
 
       <div class="admin-pane" id="admin-reasons" style="display:none;">
@@ -723,14 +716,22 @@
     callApi('updateChecker', [id, { Active: active }]).catch(showFatalError);
   }
 
+  var TRUCK_FIELD_STYLE = 'width:100%;padding:6px 8px;border:1px solid transparent;border-radius:6px;font-size:14px;background:transparent;';
+
   function loadTrucks() {
     callApi('listTrucks', [false]).then(function (trucks) {
       document.getElementById('trucks-table').innerHTML =
-        '<tr><th>Name</th><th>Registration</th><th>Type</th><th>Route</th><th>Active</th></tr>' +
+        '<tr><th>Name</th><th>Registration</th><th>Type</th><th>Route</th><th>Active</th><th></th></tr>' +
         trucks.map(function (t) {
-          return '<tr><td>' + escapeHtml(t.Name) + '</td><td>' + escapeHtml(t.Registration) + '</td><td>' + escapeHtml(t.Type) + '</td><td>' + escapeHtml(t.Route) + '</td>' +
+          return '<tr>' +
+            '<td><input type="text" style="' + TRUCK_FIELD_STYLE + '" value="' + escapeHtml(t.Name) + '" onchange="updateTruckField(\'' + t.ID + '\', \'Name\', this.value)"></td>' +
+            '<td><input type="text" style="' + TRUCK_FIELD_STYLE + '" value="' + escapeHtml(t.Registration) + '" onchange="updateTruckField(\'' + t.ID + '\', \'Registration\', this.value)"></td>' +
+            '<td><input type="text" style="' + TRUCK_FIELD_STYLE + '" value="' + escapeHtml(t.Type) + '" onchange="updateTruckField(\'' + t.ID + '\', \'Type\', this.value)"></td>' +
+            '<td><input type="text" style="' + TRUCK_FIELD_STYLE + '" value="' + escapeHtml(t.Route) + '" onchange="updateTruckField(\'' + t.ID + '\', \'Route\', this.value)"></td>' +
             '<td><label class="switch-label"><input type="checkbox" ' + (t.Active ? 'checked' : '') +
-            ' onchange="toggleTruck(\'' + t.ID + '\', this.checked)"> Active</label></td></tr>';
+            ' onchange="updateTruckField(\'' + t.ID + '\', \'Active\', this.checked)"> Active</label></td>' +
+            '<td><button class="btn btn-danger" onclick="deleteTruckUi(\'' + t.ID + '\', ' + JSON.stringify(t.Name) + ')">Delete</button></td>' +
+            '</tr>';
         }).join('');
     }).catch(showFatalError);
   }
@@ -750,21 +751,17 @@
     }).catch(showFatalError);
   }
 
-  function importTrucksUi() {
-    var text = document.getElementById('bulk-truck-text').value;
-    if (!text.trim()) return;
-    callApi('importTrucksBulk', [text]).then(function (res) {
-      var msg = res.added + ' truck(s) added.';
-      if (res.skippedDuplicate.length) msg += ' ' + res.skippedDuplicate.length + ' already existed (skipped): ' + res.skippedDuplicate.join(', ') + '.';
-      if (res.skippedInvalid.length) msg += ' ' + res.skippedInvalid.length + ' line(s) could not be read.';
-      document.getElementById('bulk-truck-result').textContent = msg;
-      document.getElementById('bulk-truck-text').value = '';
-      loadTrucks();
-    }).catch(showFatalError);
+  function updateTruckField(id, field, value) {
+    var patch = {};
+    patch[field] = value;
+    callApi('updateTruck', [id, patch]).catch(showFatalError);
   }
 
-  function toggleTruck(id, active) {
-    callApi('updateTruck', [id, { Active: active }]).catch(showFatalError);
+  function deleteTruckUi(id, name) {
+    if (!confirm('Delete truck "' + name + '"? This cannot be undone.')) return;
+    callApi('deleteTruck', [id]).then(function () {
+      loadTrucks();
+    }).catch(showFatalError);
   }
 
   function loadReasons() {

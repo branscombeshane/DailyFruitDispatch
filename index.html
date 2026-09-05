@@ -341,17 +341,20 @@
   // Apps Script Web App as a JSON API over fetch(). It does NOT use
   // google.script.run (that only works when Apps Script itself serves the
   // page). Paste your deployed Web App URL below after deploying.
+  //
+  // Uses GET (params in the query string) rather than POST: Apps Script's
+  // /exec URL responds with a redirect to the actual content, and browsers
+  // silently downgrade a POST to a GET (dropping the body) when following
+  // a redirect. GET has no body to lose, so it survives the redirect intact.
   // ------------------------------------------------------------------
   var CONFIG = {
     API_URL: 'PASTE_YOUR_APPS_SCRIPT_WEB_APP_URL_HERE'
   };
 
   function callApi(action, params) {
-    return fetch(CONFIG.API_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({ action: action, params: params || [] })
-    })
+    var url = CONFIG.API_URL + '?action=' + encodeURIComponent(action) +
+      '&params=' + encodeURIComponent(JSON.stringify(params || []));
+    return fetch(url)
       .then(function (r) { return r.json(); })
       .then(function (res) {
         if (!res.success) throw new Error(res.error || 'Request failed');

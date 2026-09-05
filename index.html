@@ -96,6 +96,10 @@
       background: var(--green); color: #fff;
     }
     .tally .count { font-size: 48px; font-weight: 800; min-width: 90px; text-align: center; }
+    .tally-sm { margin: 14px 0; gap: 16px; }
+    .tally-sm .tally-label { width: 80px; font-size: 15px; font-weight: 600; color: var(--text); text-align: right; }
+    .tally-sm button { width: 44px; height: 44px; font-size: 20px; }
+    .tally-sm .count { font-size: 30px; min-width: 56px; }
 
     /* --- Order item row --- */
     .item-row { padding: 14px 0; border-bottom: 1px solid var(--border); }
@@ -214,11 +218,24 @@
       <!-- Fruit Trays pane -->
       <div class="tabpane active" id="tabpane-trays">
         <div class="card">
-          <div class="hint">Count of fruit trays loaded on this truck</div>
-          <div class="tally">
-            <button onclick="adjustTray(-1)">-</button>
-            <div class="count" id="tray-count">0</div>
-            <button onclick="adjustTray(1)">+</button>
+          <div class="hint">Count of fruit trays loaded on this truck, by size</div>
+          <div class="tally tally-sm">
+            <div class="tally-label">Small</div>
+            <button onclick="adjustTray('Small', -1)">-</button>
+            <div class="count" id="tray-count-small">0</div>
+            <button onclick="adjustTray('Small', 1)">+</button>
+          </div>
+          <div class="tally tally-sm">
+            <div class="tally-label">Medium</div>
+            <button onclick="adjustTray('Medium', -1)">-</button>
+            <div class="count" id="tray-count-medium">0</div>
+            <button onclick="adjustTray('Medium', 1)">+</button>
+          </div>
+          <div class="tally tally-sm">
+            <div class="tally-label">Large</div>
+            <button onclick="adjustTray('Large', -1)">-</button>
+            <div class="count" id="tray-count-large">0</div>
+            <button onclick="adjustTray('Large', 1)">+</button>
           </div>
           <div class="hint" id="tray-updated" style="text-align:center;"></div>
         </div>
@@ -254,8 +271,11 @@
   <!-- Driver & route entry -->
   <div class="modal-backdrop" id="trip-modal">
     <div class="modal">
-      <h3 style="margin-top:0;">Driver & route for this truck today</h3>
-      <input type="text" id="driver-name-input" placeholder="Driver name" autocomplete="off">
+      <h3 style="margin-top:0;">Driver(s) & route for this truck today</h3>
+      <label>Driver(s) - up to 3</label>
+      <input type="text" id="driver-name-input-1" placeholder="Driver 1 name" autocomplete="off">
+      <input type="text" id="driver-name-input-2" placeholder="Driver 2 name (optional)" autocomplete="off">
+      <input type="text" id="driver-name-input-3" placeholder="Driver 3 name (optional)" autocomplete="off">
       <input type="text" id="route-name-input" placeholder="Route / area" autocomplete="off">
       <button class="btn btn-primary btn-block" style="margin-bottom:10px;" onclick="saveTrip()">Save</button>
       <button class="btn btn-secondary btn-block" onclick="closeTripModal()">Cancel</button>
@@ -483,7 +503,9 @@
   function enterWorkspace() {
     document.getElementById('ws-truck-name').textContent = state.session.TruckName;
     document.getElementById('ws-checker-name').textContent = state.checker.name;
-    document.getElementById('tray-count').textContent = state.session.TrayCount || 0;
+    document.getElementById('tray-count-small').textContent = state.session.TraySmall || 0;
+    document.getElementById('tray-count-medium').textContent = state.session.TrayMedium || 0;
+    document.getElementById('tray-count-large').textContent = state.session.TrayLarge || 0;
     renderTrayUpdated();
     renderTrip();
     showScreen('screen-workspace');
@@ -498,7 +520,12 @@
   }
 
   function openTripModal() {
-    document.getElementById('driver-name-input').value = state.session.Driver || '';
+    // Driver is stored as a single comma-separated field ("Sipho, Thabo") to
+    // keep the sheet schema unchanged - split it back out across the 3 inputs.
+    var existingDrivers = (state.session.Driver || '').split(',').map(function (n) { return n.trim(); }).filter(Boolean);
+    document.getElementById('driver-name-input-1').value = existingDrivers[0] || '';
+    document.getElementById('driver-name-input-2').value = existingDrivers[1] || '';
+    document.getElementById('driver-name-input-3').value = existingDrivers[2] || '';
     document.getElementById('route-name-input').value = state.session.Route || '';
     document.getElementById('trip-modal').classList.add('active');
   }
@@ -508,13 +535,17 @@
   }
 
   function saveTrip() {
-    var driverName = document.getElementById('driver-name-input').value.trim();
+    var drivers = [
+      document.getElementById('driver-name-input-1').value.trim(),
+      document.getElementById('driver-name-input-2').value.trim(),
+      document.getElementById('driver-name-input-3').value.trim()
+    ].filter(Boolean);
     var route = document.getElementById('route-name-input').value.trim();
     Promise.all([
-      callApi('updateSessionDriver', [state.session.ID, driverName]),
+      callApi('updateSessionDriver', [state.session.ID, drivers]),
       callApi('updateSessionRoute', [state.session.ID, route])
     ]).then(function () {
-      state.session.Driver = driverName;
+      state.session.Driver = drivers.join(', ');
       state.session.Route = route;
       renderTrip();
       closeTripModal();
@@ -535,12 +566,17 @@
     if (tab === 'orders') refreshOrders();
   }
 
-  function adjustTray(delta) {
-    var current = parseInt(document.getElementById('tray-count').textContent, 10) || 0;
+  var TRAY_SIZE_FIELD = { Small: 'TraySmall', Medium: 'TrayMedium', Large: 'TrayLarge' };
+  var TRAY_SIZE_EL = { Small: 'tray-count-small', Medium: 'tray-count-medium', Large: 'tray-count-large' };
+
+  function adjustTray(size, delta) {
+    var el = document.getElementById(TRAY_SIZE_EL[size]);
+    var current = parseInt(el.textContent, 10) || 0;
     var next = Math.max(0, current + delta);
-    document.getElementById('tray-count').textContent = next;
-    state.session.TrayCount = next;
-    callApi('updateTrayCount', [state.session.ID, next, state.checker.name]).then(function () {
+    el.textContent = next;
+    state.session[TRAY_SIZE_FIELD[size]] = next;
+    var small = state.session.TraySmall || 0, medium = state.session.TrayMedium || 0, large = state.session.TrayLarge || 0;
+    callApi('updateTrayCounts', [state.session.ID, small, medium, large]).then(function () {
       state.session.TrayCountUpdatedAt = new Date().toISOString();
       renderTrayUpdated();
     }).catch(showFatalError);
@@ -825,6 +861,10 @@
     return '<div class="stat-tile' + (alert ? ' stat-alert' : '') + '"><div class="stat-value">' + value + '</div><div class="stat-label">' + label + '</div></div>';
   }
 
+  function traysNotEntered(t) {
+    return ['traySmall', 'trayMedium', 'trayLarge'].every(function (k) { return t[k] === '' || t[k] === null || t[k] === undefined; });
+  }
+
   function renderDashboard(data) {
     var s = data.summary;
     document.getElementById('dashboard-summary').innerHTML =
@@ -848,7 +888,7 @@
         'Checker: ' + (t.checkerName || '-'),
         'Driver: ' + (t.driver || 'not set'),
         'Route: ' + (t.route || 'not set'),
-        'Trays: ' + (t.trayCount === '' || t.trayCount === null ? 'not entered' : t.trayCount),
+        'Trays: ' + (traysNotEntered(t) ? 'not entered' : 'S:' + (t.traySmall || 0) + ' M:' + (t.trayMedium || 0) + ' L:' + (t.trayLarge || 0)),
         'Started ' + formatTime(t.startedAt)
       ];
       if (t.dispatchedAt) metaParts.push('Dispatched ' + formatTime(t.dispatchedAt) + (durationText ? ' (' + durationText + ')' : ''));

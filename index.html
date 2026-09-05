@@ -404,9 +404,17 @@
   };
 
   function callApi(action, params) {
+    // Every call is a GET (see SETUP.md - Apps Script's /exec redirect drops
+    // a POST body), which means browsers and some mobile/carrier proxies can
+    // silently serve a cached response for an identical URL instead of
+    // hitting the server again - e.g. re-checking the same order right
+    // after allocating it would otherwise be able to return the stale
+    // "not allocated" result. cache: 'no-store' plus a unique _=timestamp
+    // param on every request makes that impossible.
     var url = CONFIG.API_URL + '?action=' + encodeURIComponent(action) +
-      '&params=' + encodeURIComponent(JSON.stringify(params || []));
-    return fetch(url)
+      '&params=' + encodeURIComponent(JSON.stringify(params || [])) +
+      '&_=' + Date.now();
+    return fetch(url, { cache: 'no-store' })
       .then(function (r) { return r.json(); })
       .then(function (res) {
         if (!res.success) throw new Error(res.error || 'Request failed');

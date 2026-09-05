@@ -313,13 +313,12 @@
       <div class="admin-pane" id="admin-datasource" style="display:none;">
         <div class="card">
           <h3 style="margin-top:0;">Packing & Production connection</h3>
-          <p class="hint">Paste the Google Sheets URL or ID of the Packing & Production spreadsheet, then pick the tab that holds order line items.</p>
+          <p class="hint">Paste the Google Sheets URL or ID of the Packing & Production spreadsheet. Dispatch reads its "Orders" and "OrderItems" tabs directly - no further setup needed here.</p>
           <label>Spreadsheet URL or ID</label>
           <input type="text" id="ds-spreadsheet" placeholder="https://docs.google.com/spreadsheets/d/...">
-          <button class="btn btn-secondary" onclick="probeDataSource()">Connect</button>
-          <div id="ds-tab-picker" style="margin-top:16px;"></div>
-          <div id="ds-column-mapper" style="margin-top:16px;"></div>
+          <button class="btn btn-primary" onclick="connectDataSource()">Connect &amp; Save</button>
           <div class="error" id="ds-error"></div>
+          <div class="hint" id="ds-success" style="color:var(--green-dark); font-weight:600; margin-top:10px;"></div>
         </div>
       </div>
 
@@ -372,8 +371,7 @@
     session: null,        // current truck session object
     orderChecks: [],
     currentOrder: null,   // { orderCheck, items }
-    pendingNoStockItemId: null,
-    dataSourceProbe: null
+    pendingNoStockItemId: null
   };
 
   // ------------------------------------------------------------------
@@ -717,73 +715,22 @@
   function loadDataSource() {
     callApi('getAdminSettings', []).then(function (cfg) {
       document.getElementById('ds-spreadsheet').value = cfg.packingSpreadsheetId || '';
-      if (cfg.packingSpreadsheetId && cfg.packingSheetName) {
-        probeDataSource(cfg.packingSheetName, cfg.packingColumnMap);
-      }
+      document.getElementById('ds-success').textContent = '';
+      document.getElementById('ds-error').textContent = '';
     }).catch(showFatalError);
   }
 
-  function probeDataSource(preselectSheet, preselectMap) {
+  function connectDataSource() {
     var input = document.getElementById('ds-spreadsheet').value.trim();
     document.getElementById('ds-error').textContent = '';
+    document.getElementById('ds-success').textContent = '';
     if (!input) return;
     callApi('probeSpreadsheet', [input]).then(function (res) {
       if (!res.ok) { document.getElementById('ds-error').textContent = res.error; return; }
-      state.dataSourceProbe = res;
-      var picker = document.getElementById('ds-tab-picker');
-      picker.innerHTML = '<label>Tab with order line items</label>' +
-        '<select id="ds-sheet-select" onchange="probeHeaders()">' +
-        res.sheetNames.map(function (n) {
-          return '<option value="' + escapeHtml(n) + '" ' + (n === preselectSheet ? 'selected' : '') + '>' + escapeHtml(n) + '</option>';
-        }).join('') + '</select>';
-      picker.querySelector('select').style.cssText = 'width:100%;padding:12px;border:1px solid var(--border);border-radius:10px;';
-      probeHeaders(preselectMap);
+      return callApi('saveDataSourceConfig', [input]).then(function () {
+        document.getElementById('ds-success').textContent = 'Connected to "' + res.spreadsheetName + '" - found both the Orders and OrderItems tabs.';
+      });
     }).catch(function (err) { document.getElementById('ds-error').textContent = err.message; });
-  }
-
-  function probeHeaders(preselectMap) {
-    var sheetName = document.getElementById('ds-sheet-select').value;
-    var input = document.getElementById('ds-spreadsheet').value.trim();
-    callApi('probeSheetHeaders', [input, sheetName]).then(function (res) {
-      if (!res.ok) { document.getElementById('ds-error').textContent = res.error; return; }
-      renderColumnMapper(res.headers, preselectMap || res.autoDetected, sheetName, input);
-    }).catch(function (err) { document.getElementById('ds-error').textContent = err.message; });
-  }
-
-  var FIELD_LABELS = {
-    orderId: 'Order number / ID (required)',
-    customer: 'Customer',
-    deliveryDate: 'Delivery date',
-    product: 'Product / item description (required)',
-    qty: 'Quantity',
-    unit: 'Unit',
-    department: 'Department / category'
-  };
-
-  function renderColumnMapper(headers, currentMap, sheetName, spreadsheetInput) {
-    var mapper = document.getElementById('ds-column-mapper');
-    var optionsHtml = '<option value="">-- not used --</option>' +
-      headers.map(function (h) { return '<option value="' + escapeHtml(h) + '">' + escapeHtml(h) + '</option>'; }).join('');
-
-    mapper.innerHTML = '<h4>Map columns</h4>' +
-      Object.keys(FIELD_LABELS).map(function (field) {
-        var selected = (currentMap && currentMap[field]) || '';
-        var opts = optionsHtml.replace('value="' + selected + '"', 'value="' + selected + '" selected');
-        return '<label>' + FIELD_LABELS[field] + '</label>' +
-          '<select id="ds-map-' + field + '" style="width:100%;padding:12px;border:1px solid var(--border);border-radius:10px;margin-bottom:10px;">' + opts + '</select>';
-      }).join('') +
-      '<button class="btn btn-primary btn-block" onclick="saveDataSourceUi(\'' + escapeHtml(spreadsheetInput) + '\', \'' + escapeHtml(sheetName) + '\')">Save connection</button>';
-  }
-
-  function saveDataSourceUi(spreadsheetInput, sheetName) {
-    var map = {};
-    Object.keys(FIELD_LABELS).forEach(function (field) {
-      map[field] = document.getElementById('ds-map-' + field).value || null;
-    });
-    callApi('saveDataSourceConfig', [spreadsheetInput, sheetName, map]).then(function () {
-      document.getElementById('ds-error').textContent = '';
-      alert('Data source saved.');
-    }).catch(showFatalError);
   }
 
   function loadOverview() {

@@ -136,6 +136,20 @@
     .row-inline { display: flex; gap: 8px; align-items: center; }
     .row-inline input { margin-bottom: 0; }
     .switch-label { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 400; color: var(--text); }
+
+    /* --- Admin dashboard --- */
+    .stat-tile { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 14px 18px; min-width: 120px; flex: 1; }
+    .stat-tile .stat-value { font-size: 26px; font-weight: 800; }
+    .stat-tile .stat-label { font-size: 12px; color: var(--grey); margin-top: 2px; }
+    .stat-tile.stat-alert .stat-value { color: var(--red); }
+    .dash-truck-card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin-bottom: 12px; }
+    .dash-truck-card.dash-alert { border-color: var(--red); background: #fff6f6; }
+    .dash-truck-header { display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+    .dash-truck-title { font-size: 16px; font-weight: 700; }
+    .dash-truck-meta { font-size: 13px; color: var(--grey); margin-top: 2px; }
+    .dash-warning-line { color: var(--red); font-size: 13px; font-weight: 600; margin-top: 6px; }
+    .dash-order-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-top: 1px solid var(--border); font-size: 14px; }
+    .dash-nostock-detail { font-size: 12px; color: var(--red); margin-top: 2px; }
   </style>
 </head>
 <body>
@@ -183,6 +197,11 @@
       </div>
     </div>
     <div class="content">
+      <div class="tile" onclick="openDriverModal()" style="margin-bottom:16px;">
+        <div><div class="meta">Driver</div><div class="name" id="ws-driver-name">Not set - tap to add</div></div>
+        <div>&rsaquo;</div>
+      </div>
+
       <div class="tabs">
         <button class="tab-btn active" id="tab-btn-trays" onclick="showWsTab('trays')">Fruit Trays</button>
         <button class="tab-btn" id="tab-btn-orders" onclick="showWsTab('orders')">Orders</button>
@@ -225,6 +244,16 @@
     <div class="content">
       <div id="od-warning" class="error"></div>
       <div class="card" id="od-items"></div>
+    </div>
+  </div>
+
+  <!-- Driver entry -->
+  <div class="modal-backdrop" id="driver-modal">
+    <div class="modal">
+      <h3 style="margin-top:0;">Driver for this truck today</h3>
+      <input type="text" id="driver-name-input" placeholder="Driver name" autocomplete="off">
+      <button class="btn btn-primary btn-block" style="margin-bottom:10px;" onclick="saveDriver()">Save</button>
+      <button class="btn btn-secondary btn-block" onclick="closeDriverModal()">Cancel</button>
     </div>
   </div>
 
@@ -272,7 +301,7 @@
         <button onclick="showAdminPane('trucks', this)">Trucks</button>
         <button onclick="showAdminPane('reasons', this)">No-Stock Reasons</button>
         <button onclick="showAdminPane('datasource', this)">Data Source</button>
-        <button onclick="showAdminPane('overview', this)">Today's Trucks</button>
+        <button onclick="showAdminPane('overview', this)">Dashboard</button>
         <button onclick="showAdminPane('settings', this)">Settings</button>
       </div>
 
@@ -290,9 +319,17 @@
 
       <div class="admin-pane" id="admin-trucks" style="display:none;">
         <div class="card">
+          <h3 style="margin-top:0;">Bulk import trucks</h3>
+          <p class="hint">Paste rows copied straight from a spreadsheet - one truck per line, columns in the order Registration, Type, Number (a header row, if pasted along with it, is skipped automatically). Already-added registrations are skipped, so it's safe to paste the same list again.</p>
+          <textarea id="bulk-truck-text" rows="6" style="width:100%;padding:12px;border:1px solid var(--border);border-radius:10px;font-family:monospace;font-size:13px;margin-bottom:12px;" placeholder="JR 53 BZ GP&#9;Dyna Toyota&#9;1&#10;JN 60 XY GP&#9;Dyna Toyota&#9;2"></textarea>
+          <button class="btn btn-primary btn-block" onclick="importTrucksUi()">Import</button>
+          <div class="hint" id="bulk-truck-result" style="margin-top:10px;"></div>
+        </div>
+        <div class="card">
           <h3 style="margin-top:0;">Add truck</h3>
-          <input type="text" id="new-truck-name" placeholder="Name / registration">
-          <input type="text" id="new-truck-driver" placeholder="Driver (optional)">
+          <input type="text" id="new-truck-name" placeholder="Name (e.g. Truck 12)">
+          <input type="text" id="new-truck-registration" placeholder="Registration (optional)">
+          <input type="text" id="new-truck-type" placeholder="Type (optional)">
           <input type="text" id="new-truck-route" placeholder="Route / area (optional)">
           <button class="btn btn-primary btn-block" onclick="addTruckUi()">Add</button>
         </div>
@@ -323,7 +360,10 @@
       </div>
 
       <div class="admin-pane" id="admin-overview" style="display:none;">
-        <div class="card"><table id="overview-table"></table></div>
+        <div class="card">
+          <div id="dashboard-summary" style="display:flex; flex-wrap:wrap; gap:12px;"></div>
+        </div>
+        <div id="dashboard-trucks"></div>
       </div>
 
       <div class="admin-pane" id="admin-settings" style="display:none;">
@@ -425,7 +465,7 @@
       return;
     }
     el.innerHTML = trucks.map(function (t) {
-      var meta = [t.Driver, t.Route].filter(Boolean).join(' - ');
+      var meta = [t.Registration, t.Type, t.Route].filter(Boolean).join(' - ');
       return '<div class="tile" onclick="selectTruck(\'' + t.ID + '\')">' +
         '<div><div class="name">' + escapeHtml(t.Name) + '</div><div class="meta">' + escapeHtml(meta) + '</div></div>' +
         '<div>&rsaquo;</div></div>';
@@ -448,9 +488,34 @@
     document.getElementById('ws-checker-name').textContent = state.checker.name;
     document.getElementById('tray-count').textContent = state.session.TrayCount || 0;
     renderTrayUpdated();
+    renderDriver();
     showScreen('screen-workspace');
     showWsTab('trays');
     refreshOrders();
+    if (!state.session.Driver) openDriverModal(); // prompt for it right away when loading the truck
+  }
+
+  function renderDriver() {
+    document.getElementById('ws-driver-name').textContent = state.session.Driver || 'Not set - tap to add';
+  }
+
+  function openDriverModal() {
+    document.getElementById('driver-name-input').value = state.session.Driver || '';
+    document.getElementById('driver-modal').classList.add('active');
+  }
+
+  function closeDriverModal() {
+    document.getElementById('driver-modal').classList.remove('active');
+  }
+
+  function saveDriver() {
+    var name = document.getElementById('driver-name-input').value.trim();
+    if (!name) return;
+    callApi('updateSessionDriver', [state.session.ID, name]).then(function () {
+      state.session.Driver = name;
+      renderDriver();
+      closeDriverModal();
+    }).catch(showFatalError);
   }
 
   function renderTrayUpdated() {
@@ -661,9 +726,9 @@
   function loadTrucks() {
     callApi('listTrucks', [false]).then(function (trucks) {
       document.getElementById('trucks-table').innerHTML =
-        '<tr><th>Name</th><th>Driver</th><th>Route</th><th>Active</th></tr>' +
+        '<tr><th>Name</th><th>Registration</th><th>Type</th><th>Route</th><th>Active</th></tr>' +
         trucks.map(function (t) {
-          return '<tr><td>' + escapeHtml(t.Name) + '</td><td>' + escapeHtml(t.Driver) + '</td><td>' + escapeHtml(t.Route) + '</td>' +
+          return '<tr><td>' + escapeHtml(t.Name) + '</td><td>' + escapeHtml(t.Registration) + '</td><td>' + escapeHtml(t.Type) + '</td><td>' + escapeHtml(t.Route) + '</td>' +
             '<td><label class="switch-label"><input type="checkbox" ' + (t.Active ? 'checked' : '') +
             ' onchange="toggleTruck(\'' + t.ID + '\', this.checked)"> Active</label></td></tr>';
         }).join('');
@@ -672,13 +737,28 @@
 
   function addTruckUi() {
     var name = document.getElementById('new-truck-name').value.trim();
-    var driver = document.getElementById('new-truck-driver').value.trim();
+    var registration = document.getElementById('new-truck-registration').value.trim();
+    var type = document.getElementById('new-truck-type').value.trim();
     var route = document.getElementById('new-truck-route').value.trim();
     if (!name) return;
-    callApi('addTruck', [name, driver, route]).then(function () {
+    callApi('addTruck', [name, route, registration, type]).then(function () {
       document.getElementById('new-truck-name').value = '';
-      document.getElementById('new-truck-driver').value = '';
+      document.getElementById('new-truck-registration').value = '';
+      document.getElementById('new-truck-type').value = '';
       document.getElementById('new-truck-route').value = '';
+      loadTrucks();
+    }).catch(showFatalError);
+  }
+
+  function importTrucksUi() {
+    var text = document.getElementById('bulk-truck-text').value;
+    if (!text.trim()) return;
+    callApi('importTrucksBulk', [text]).then(function (res) {
+      var msg = res.added + ' truck(s) added.';
+      if (res.skippedDuplicate.length) msg += ' ' + res.skippedDuplicate.length + ' already existed (skipped): ' + res.skippedDuplicate.join(', ') + '.';
+      if (res.skippedInvalid.length) msg += ' ' + res.skippedInvalid.length + ' line(s) could not be read.';
+      document.getElementById('bulk-truck-result').textContent = msg;
+      document.getElementById('bulk-truck-text').value = '';
       loadTrucks();
     }).catch(showFatalError);
   }
@@ -734,13 +814,62 @@
   }
 
   function loadOverview() {
-    callApi('getTodaysTruckOverview', []).then(function (sessions) {
-      document.getElementById('overview-table').innerHTML =
-        '<tr><th>Truck</th><th>Checker</th><th>Trays</th><th>Status</th></tr>' +
-        (sessions.length === 0 ? '<tr><td colspan="4">No trucks started today.</td></tr>' : sessions.map(function (s) {
-          return '<tr><td>' + escapeHtml(s.TruckName) + '</td><td>' + escapeHtml(s.CheckerName) + '</td><td>' + escapeHtml(String(s.TrayCount)) + '</td><td>' + escapeHtml(s.Status) + '</td></tr>';
-        }).join(''));
-    }).catch(showFatalError);
+    callApi('getTodaysDashboard', []).then(renderDashboard).catch(showFatalError);
+  }
+
+  function statTile(value, label, alert) {
+    return '<div class="stat-tile' + (alert ? ' stat-alert' : '') + '"><div class="stat-value">' + value + '</div><div class="stat-label">' + label + '</div></div>';
+  }
+
+  function renderDashboard(data) {
+    var s = data.summary;
+    document.getElementById('dashboard-summary').innerHTML =
+      statTile(s.totalTrucks, 'Trucks today') +
+      statTile(s.dispatchedCount, 'Dispatched') +
+      statTile(s.inProgressCount, 'In progress') +
+      statTile(s.totalOrders, 'Orders checked') +
+      statTile(s.totalNoStockItems, 'No-stock items', s.totalNoStockItems > 0) +
+      statTile(s.forcedDispatchCount, 'Dispatched with warnings', s.forcedDispatchCount > 0);
+
+    var trucksEl = document.getElementById('dashboard-trucks');
+    if (data.trucks.length === 0) {
+      trucksEl.innerHTML = '<div class="card"><div class="empty">No trucks started today yet.</div></div>';
+      return;
+    }
+
+    trucksEl.innerHTML = data.trucks.map(function (t) {
+      var statusBadgeClass = t.status === 'Dispatched' ? 'badge-dispatched' : 'badge-progress';
+      var durationText = t.durationMinutes !== null ? (t.durationMinutes + ' min from load to dispatch') : '';
+      var metaParts = [
+        'Checker: ' + (t.checkerName || '-'),
+        'Driver: ' + (t.driver || 'not set'),
+        'Trays: ' + (t.trayCount === '' || t.trayCount === null ? 'not entered' : t.trayCount),
+        'Started ' + formatTime(t.startedAt)
+      ];
+      if (t.dispatchedAt) metaParts.push('Dispatched ' + formatTime(t.dispatchedAt) + (durationText ? ' (' + durationText + ')' : ''));
+
+      var warningLine = t.dispatchedWithWarnings
+        ? '<div class="dash-warning-line">Dispatched despite: ' + escapeHtml(t.dispatchWarningsText) + '</div>'
+        : '';
+
+      var ordersHtml = t.orders.length === 0
+        ? '<div class="dash-order-row"><span class="hint">No orders opened on this truck.</span></div>'
+        : t.orders.map(function (o) {
+            var badgeClass = o.status === 'Complete' ? 'badge-complete' : (o.status === 'In Progress' ? 'badge-progress' : 'badge-pending');
+            var noStockDetail = o.noStockCount > 0
+              ? '<div class="dash-nostock-detail">' + o.noStockDetails.map(function (d) { return escapeHtml(d.description) + ' - ' + escapeHtml(d.reason); }).join('; ') + '</div>'
+              : '';
+            return '<div class="dash-order-row"><div><div>' + escapeHtml(o.orderNumber) + ' - ' + escapeHtml(o.customer) +
+              '</div>' + noStockDetail + '</div><div><span class="badge ' + badgeClass + '">' + o.status + '</span> ' +
+              '<span class="hint">' + o.packedCount + '/' + o.itemCount + ' packed' + (o.noStockCount ? ', ' + o.noStockCount + ' no-stock' : '') + '</span></div></div>';
+          }).join('');
+
+      return '<div class="dash-truck-card' + (t.dispatchedWithWarnings ? ' dash-alert' : '') + '">' +
+        '<div class="dash-truck-header"><div><div class="dash-truck-title">' + escapeHtml(t.truckName) + '</div>' +
+        '<div class="dash-truck-meta">' + metaParts.map(escapeHtml).join(' &middot; ') + '</div></div>' +
+        '<span class="badge ' + statusBadgeClass + '">' + escapeHtml(t.status) + '</span></div>' +
+        warningLine + ordersHtml + '</div>';
+    }).join('');
   }
 
   function changeAdminPin() {

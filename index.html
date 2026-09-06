@@ -208,7 +208,11 @@
         <button onclick="logout()">Log out</button>
       </div>
     </div>
-    <div class="content" id="trucks-list"></div>
+    <div class="content">
+      <input type="text" id="truck-search-input" placeholder="Search truck, order, or driver..." oninput="filterTrucksList()"
+        style="width:100%; box-sizing:border-box; padding:10px 12px; border:1px solid var(--border); border-radius:8px; font-size:14px; margin-bottom:14px;">
+      <div id="trucks-list"></div>
+    </div>
   </div>
 
   <!-- ============================= TRUCK WORKSPACE ============================= -->
@@ -501,7 +505,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-09-06-11';
+  var BUILD_VERSION = 'build-2026-09-06-12';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -676,17 +680,46 @@
     enterAdminArea(state.role === 'Admin' ? 'admin' : 'dispatchManager');
   }
 
+  // Cache of the last full fetch, so the search box below can filter locally
+  // (truck name/registration/type, order number/customer, or driver name)
+  // without a round-trip for every keystroke.
+  var allTrucksForSelection = [];
+
   function showTrucks() {
     document.getElementById('trucks-checker-name').textContent = state.checker.name;
     document.getElementById('trucks-dashboard-btn').style.display = (state.role === 'Dispatch Manager' || state.role === 'Admin') ? '' : 'none';
+    document.getElementById('truck-search-input').value = '';
     showScreen('screen-trucks');
-    callApi('getTrucksForSelection', []).then(renderTrucks).catch(showFatalError);
+    callApi('getTrucksForSelection', []).then(function (trucks) {
+      allTrucksForSelection = trucks;
+      renderTrucks(trucks);
+    }).catch(showFatalError);
   }
 
-  function renderTrucks(trucks) {
+  function filterTrucksList() {
+    var rawQuery = document.getElementById('truck-search-input').value.trim();
+    if (!rawQuery) { renderTrucks(allTrucksForSelection); return; }
+    var q = rawQuery.toLowerCase();
+    var filtered = allTrucksForSelection.filter(function (t) {
+      if ((t.Name || '').toLowerCase().indexOf(q) !== -1) return true;
+      if ((t.Registration || '').toLowerCase().indexOf(q) !== -1) return true;
+      if ((t.Type || '').toLowerCase().indexOf(q) !== -1) return true;
+      return (t.trips || []).some(function (trip) {
+        if ((trip.driver || '').toLowerCase().indexOf(q) !== -1) return true;
+        return (trip.orders || []).some(function (o) {
+          return (o.orderNumber || '').toLowerCase().indexOf(q) !== -1 || (o.customer || '').toLowerCase().indexOf(q) !== -1;
+        });
+      });
+    });
+    // A matching truck is shown with ALL of its trips/orders, not just the
+    // part that matched - so context (what else is on it) isn't lost.
+    renderTrucks(filtered, 'No truck, order, or driver matches "' + escapeHtml(rawQuery) + '".');
+  }
+
+  function renderTrucks(trucks, emptyMessage) {
     var el = document.getElementById('trucks-list');
     if (trucks.length === 0) {
-      el.innerHTML = '<div class="empty">No trucks set up yet. Ask an admin to add one.</div>';
+      el.innerHTML = '<div class="empty">' + (emptyMessage || 'No trucks set up yet. Ask an admin to add one.') + '</div>';
       return;
     }
     el.innerHTML = trucks.map(function (t) {

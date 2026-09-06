@@ -478,7 +478,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-09-06-9';
+  var BUILD_VERSION = 'build-2026-09-06-10';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -625,8 +625,18 @@
       if (t.hasActiveSessionToday) {
         badges += '<span class="badge badge-progress" style="margin-left:6px;">In progress</span>';
       }
-      return '<div class="tile" onclick="selectTruck(\'' + t.ID + '\')">' +
-        '<div><div class="name">' + escapeHtml(t.Name) + badges + '</div><div class="meta">' + escapeHtml(meta) + '</div></div>' +
+      var ordersHtml;
+      if (t.orders && t.orders.length > 0) {
+        var dotColor = { 'Pending': '#9aa0a6', 'In Progress': '#8a6100', 'Complete': 'var(--green-dark)' };
+        ordersHtml = '<div style="margin-top:6px;">' + t.orders.map(function (o) {
+          return '<div class="meta" style="margin-top:2px;"><span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:' +
+            (dotColor[o.status] || '#9aa0a6') + ';margin-right:6px;"></span>' + escapeHtml(o.orderNumber) + ' - ' + escapeHtml(o.customer) + '</div>';
+        }).join('') + '</div>';
+      } else {
+        ordersHtml = '<div class="meta" style="margin-top:6px; font-style:italic;">No orders allocated yet</div>';
+      }
+      return '<div class="tile" onclick="selectTruck(\'' + t.ID + '\')" style="align-items:flex-start;">' +
+        '<div><div class="name">' + escapeHtml(t.Name) + badges + '</div><div class="meta">' + escapeHtml(meta) + '</div>' + ordersHtml + '</div>' +
         '<div>&rsaquo;</div></div>';
     }).join('');
   }

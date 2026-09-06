@@ -86,6 +86,8 @@
     .tile:active { background: #eef3ef; }
     .tile .name { font-size: 17px; font-weight: 700; }
     .tile .meta { font-size: 13px; color: var(--grey); margin-top: 2px; }
+    .cc-label { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--grey); margin-bottom: 3px; }
+    .cc-value { font-size: 16px; font-weight: 600; color: #1a1a1a; }
 
     .badge { display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 700; }
     .badge-pending { background: #eceff1; color: var(--grey); }
@@ -505,7 +507,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-09-06-13';
+  var BUILD_VERSION = 'build-2026-09-06-14';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -654,22 +656,35 @@
     }
     el.innerHTML = results.map(function (r) {
       var badgeClass = r.status === 'Complete' ? 'badge-complete' : (r.status === 'In Progress' ? 'badge-progress' : 'badge-pending');
-      var driverLine = r.driver ? 'Driver: ' + escapeHtml(r.driver) : 'Driver not recorded yet';
-      var statusLine;
+      var dispatchStatus;
       if (r.truckStatus === 'Dispatched') {
-        statusLine = 'Dispatched' + (r.dispatchedAt ? ' at ' + escapeHtml(new Date(r.dispatchedAt).toLocaleString()) : '');
+        dispatchStatus = 'Dispatched' + (r.dispatchedAt ? ' at ' + escapeHtml(new Date(r.dispatchedAt).toLocaleString()) : '');
       } else if (r.truckStatus === 'In Progress') {
-        statusLine = 'Still being checked - not dispatched yet';
+        dispatchStatus = 'Still being checked - not dispatched yet';
       } else {
-        statusLine = 'Truck record not found';
+        dispatchStatus = 'Truck record not found';
       }
-      var routeText = r.route ? ' (' + escapeHtml(r.route) + ')' : '';
-      return '<div class="tile" style="cursor:default; align-items:flex-start;">' +
-        '<div><div class="name">' + escapeHtml(r.orderNumber) + ' - ' + escapeHtml(r.customer) + '</div>' +
-        '<div class="meta">' + escapeHtml(r.date) + ' on truck ' + escapeHtml(r.truckName || 'Unknown') + routeText + '</div>' +
-        '<div class="meta">' + statusLine + '</div>' +
-        '<div class="meta">' + driverLine + '</div></div>' +
-        '<div><span class="badge ' + badgeClass + '">' + escapeHtml(r.status) + '</span></div></div>';
+      var truckText = escapeHtml(r.truckName || 'Unknown') + (r.route ? ' (' + escapeHtml(r.route) + ')' : '');
+      var driverText = r.driver ? escapeHtml(r.driver) : 'Not recorded yet';
+      // Label small and muted, value bigger and dark - the driver/truck/
+      // status are exactly what a customer care call needs to read out
+      // loud, so they need to stand out at least as much as the order
+      // number/customer line, not fade into small grey "meta" text.
+      var field = function (label, value) {
+        return '<div style="min-width:150px;"><div class="cc-label">' + label + '</div><div class="cc-value">' + value + '</div></div>';
+      };
+      return '<div class="tile" style="cursor:default; align-items:stretch; flex-direction:column;">' +
+        '<div style="display:flex; justify-content:space-between; align-items:flex-start; gap:10px;">' +
+          '<div class="name">' + escapeHtml(r.orderNumber) + ' - ' + escapeHtml(r.customer) + '</div>' +
+          '<span class="badge ' + badgeClass + '" style="flex-shrink:0; margin-top:2px;">' + escapeHtml(r.status) + '</span>' +
+        '</div>' +
+        '<div style="margin-top:14px; padding-top:12px; border-top:1px solid var(--border); display:flex; flex-wrap:wrap; gap:14px 28px;">' +
+          field('Truck', truckText) +
+          field('Driver', driverText) +
+          field('Dispatch status', dispatchStatus) +
+          field('Date', escapeHtml(r.date)) +
+        '</div>' +
+      '</div>';
     }).join('');
   }
 

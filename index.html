@@ -295,6 +295,28 @@
     </div>
   </div>
 
+  <!-- ============================= CUSTOMER CARE ============================= -->
+  <div id="screen-customercare" class="screen">
+    <div class="topbar">
+      <div>
+        <div class="title">Customer Care</div>
+        <div class="sub" id="cc-user-name"></div>
+      </div>
+      <div class="actions"><button onclick="logout()">Log out</button></div>
+    </div>
+    <div class="content">
+      <div class="card">
+        <h3 style="margin-top:0;">Find an order</h3>
+        <p class="hint" style="margin-top:0;">Search by order number or customer name to see which truck it's on, whether it's gone out yet, and who's driving.</p>
+        <div class="row-inline">
+          <input type="text" id="cc-order-search-input" placeholder="Order number or customer" oninput="debouncedCcOrderSearch()">
+          <button class="btn btn-secondary" onclick="document.getElementById('cc-order-search-input').value=''; runCcOrderSearch();">Clear</button>
+        </div>
+        <div id="cc-order-search-results" style="margin-top:10px;"></div>
+      </div>
+    </div>
+  </div>
+
   <!-- Driver & route entry -->
   <div class="modal-backdrop" id="trip-modal">
     <div class="modal">
@@ -413,6 +435,7 @@
             <select id="new-user-role" style="max-width:170px;">
               <option value="Checker">Checker</option>
               <option value="Dispatch Manager">Dispatch Manager</option>
+              <option value="Customer Care">Customer Care</option>
               <option value="Admin">Admin</option>
             </select>
             <button class="btn btn-primary" onclick="addUserUi()">Add</button>
@@ -478,7 +501,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-09-06-10';
+  var BUILD_VERSION = 'build-2026-09-06-11';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -588,8 +611,62 @@
       // a Dashboard link available from there and a way back.
       state.checker = { id: res.user.id, name: res.user.name };
       if (res.user.role === 'Admin') { enterAdminArea('admin'); return; }
+      // Customer Care only ever needs the order lookup - no truck checking,
+      // no Admin/Dashboard access at all.
+      if (res.user.role === 'Customer Care') { showCustomerCare(); return; }
       showTrucks();
     }).catch(showFatalError);
+  }
+
+  // ------------------------------------------------------------------
+  // CUSTOMER CARE - "which truck is this order on, and who's driving"
+  // ------------------------------------------------------------------
+  function showCustomerCare() {
+    document.getElementById('cc-user-name').textContent = state.checker.name;
+    document.getElementById('cc-order-search-input').value = '';
+    document.getElementById('cc-order-search-results').innerHTML = '';
+    showScreen('screen-customercare');
+  }
+
+  var ccOrderSearchTimer = null;
+  function debouncedCcOrderSearch() {
+    clearTimeout(ccOrderSearchTimer);
+    ccOrderSearchTimer = setTimeout(runCcOrderSearch, 300);
+  }
+
+  function runCcOrderSearch() {
+    var q = document.getElementById('cc-order-search-input').value.trim();
+    var el = document.getElementById('cc-order-search-results');
+    if (!q) { el.innerHTML = ''; return; }
+    el.innerHTML = '<div class="hint">Searching...</div>';
+    callApi('findOrderAcrossTrucks', [q]).then(renderCcOrderSearchResults).catch(showFatalError);
+  }
+
+  function renderCcOrderSearchResults(results) {
+    var el = document.getElementById('cc-order-search-results');
+    if (results.length === 0) {
+      el.innerHTML = '<div class="empty">No matching orders found.</div>';
+      return;
+    }
+    el.innerHTML = results.map(function (r) {
+      var badgeClass = r.status === 'Complete' ? 'badge-complete' : (r.status === 'In Progress' ? 'badge-progress' : 'badge-pending');
+      var driverLine = r.driver ? 'Driver: ' + escapeHtml(r.driver) : 'Driver not recorded yet';
+      var statusLine;
+      if (r.truckStatus === 'Dispatched') {
+        statusLine = 'Dispatched' + (r.dispatchedAt ? ' at ' + escapeHtml(new Date(r.dispatchedAt).toLocaleString()) : '');
+      } else if (r.truckStatus === 'In Progress') {
+        statusLine = 'Still being checked - not dispatched yet';
+      } else {
+        statusLine = 'Truck record not found';
+      }
+      var routeText = r.route ? ' (' + escapeHtml(r.route) + ')' : '';
+      return '<div class="tile" style="cursor:default; align-items:flex-start;">' +
+        '<div><div class="name">' + escapeHtml(r.orderNumber) + ' - ' + escapeHtml(r.customer) + '</div>' +
+        '<div class="meta">' + escapeHtml(r.date) + ' on truck ' + escapeHtml(r.truckName || 'Unknown') + routeText + '</div>' +
+        '<div class="meta">' + statusLine + '</div>' +
+        '<div class="meta">' + driverLine + '</div></div>' +
+        '<div><span class="badge ' + badgeClass + '">' + escapeHtml(r.status) + '</span></div></div>';
+    }).join('');
   }
 
   // ------------------------------------------------------------------
@@ -625,18 +702,34 @@
       if (t.hasActiveSessionToday) {
         badges += '<span class="badge badge-progress" style="margin-left:6px;">In progress</span>';
       }
-      var ordersHtml;
-      if (t.orders && t.orders.length > 0) {
-        var dotColor = { 'Pending': '#9aa0a6', 'In Progress': '#8a6100', 'Complete': 'var(--green-dark)' };
-        ordersHtml = '<div style="margin-top:6px;">' + t.orders.map(function (o) {
-          return '<div class="meta" style="margin-top:2px;"><span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:' +
-            (dotColor[o.status] || '#9aa0a6') + ';margin-right:6px;"></span>' + escapeHtml(o.orderNumber) + ' - ' + escapeHtml(o.customer) + '</div>';
-        }).join('') + '</div>';
+      // Driver (and sometimes route) can change between a truck's trips
+      // today, so each trip is broken out on its own rather than merging
+      // all its orders/drivers into one flat list - that would make it
+      // look like a single driver had everything, when trip 1 and trip 2
+      // might really have had different drivers.
+      var dotColor = { 'Pending': '#9aa0a6', 'In Progress': '#8a6100', 'Complete': 'var(--green-dark)' };
+      var tripsHtml;
+      if (t.trips && t.trips.length > 0) {
+        tripsHtml = t.trips.map(function (trip, idx) {
+          var tripLabel = t.trips.length > 1 ? 'Trip ' + trip.tripNumber + ' - ' + escapeHtml(trip.status) : escapeHtml(trip.status);
+          var driverText = trip.driver ? 'Driver: ' + escapeHtml(trip.driver) : 'Driver not set';
+          var routeText = trip.route ? ' &middot; Route: ' + escapeHtml(trip.route) : '';
+          var ordersHtml = trip.orders.length > 0
+            ? trip.orders.map(function (o) {
+                return '<div class="meta" style="margin-top:2px; margin-left:12px;"><span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:' +
+                  (dotColor[o.status] || '#9aa0a6') + ';margin-right:6px;"></span>' + escapeHtml(o.orderNumber) + ' - ' + escapeHtml(o.customer) + '</div>';
+              }).join('')
+            : '<div class="meta" style="margin-top:2px; margin-left:12px; font-style:italic;">No orders allocated yet</div>';
+          var dividerStyle = idx > 0 ? 'margin-top:8px; padding-top:8px; border-top:1px solid var(--border);' : 'margin-top:6px;';
+          return '<div style="' + dividerStyle + '">' +
+            '<div class="meta" style="font-weight:700; color:#444;">' + tripLabel + ' &middot; ' + driverText + routeText + '</div>' +
+            ordersHtml + '</div>';
+        }).join('');
       } else {
-        ordersHtml = '<div class="meta" style="margin-top:6px; font-style:italic;">No orders allocated yet</div>';
+        tripsHtml = '<div class="meta" style="margin-top:6px; font-style:italic;">No trips started today</div>';
       }
       return '<div class="tile" onclick="selectTruck(\'' + t.ID + '\')" style="align-items:flex-start;">' +
-        '<div><div class="name">' + escapeHtml(t.Name) + badges + '</div><div class="meta">' + escapeHtml(meta) + '</div>' + ordersHtml + '</div>' +
+        '<div style="flex:1;"><div class="name">' + escapeHtml(t.Name) + badges + '</div><div class="meta">' + escapeHtml(meta) + '</div>' + tripsHtml + '</div>' +
         '<div>&rsaquo;</div></div>';
     }).join('');
   }
@@ -1068,7 +1161,7 @@
     if (name === 'overview') loadOverview();
   }
 
-  var USER_ROLES = ['Checker', 'Dispatch Manager', 'Admin'];
+  var USER_ROLES = ['Checker', 'Dispatch Manager', 'Customer Care', 'Admin'];
   var TRUCK_FIELD_STYLE = 'width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:8px;font-size:14px;background:#fff;margin-bottom:0;';
 
   function loadUsers() {

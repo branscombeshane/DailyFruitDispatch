@@ -194,6 +194,7 @@
       </div>
       <div style="text-align:center;">
         <button class="link-btn" onclick="openAdminGate()">Admin</button>
+        <button class="link-btn" onclick="openDispatchManagerGate()">Dispatch Manager</button>
       </div>
       <div style="text-align:center; margin-top:24px; font-size:11px; color:#bbb;" id="build-version-tag"></div>
     </div>
@@ -369,26 +370,46 @@
     </div>
   </div>
 
+  <!-- ===================== DISPATCH MANAGER GATE ===================== -->
+  <div id="screen-dm-gate" class="screen">
+    <div class="topbar"><div class="title">Dispatch Manager</div><div class="actions"><button onclick="showLogin()">Back</button></div></div>
+    <div class="content">
+      <div class="card" style="margin-top:40px;">
+        <label>Dispatch Manager PIN</label>
+        <input type="password" id="dm-pin-input" inputmode="numeric">
+        <div class="error" id="dm-gate-error"></div>
+        <button class="btn btn-primary btn-block" onclick="doDispatchManagerLogin()">Enter</button>
+      </div>
+    </div>
+  </div>
+
   <!-- ============================= ADMIN ============================= -->
   <div id="screen-admin" class="screen">
     <div class="topbar">
-      <div class="title">Admin</div>
-      <div class="actions"><button onclick="showLogin()">Exit Admin</button></div>
+      <div class="title" id="admin-area-title">Admin</div>
+      <div class="actions"><button onclick="showLogin()">Exit</button></div>
     </div>
     <div class="content">
       <div class="admin-nav">
-        <button class="active" onclick="showAdminPane('overview', this)">Dashboard</button>
-        <button onclick="showAdminPane('checkers', this)">Checkers</button>
-        <button onclick="showAdminPane('trucks', this)">Trucks</button>
-        <button onclick="showAdminPane('reasons', this)">No-Stock Reasons</button>
-        <button onclick="showAdminPane('datasource', this)">Data Source</button>
-        <button onclick="showAdminPane('settings', this)">Settings</button>
+        <button class="active" data-pane="overview" onclick="showAdminPane('overview', this)">Dashboard</button>
+        <button data-pane="checkers" onclick="showAdminPane('checkers', this)">Checkers</button>
+        <button data-pane="trucks" onclick="showAdminPane('trucks', this)">Trucks</button>
+        <button data-pane="reasons" onclick="showAdminPane('reasons', this)">No-Stock Reasons</button>
+        <button data-pane="datasource" onclick="showAdminPane('datasource', this)">Data Source</button>
+        <button data-pane="settings" onclick="showAdminPane('settings', this)">Settings</button>
       </div>
 
       <div class="admin-pane" id="admin-overview">
         <div class="card">
           <div id="dashboard-summary" style="display:flex; flex-wrap:wrap; gap:12px;"></div>
         </div>
+        <div class="card">
+          <h3 style="margin-top:0;">Today's orders - dispatched vs outstanding</h3>
+          <p class="hint">Everything due for delivery today, so you can confirm at the end of the day that it's all accounted for.</p>
+          <div id="fulfillment-summary" style="display:flex; flex-wrap:wrap; gap:12px; margin-bottom:14px;"></div>
+          <div id="fulfillment-outstanding"></div>
+        </div>
+        <div id="overdue-warnings"></div>
         <div id="dashboard-trucks"></div>
       </div>
 
@@ -444,6 +465,12 @@
           <input type="text" id="new-admin-pin" placeholder="New admin PIN">
           <button class="btn btn-primary" onclick="changeAdminPin()">Save</button>
         </div>
+        <div class="card">
+          <h3 style="margin-top:0;">Change Dispatch Manager PIN</h3>
+          <p class="hint">This is the separate PIN for the Dispatch Manager role, which only gets the Dashboard.</p>
+          <input type="text" id="new-dm-pin" placeholder="New Dispatch Manager PIN">
+          <button class="btn btn-primary" onclick="changeDispatchManagerPin()">Save</button>
+        </div>
       </div>
     </div>
   </div>
@@ -468,7 +495,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-09-06-4';
+  var BUILD_VERSION = 'build-2026-09-06-5';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -531,7 +558,8 @@
     session: null,        // current truck session object
     orderChecks: [],
     currentOrder: null,   // { orderCheck, items }
-    pendingNoStockItemId: null
+    pendingNoStockItemId: null,
+    adminRole: null       // null | 'admin' | 'dispatchManager' - which PIN got them into screen-admin
   };
 
   // ------------------------------------------------------------------
@@ -544,6 +572,7 @@
 
   function showLogin() {
     state.checker = null;
+    state.adminRole = null;
     document.getElementById('login-name').value = '';
     document.getElementById('login-pin').value = '';
     document.getElementById('login-error').textContent = '';
@@ -972,9 +1001,36 @@
     var pin = document.getElementById('admin-pin-input').value.trim();
     callApi('authenticateAdmin', [pin]).then(function (res) {
       if (!res.ok) { document.getElementById('admin-gate-error').textContent = res.error; return; }
-      showScreen('screen-admin');
-      showAdminPane('overview', document.querySelector('.admin-nav button'));
+      enterAdminArea('admin');
     }).catch(showFatalError);
+  }
+
+  function openDispatchManagerGate() {
+    document.getElementById('dm-pin-input').value = '';
+    document.getElementById('dm-gate-error').textContent = '';
+    showScreen('screen-dm-gate');
+  }
+
+  function doDispatchManagerLogin() {
+    var pin = document.getElementById('dm-pin-input').value.trim();
+    callApi('authenticateDispatchManager', [pin]).then(function (res) {
+      if (!res.ok) { document.getElementById('dm-gate-error').textContent = res.error; return; }
+      enterAdminArea('dispatchManager');
+    }).catch(showFatalError);
+  }
+
+  // Shared entry into screen-admin for both roles - a Dispatch Manager gets
+  // the exact same screen, just with every nav tab except Dashboard hidden,
+  // since that's the only thing this request asked them to have access to.
+  function enterAdminArea(role) {
+    state.adminRole = role;
+    var restricted = role === 'dispatchManager';
+    document.getElementById('admin-area-title').textContent = restricted ? 'Dispatch Manager' : 'Admin';
+    document.querySelectorAll('.admin-nav button').forEach(function (b) {
+      b.style.display = (restricted && b.getAttribute('data-pane') !== 'overview') ? 'none' : '';
+    });
+    showScreen('screen-admin');
+    showAdminPane('overview', document.querySelector('.admin-nav button[data-pane="overview"]'));
   }
 
   function showAdminPane(name, btn) {
@@ -1110,6 +1166,51 @@
 
   function loadOverview() {
     callApi('getTodaysDashboard', []).then(renderDashboard).catch(showFatalError);
+    callApi('getOrderFulfillmentOverview', []).then(renderFulfillmentOverview).catch(showFatalError);
+  }
+
+  // Populated by renderFulfillmentOverview, keyed by orderId, so the "Mark
+  // Collected" buttons below can look up an order's number/customer without
+  // embedding customer names (which may contain quotes) into onclick HTML.
+  var fulfillmentOrdersById = {};
+
+  function renderFulfillmentOverview(data) {
+    fulfillmentOrdersById = {};
+    data.today.outstanding.concat(data.overdueWarnings).forEach(function (o) { fulfillmentOrdersById[o.orderId] = o; });
+
+    var t = data.today;
+    document.getElementById('fulfillment-summary').innerHTML =
+      statTile(t.total, 'Orders due today') +
+      statTile(t.dispatchedCount, 'Dispatched') +
+      statTile(t.collectedCount, 'Collected') +
+      statTile(t.outstandingCount, 'Outstanding', t.outstandingCount > 0);
+
+    var outstandingEl = document.getElementById('fulfillment-outstanding');
+    outstandingEl.innerHTML = t.outstanding.length === 0
+      ? '<div class="empty">All of today\'s orders are dispatched or collected.</div>'
+      : t.outstanding.map(function (o) { return fulfillmentOrderRow(o, false); }).join('');
+
+    var overdueEl = document.getElementById('overdue-warnings');
+    overdueEl.innerHTML = data.overdueWarnings.length === 0 ? '' :
+      '<div class="card dash-truck-card dash-alert">' +
+      '<h3 style="margin-top:0; color:var(--red);">Overdue - not dispatched or collected (' + data.overdueWarnings.length + ')</h3>' +
+      data.overdueWarnings.map(function (o) { return fulfillmentOrderRow(o, true); }).join('') +
+      '</div>';
+  }
+
+  function fulfillmentOrderRow(o, showDate) {
+    return '<div class="dash-order-row"><div>' + escapeHtml(o.orderNumber) + ' - ' + escapeHtml(o.customer) +
+      (showDate ? ' <span class="hint">(due ' + escapeHtml(o.deliveryDate) + ')</span>' : '') + '</div>' +
+      '<div><button class="btn btn-secondary" style="padding:6px 10px; font-size:13px;" onclick="collectOrderUi(\'' + o.orderId + '\')">Mark Collected</button></div></div>';
+  }
+
+  function collectOrderUi(orderId) {
+    var o = fulfillmentOrdersById[orderId];
+    if (!o) return;
+    var collectedBy = state.adminRole === 'dispatchManager' ? 'Dispatch Manager' : 'Admin';
+    callApi('markOrderCollected', [o.orderId, o.orderNumber, o.customer, collectedBy]).then(function () {
+      loadOverview();
+    }).catch(showFatalError);
   }
 
   function statTile(value, label, alert) {
@@ -1178,6 +1279,15 @@
     callApi('setAdminPin', [pin]).then(function () {
       document.getElementById('new-admin-pin').value = '';
       alert('Admin PIN updated.');
+    }).catch(showFatalError);
+  }
+
+  function changeDispatchManagerPin() {
+    var pin = document.getElementById('new-dm-pin').value.trim();
+    if (!pin) return;
+    callApi('setDispatchManagerPin', [pin]).then(function () {
+      document.getElementById('new-dm-pin').value = '';
+      alert('Dispatch Manager PIN updated.');
     }).catch(showFatalError);
   }
 

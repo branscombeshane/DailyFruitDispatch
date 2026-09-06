@@ -203,7 +203,10 @@
         <div class="title">Select a truck</div>
         <div class="sub" id="trucks-checker-name"></div>
       </div>
-      <div class="actions"><button onclick="logout()">Log out</button></div>
+      <div class="actions">
+        <button onclick="enterAdminArea('dispatchManager')" id="trucks-dashboard-btn" style="display:none;">Dashboard</button>
+        <button onclick="logout()">Log out</button>
+      </div>
     </div>
     <div class="content" id="trucks-list"></div>
   </div>
@@ -357,7 +360,10 @@
   <div id="screen-admin" class="screen">
     <div class="topbar">
       <div class="title" id="admin-area-title">Admin</div>
-      <div class="actions"><button onclick="showLogin()">Log out</button></div>
+      <div class="actions">
+        <button onclick="showTrucks()" id="admin-trucks-btn" style="display:none;">Trucks</button>
+        <button onclick="showLogin()">Log out</button>
+      </div>
     </div>
     <div class="content">
       <div class="admin-nav">
@@ -370,6 +376,12 @@
 
       <div class="admin-pane" id="admin-overview">
         <div class="card">
+          <div class="row-inline" style="align-items:center; margin-bottom:6px;">
+            <label style="margin:0;">Viewing</label>
+            <input type="date" id="dashboard-date-picker" onchange="loadOverview()">
+            <button class="btn btn-secondary" onclick="resetDashboardDateToToday()">Today</button>
+          </div>
+          <p class="hint" style="margin-top:0;">Pick a previous date to check that day's trucks and orders - the "today's orders" and overdue sections below always reflect right now, regardless of what's selected here.</p>
           <div id="dashboard-summary" style="display:flex; flex-wrap:wrap; gap:12px;"></div>
         </div>
         <div class="card">
@@ -457,7 +469,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-09-06-6';
+  var BUILD_VERSION = 'build-2026-09-06-7';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -521,7 +533,8 @@
     orderChecks: [],
     currentOrder: null,   // { orderCheck, items }
     pendingNoStockItemId: null,
-    adminRole: null       // null | 'admin' | 'dispatchManager' - which PIN got them into screen-admin
+    adminRole: null,      // null | 'admin' | 'dispatchManager' - which role got them into screen-admin
+    role: null            // the signed-in user's actual role: 'Admin' | 'Dispatch Manager' | 'Checker'
   };
 
   // ------------------------------------------------------------------
@@ -535,6 +548,7 @@
   function showLogin() {
     state.checker = null;
     state.adminRole = null;
+    state.role = null;
     document.getElementById('login-name').value = '';
     document.getElementById('login-pin').value = '';
     document.getElementById('login-error').textContent = '';
@@ -557,8 +571,13 @@
     // matched user's role, not on which button was tapped.
     callApi('authenticateUser', [name, pin]).then(function (res) {
       if (!res.ok) { document.getElementById('login-error').textContent = res.error; return; }
+      state.role = res.user.role;
       if (res.user.role === 'Admin') { enterAdminArea('admin'); return; }
-      if (res.user.role === 'Dispatch Manager') { enterAdminArea('dispatchManager'); return; }
+      // A Dispatch Manager needs BOTH the restricted Dashboard-only Admin
+      // view AND the ability to actually dispatch trucks themselves (the
+      // normal Checker flow) - land them on truck selection like a
+      // Checker, with a Dashboard link available from there and a way
+      // back, rather than only giving them the Dashboard.
       state.checker = { id: res.user.id, name: res.user.name };
       showTrucks();
     }).catch(showFatalError);
@@ -569,6 +588,7 @@
   // ------------------------------------------------------------------
   function showTrucks() {
     document.getElementById('trucks-checker-name').textContent = state.checker.name;
+    document.getElementById('trucks-dashboard-btn').style.display = state.role === 'Dispatch Manager' ? '' : 'none';
     showScreen('screen-trucks');
     callApi('getTrucksForSelection', []).then(renderTrucks).catch(showFatalError);
   }
@@ -968,6 +988,13 @@
     document.querySelectorAll('.admin-nav button').forEach(function (b) {
       b.style.display = (restricted && b.getAttribute('data-pane') !== 'overview') ? 'none' : '';
     });
+    // Only a Dispatch Manager has a truck-checking identity to go back to
+    // (state.checker) - a plain Admin login never does, so this button only
+    // makes sense for the restricted role.
+    document.getElementById('admin-trucks-btn').style.display = restricted ? '' : 'none';
+    // Always land back on today's dashboard on a fresh entry into Admin,
+    // even if a previous visit this session left a past date selected.
+    document.getElementById('dashboard-date-picker').value = todayDateInputValue();
     showScreen('screen-admin');
     showAdminPane('overview', document.querySelector('.admin-nav button[data-pane="overview"]'));
   }
@@ -1129,8 +1156,27 @@
     }).catch(function (err) { document.getElementById('ds-error').textContent = err.message; });
   }
 
+  function todayDateInputValue() {
+    var d = new Date();
+    var pad = function (n) { return (n < 10 ? '0' : '') + n; };
+    return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+  }
+
+  function resetDashboardDateToToday() {
+    document.getElementById('dashboard-date-picker').value = todayDateInputValue();
+    loadOverview();
+  }
+
   function loadOverview() {
-    callApi('getTodaysDashboard', []).then(renderDashboard).catch(showFatalError);
+    var dateInput = document.getElementById('dashboard-date-picker');
+    var todayStr = todayDateInputValue();
+    if (!dateInput.value) dateInput.value = todayStr;
+    if (!dateInput.max) dateInput.max = todayStr; // no picking a future date - there's nothing there yet
+    callApi('getDashboardForDate', [dateInput.value]).then(renderDashboard).catch(showFatalError);
+    // The order-fulfillment summary and overdue warnings are always about
+    // right now, regardless of which date is selected above - they're an
+    // operational "did today actually go out ok" check, not a report you'd
+    // browse historically like the truck cards below.
     callApi('getOrderFulfillmentOverview', []).then(renderFulfillmentOverview).catch(showFatalError);
   }
 
@@ -1188,8 +1234,9 @@
 
   function renderDashboard(data) {
     var s = data.summary;
+    var isToday = data.date === todayDateInputValue();
     document.getElementById('dashboard-summary').innerHTML =
-      statTile(s.totalTrucks, 'Trucks today') +
+      statTile(s.totalTrucks, 'Trucks') +
       statTile(s.dispatchedCount, 'Dispatched') +
       statTile(s.inProgressCount, 'In progress') +
       statTile(s.totalOrders, 'Orders checked') +
@@ -1198,7 +1245,9 @@
 
     var trucksEl = document.getElementById('dashboard-trucks');
     if (data.trucks.length === 0) {
-      trucksEl.innerHTML = '<div class="card"><div class="empty">No trucks started today yet.</div></div>';
+      trucksEl.innerHTML = '<div class="card"><div class="empty">' +
+        (isToday ? 'No trucks started today yet.' : 'No trucks started on ' + escapeHtml(data.date) + '.') +
+        '</div></div>';
       return;
     }
 

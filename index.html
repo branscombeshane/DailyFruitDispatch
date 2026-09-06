@@ -45,7 +45,14 @@
     /* --- Top bar --- */
     .topbar {
       display: flex; align-items: center; justify-content: space-between;
-      padding: 14px 18px; background: var(--green-dark); color: #fff; flex-wrap: wrap; gap: 10px;
+      /* padding-top adds the phone's status-bar height (0 on a device that
+         doesn't need it) on top of the normal 14px, so installed-app mode
+         (viewport-fit=cover, which lets the page draw under the status bar)
+         doesn't let the system clock/signal/battery icons overlap the Log
+         out button - the dark green background still extends up under them,
+         only the actual content gets pushed down below the status bar. */
+      padding: calc(14px + env(safe-area-inset-top)) 18px 14px;
+      background: var(--green-dark); color: #fff; flex-wrap: wrap; gap: 10px;
     }
     .topbar .title { font-size: 18px; font-weight: 700; }
     .topbar .sub { font-size: 13px; opacity: 0.85; }
@@ -168,7 +175,7 @@
   <!-- Persistent error banner - shown for any failed action, in addition to
        (not instead of) the alert(), in case alert() is ever suppressed by
        the browser (e.g. after several dialogs on one page) or the device. -->
-  <div id="error-banner" style="display:none; position:fixed; top:0; left:0; right:0; z-index:9999; background:#c0392b; color:#fff; padding:14px 16px; font-size:14px; line-height:1.4;">
+  <div id="error-banner" style="display:none; position:fixed; top:0; left:0; right:0; z-index:9999; background:#c0392b; color:#fff; padding:calc(14px + env(safe-area-inset-top)) 16px 14px; font-size:14px; line-height:1.4;">
     <div id="error-banner-text" style="margin-bottom:8px;"></div>
     <button onclick="document.getElementById('error-banner').style.display='none';" style="background:#fff; color:#c0392b; border:none; border-radius:6px; padding:6px 14px; font-weight:700;">Dismiss</button>
   </div>
@@ -459,7 +466,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-09-06-2';
+  var BUILD_VERSION = 'build-2026-09-06-3';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's

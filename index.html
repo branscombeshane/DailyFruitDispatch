@@ -505,7 +505,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-09-06-12';
+  var BUILD_VERSION = 'build-2026-09-06-13';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -948,7 +948,17 @@
     // Orders list or the Add Order search share this same function.
     closeAddOrderModal();
     state.currentOrderId = orderId;
-    callApi('getOrderForChecking', [state.session.ID, orderId]).then(function (result) {
+    // Selecting an order IS the decision to put it on this truck, so
+    // allocate it automatically instead of making that a separate
+    // confirmation tap. allocateOrderToTruck is a safe no-op if the order
+    // is already allocated - to this truck OR to a different one (see its
+    // comment in Code.gs) - so it's fine to call unconditionally on every
+    // open, not just the first time. If it's actually on another truck,
+    // this doesn't touch that; getOrderForChecking below still correctly
+    // reports allocatedElsewhere and shows the locked/unallocate screen.
+    callApi('allocateOrderToTruck', [state.session.ID, orderId]).then(function () {
+      return callApi('getOrderForChecking', [state.session.ID, orderId]);
+    }).then(function (result) {
       state.currentOrder = result;
       renderOrderDetail();
       showScreen('screen-order');
@@ -1058,11 +1068,16 @@
       return;
     }
 
+    // openOrder() always allocates automatically before getting here, so in
+    // normal use this order is never still unallocated by the time
+    // renderOrderDetail runs - this is just a defensive fallback (e.g. a
+    // race where something unallocated it in between) with a manual retry,
+    // rather than a dead end.
     if (!result.allocated) {
       var s = result.orderSummary;
       document.getElementById('od-order-number').textContent = s.orderNumber;
       document.getElementById('od-customer').textContent = s.customer;
-      el.innerHTML = '<div class="hint" style="margin-bottom:14px;">' + s.itemCount + ' item(s). This order has not been allocated to a truck yet - allocate it before checking items.</div>' +
+      el.innerHTML = '<div class="hint" style="margin-bottom:14px;">' + s.itemCount + ' item(s). This order isn\'t allocated to a truck right now.</div>' +
         '<button class="btn btn-primary btn-block" id="allocate-order-btn" onclick="allocateOrderUi()">Allocate to This Truck</button>';
       doneBtn.style.display = 'none';
       return;

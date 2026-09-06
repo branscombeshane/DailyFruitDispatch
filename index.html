@@ -469,7 +469,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-09-06-7';
+  var BUILD_VERSION = 'build-2026-09-06-8';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -871,11 +871,43 @@
     });
   }
 
+  function unallocateCurrentOrderUi() {
+    var truckName = state.currentOrder && state.currentOrder.truckName;
+    if (!confirm('Unallocate this order from truck "' + truckName + '"? Its checking progress on that truck will be cleared, and it can then be allocated fresh to this truck.')) return;
+    var btn = document.getElementById('unallocate-order-btn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Unallocating...'; }
+
+    callApi('unallocateOrder', [state.currentOrderId]).then(function () {
+      return callApi('getOrderForChecking', [state.session.ID, state.currentOrderId]);
+    }).then(function (result) {
+      state.currentOrder = result;
+      renderOrderDetail();
+    }).catch(function (err) {
+      if (btn) { btn.disabled = false; btn.textContent = 'Unallocate from ' + truckName; }
+      showFatalError(err);
+    });
+  }
+
   function renderOrderDetail() {
     var result = state.currentOrder;
     document.getElementById('od-warning').textContent = result.warning || '';
     var el = document.getElementById('od-items');
     var doneBtn = document.getElementById('od-done-btn');
+
+    // Allocated, but to a different truck - the backend deliberately hands
+    // back no items here, so there is nothing to check. All that's on offer
+    // is unallocating it from that truck, after which it can be allocated
+    // fresh on this one (a clean checking process, not resumed progress).
+    if (result.allocatedElsewhere) {
+      var es = result.orderSummary;
+      document.getElementById('od-order-number').textContent = es.orderNumber;
+      document.getElementById('od-customer').textContent = es.customer;
+      el.innerHTML = '<div class="hint" style="margin-bottom:14px;">Order already allocated - it\'s currently on truck "' +
+        escapeHtml(result.truckName) + '". Unallocate it from that truck first if it needs to move to this one.</div>' +
+        '<button class="btn btn-danger btn-block" id="unallocate-order-btn" onclick="unallocateCurrentOrderUi()">Unallocate from ' + escapeHtml(result.truckName) + '</button>';
+      doneBtn.style.display = 'none';
+      return;
+    }
 
     if (!result.allocated) {
       var s = result.orderSummary;

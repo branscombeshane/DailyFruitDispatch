@@ -299,13 +299,15 @@
   <div class="modal-backdrop" id="trip-modal">
     <div class="modal">
       <h3 style="margin-top:0;">Driver(s) & route for this truck today</h3>
+      <div class="hint" id="trip-modal-hint" style="display:none; margin-bottom:10px;">Required before you can start checking this truck - enter at least one driver and a route to continue.</div>
       <label>Driver(s) - up to 3</label>
       <input type="text" id="driver-name-input-1" placeholder="Driver 1 name" autocomplete="off">
       <input type="text" id="driver-name-input-2" placeholder="Driver 2 name (optional)" autocomplete="off">
       <input type="text" id="driver-name-input-3" placeholder="Driver 3 name (optional)" autocomplete="off">
       <input type="text" id="route-name-input" placeholder="Route / area" autocomplete="off">
+      <div class="error" id="trip-modal-error"></div>
       <button class="btn btn-primary btn-block" style="margin-bottom:10px;" onclick="saveTrip()">Save</button>
-      <button class="btn btn-secondary btn-block" onclick="closeTripModal()">Cancel</button>
+      <button class="btn btn-secondary btn-block" id="trip-modal-cancel-btn" onclick="closeTripModal()">Cancel</button>
     </div>
   </div>
 
@@ -466,7 +468,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-09-06-3';
+  var BUILD_VERSION = 'build-2026-09-06-4';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -681,6 +683,18 @@
     document.getElementById('driver-name-input-2').value = existingDrivers[1] || '';
     document.getElementById('driver-name-input-3').value = existingDrivers[2] || '';
     document.getElementById('route-name-input').value = state.session.Route || '';
+    document.getElementById('trip-modal-error').textContent = '';
+
+    // Driver and route are mandatory before a checker can do anything else
+    // with this truck. If neither is on file yet, this is that mandatory
+    // first prompt - no way to back out without saving valid values, so
+    // Cancel is hidden. Once both are set, reopening this (via the
+    // Driver/Route tiles) is just an edit of already-valid data, so Cancel
+    // is offered again - saveTrip() below still won't accept blanking them.
+    var mandatory = !state.session.Driver || !state.session.Route;
+    document.getElementById('trip-modal-cancel-btn').style.display = mandatory ? 'none' : '';
+    document.getElementById('trip-modal-hint').style.display = mandatory ? 'block' : 'none';
+
     document.getElementById('trip-modal').classList.add('active');
   }
 
@@ -695,6 +709,12 @@
       document.getElementById('driver-name-input-3').value.trim()
     ].filter(Boolean);
     var route = document.getElementById('route-name-input').value.trim();
+
+    if (drivers.length === 0 || !route) {
+      document.getElementById('trip-modal-error').textContent = 'Enter at least one driver name and a route before continuing.';
+      return;
+    }
+
     Promise.all([
       callApi('updateSessionDriver', [state.session.ID, drivers]),
       callApi('updateSessionRoute', [state.session.ID, route])

@@ -204,7 +204,7 @@
         <div class="sub" id="trucks-checker-name"></div>
       </div>
       <div class="actions">
-        <button onclick="enterAdminArea('dispatchManager')" id="trucks-dashboard-btn" style="display:none;">Dashboard</button>
+        <button onclick="backToAdminArea()" id="trucks-dashboard-btn" style="display:none;">Dashboard</button>
         <button onclick="logout()">Log out</button>
       </div>
     </div>
@@ -376,6 +376,15 @@
 
       <div class="admin-pane" id="admin-overview">
         <div class="card">
+          <h3 style="margin-top:0;">Find an order</h3>
+          <p class="hint" style="margin-top:0;">Search by order number or customer to see which truck (and day) it was allocated to - not limited to today. Only orders that have been allocated to a truck will show up here.</p>
+          <div class="row-inline">
+            <input type="text" id="order-search-input" placeholder="Order number or customer" oninput="debouncedOrderSearch()">
+            <button class="btn btn-secondary" onclick="document.getElementById('order-search-input').value=''; runOrderSearch();">Clear</button>
+          </div>
+          <div id="order-search-results" style="margin-top:10px;"></div>
+        </div>
+        <div class="card">
           <div class="row-inline" style="align-items:center; margin-bottom:6px;">
             <label style="margin:0;">Viewing</label>
             <input type="date" id="dashboard-date-picker" onchange="loadOverview()">
@@ -469,7 +478,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-09-06-8';
+  var BUILD_VERSION = 'build-2026-09-06-9';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -572,13 +581,13 @@
     callApi('authenticateUser', [name, pin]).then(function (res) {
       if (!res.ok) { document.getElementById('login-error').textContent = res.error; return; }
       state.role = res.user.role;
-      if (res.user.role === 'Admin') { enterAdminArea('admin'); return; }
-      // A Dispatch Manager needs BOTH the restricted Dashboard-only Admin
-      // view AND the ability to actually dispatch trucks themselves (the
-      // normal Checker flow) - land them on truck selection like a
-      // Checker, with a Dashboard link available from there and a way
-      // back, rather than only giving them the Dashboard.
+      // Both Admin and Dispatch Manager need a truck-checking identity to
+      // go back to - Admin lands on the full Admin area first, but can
+      // switch over to Trucks from there (see enterAdminArea/showTrucks
+      // below); a Dispatch Manager lands straight on truck selection, with
+      // a Dashboard link available from there and a way back.
       state.checker = { id: res.user.id, name: res.user.name };
+      if (res.user.role === 'Admin') { enterAdminArea('admin'); return; }
       showTrucks();
     }).catch(showFatalError);
   }
@@ -586,9 +595,13 @@
   // ------------------------------------------------------------------
   // TRUCK SELECT
   // ------------------------------------------------------------------
+  function backToAdminArea() {
+    enterAdminArea(state.role === 'Admin' ? 'admin' : 'dispatchManager');
+  }
+
   function showTrucks() {
     document.getElementById('trucks-checker-name').textContent = state.checker.name;
-    document.getElementById('trucks-dashboard-btn').style.display = state.role === 'Dispatch Manager' ? '' : 'none';
+    document.getElementById('trucks-dashboard-btn').style.display = (state.role === 'Dispatch Manager' || state.role === 'Admin') ? '' : 'none';
     showScreen('screen-trucks');
     callApi('getTrucksForSelection', []).then(renderTrucks).catch(showFatalError);
   }
@@ -1020,10 +1033,11 @@
     document.querySelectorAll('.admin-nav button').forEach(function (b) {
       b.style.display = (restricted && b.getAttribute('data-pane') !== 'overview') ? 'none' : '';
     });
-    // Only a Dispatch Manager has a truck-checking identity to go back to
-    // (state.checker) - a plain Admin login never does, so this button only
-    // makes sense for the restricted role.
-    document.getElementById('admin-trucks-btn').style.display = restricted ? '' : 'none';
+    // Both Admin and Dispatch Manager now have a truck-checking identity to
+    // switch over to (state.checker is set for every login - see doLogin) -
+    // Admin can dispatch trucks too, not just Dispatch Manager, so this
+    // button always shows here.
+    document.getElementById('admin-trucks-btn').style.display = '';
     // Always land back on today's dashboard on a fresh entry into Admin,
     // even if a previous visit this session left a past date selected.
     document.getElementById('dashboard-date-picker').value = todayDateInputValue();
@@ -1186,6 +1200,49 @@
         document.getElementById('ds-success').textContent = 'Connected to "' + res.spreadsheetName + '" - found both the Orders and OrderItems tabs.';
       });
     }).catch(function (err) { document.getElementById('ds-error').textContent = err.message; });
+  }
+
+  // ------------------------------------------------------------------
+  // FIND AN ORDER - looks up which truck (and day) an order went out on,
+  // across ALL days on record, not just whatever date the dashboard below
+  // happens to be showing.
+  // ------------------------------------------------------------------
+  var orderSearchTimer = null;
+  function debouncedOrderSearch() {
+    clearTimeout(orderSearchTimer);
+    orderSearchTimer = setTimeout(runOrderSearch, 300);
+  }
+
+  function runOrderSearch() {
+    var q = document.getElementById('order-search-input').value.trim();
+    var el = document.getElementById('order-search-results');
+    if (!q) { el.innerHTML = ''; return; }
+    el.innerHTML = '<div class="hint">Searching...</div>';
+    callApi('findOrderAcrossTrucks', [q]).then(renderOrderSearchResults).catch(showFatalError);
+  }
+
+  function renderOrderSearchResults(results) {
+    var el = document.getElementById('order-search-results');
+    if (results.length === 0) {
+      el.innerHTML = '<div class="empty">No matching orders found.</div>';
+      return;
+    }
+    el.innerHTML = results.map(function (r) {
+      var badgeClass = r.status === 'Complete' ? 'badge-complete' : (r.status === 'In Progress' ? 'badge-progress' : 'badge-pending');
+      var truckLine;
+      if (r.truckStatus === 'Dispatched') {
+        truckLine = 'Dispatched' + (r.dispatchedAt ? ' at ' + new Date(r.dispatchedAt).toLocaleString() : '');
+      } else if (r.truckStatus === 'In Progress') {
+        truckLine = 'Truck still in progress - not dispatched yet';
+      } else {
+        truckLine = 'Truck record not found';
+      }
+      return '<div class="tile" style="cursor:default;">' +
+        '<div><div class="name">' + escapeHtml(r.orderNumber) + ' - ' + escapeHtml(r.customer) + '</div>' +
+        '<div class="meta">' + escapeHtml(r.date) + ' on truck ' + escapeHtml(r.truckName || 'Unknown') + '</div>' +
+        '<div class="meta">' + escapeHtml(truckLine) + '</div></div>' +
+        '<div><span class="badge ' + badgeClass + '">' + escapeHtml(r.status) + '</span></div></div>';
+    }).join('');
   }
 
   function todayDateInputValue() {

@@ -192,10 +192,6 @@
         <div class="error" id="login-error"></div>
         <button class="btn btn-primary btn-block" onclick="doLogin()">Sign in</button>
       </div>
-      <div style="text-align:center;">
-        <button class="link-btn" onclick="openAdminGate()">Admin</button>
-        <button class="link-btn" onclick="openDispatchManagerGate()">Dispatch Manager</button>
-      </div>
       <div style="text-align:center; margin-top:24px; font-size:11px; color:#bbb;" id="build-version-tag"></div>
     </div>
   </div>
@@ -357,46 +353,19 @@
     </div>
   </div>
 
-  <!-- ============================= ADMIN GATE ============================= -->
-  <div id="screen-admin-gate" class="screen">
-    <div class="topbar"><div class="title">Admin</div><div class="actions"><button onclick="showLogin()">Back</button></div></div>
-    <div class="content">
-      <div class="card" style="margin-top:40px;">
-        <label>Admin PIN</label>
-        <input type="password" id="admin-pin-input" inputmode="numeric">
-        <div class="error" id="admin-gate-error"></div>
-        <button class="btn btn-primary btn-block" onclick="doAdminLogin()">Enter</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- ===================== DISPATCH MANAGER GATE ===================== -->
-  <div id="screen-dm-gate" class="screen">
-    <div class="topbar"><div class="title">Dispatch Manager</div><div class="actions"><button onclick="showLogin()">Back</button></div></div>
-    <div class="content">
-      <div class="card" style="margin-top:40px;">
-        <label>Dispatch Manager PIN</label>
-        <input type="password" id="dm-pin-input" inputmode="numeric">
-        <div class="error" id="dm-gate-error"></div>
-        <button class="btn btn-primary btn-block" onclick="doDispatchManagerLogin()">Enter</button>
-      </div>
-    </div>
-  </div>
-
   <!-- ============================= ADMIN ============================= -->
   <div id="screen-admin" class="screen">
     <div class="topbar">
       <div class="title" id="admin-area-title">Admin</div>
-      <div class="actions"><button onclick="showLogin()">Exit</button></div>
+      <div class="actions"><button onclick="showLogin()">Log out</button></div>
     </div>
     <div class="content">
       <div class="admin-nav">
         <button class="active" data-pane="overview" onclick="showAdminPane('overview', this)">Dashboard</button>
-        <button data-pane="checkers" onclick="showAdminPane('checkers', this)">Checkers</button>
+        <button data-pane="users" onclick="showAdminPane('users', this)">Users</button>
         <button data-pane="trucks" onclick="showAdminPane('trucks', this)">Trucks</button>
         <button data-pane="reasons" onclick="showAdminPane('reasons', this)">No-Stock Reasons</button>
         <button data-pane="datasource" onclick="showAdminPane('datasource', this)">Data Source</button>
-        <button data-pane="settings" onclick="showAdminPane('settings', this)">Settings</button>
       </div>
 
       <div class="admin-pane" id="admin-overview">
@@ -413,16 +382,22 @@
         <div id="dashboard-trucks"></div>
       </div>
 
-      <div class="admin-pane" id="admin-checkers" style="display:none;">
+      <div class="admin-pane" id="admin-users" style="display:none;">
         <div class="card">
-          <h3 style="margin-top:0;">Add checker</h3>
+          <h3 style="margin-top:0;">Add user</h3>
+          <p class="hint">Everyone signs in with this name and PIN - what they can do after that is decided by their role.</p>
           <div class="row-inline">
-            <input type="text" id="new-checker-name" placeholder="Name">
-            <input type="text" id="new-checker-pin" placeholder="PIN" style="max-width:100px;">
-            <button class="btn btn-primary" onclick="addCheckerUi()">Add</button>
+            <input type="text" id="new-user-name" placeholder="Name">
+            <input type="text" id="new-user-pin" placeholder="PIN" style="max-width:100px;">
+            <select id="new-user-role" style="max-width:170px;">
+              <option value="Checker">Checker</option>
+              <option value="Dispatch Manager">Dispatch Manager</option>
+              <option value="Admin">Admin</option>
+            </select>
+            <button class="btn btn-primary" onclick="addUserUi()">Add</button>
           </div>
         </div>
-        <div class="card"><table id="checkers-table"></table></div>
+        <div class="card"><p class="hint">Click any field below to edit it - changes save automatically.</p><table id="users-table"></table></div>
       </div>
 
       <div class="admin-pane" id="admin-trucks" style="display:none;">
@@ -459,19 +434,6 @@
         </div>
       </div>
 
-      <div class="admin-pane" id="admin-settings" style="display:none;">
-        <div class="card">
-          <h3 style="margin-top:0;">Change Admin PIN</h3>
-          <input type="text" id="new-admin-pin" placeholder="New admin PIN">
-          <button class="btn btn-primary" onclick="changeAdminPin()">Save</button>
-        </div>
-        <div class="card">
-          <h3 style="margin-top:0;">Change Dispatch Manager PIN</h3>
-          <p class="hint">This is the separate PIN for the Dispatch Manager role, which only gets the Dashboard.</p>
-          <input type="text" id="new-dm-pin" placeholder="New Dispatch Manager PIN">
-          <button class="btn btn-primary" onclick="changeDispatchManagerPin()">Save</button>
-        </div>
-      </div>
     </div>
   </div>
 
@@ -495,7 +457,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-09-06-5';
+  var BUILD_VERSION = 'build-2026-09-06-6';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -591,9 +553,13 @@
       document.getElementById('login-error').textContent = 'Enter your name and PIN.';
       return;
     }
-    callApi('authenticateChecker', [name, pin]).then(function (res) {
+    // One login for everyone - what happens next depends entirely on the
+    // matched user's role, not on which button was tapped.
+    callApi('authenticateUser', [name, pin]).then(function (res) {
       if (!res.ok) { document.getElementById('login-error').textContent = res.error; return; }
-      state.checker = res.checker;
+      if (res.user.role === 'Admin') { enterAdminArea('admin'); return; }
+      if (res.user.role === 'Dispatch Manager') { enterAdminArea('dispatchManager'); return; }
+      state.checker = { id: res.user.id, name: res.user.name };
       showTrucks();
     }).catch(showFatalError);
   }
@@ -991,37 +957,10 @@
   // ------------------------------------------------------------------
   // ADMIN
   // ------------------------------------------------------------------
-  function openAdminGate() {
-    document.getElementById('admin-pin-input').value = '';
-    document.getElementById('admin-gate-error').textContent = '';
-    showScreen('screen-admin-gate');
-  }
-
-  function doAdminLogin() {
-    var pin = document.getElementById('admin-pin-input').value.trim();
-    callApi('authenticateAdmin', [pin]).then(function (res) {
-      if (!res.ok) { document.getElementById('admin-gate-error').textContent = res.error; return; }
-      enterAdminArea('admin');
-    }).catch(showFatalError);
-  }
-
-  function openDispatchManagerGate() {
-    document.getElementById('dm-pin-input').value = '';
-    document.getElementById('dm-gate-error').textContent = '';
-    showScreen('screen-dm-gate');
-  }
-
-  function doDispatchManagerLogin() {
-    var pin = document.getElementById('dm-pin-input').value.trim();
-    callApi('authenticateDispatchManager', [pin]).then(function (res) {
-      if (!res.ok) { document.getElementById('dm-gate-error').textContent = res.error; return; }
-      enterAdminArea('dispatchManager');
-    }).catch(showFatalError);
-  }
-
-  // Shared entry into screen-admin for both roles - a Dispatch Manager gets
-  // the exact same screen, just with every nav tab except Dashboard hidden,
-  // since that's the only thing this request asked them to have access to.
+  // There's no separate Admin/Dispatch Manager PIN gate any more - doLogin()
+  // calls this directly once authenticateUser reports the signed-in user's
+  // role. A Dispatch Manager gets the exact same screen as Admin, just with
+  // every nav tab except Dashboard hidden.
   function enterAdminArea(role) {
     state.adminRole = role;
     var restricted = role === 'dispatchManager';
@@ -1039,41 +978,67 @@
     document.querySelectorAll('.admin-nav button').forEach(function (b) { b.classList.remove('active'); });
     if (btn) btn.classList.add('active');
 
-    if (name === 'checkers') loadCheckers();
+    if (name === 'users') loadUsers();
     if (name === 'trucks') loadTrucks();
     if (name === 'reasons') loadReasons();
     if (name === 'datasource') loadDataSource();
     if (name === 'overview') loadOverview();
   }
 
-  function loadCheckers() {
-    callApi('listCheckers', []).then(function (checkers) {
-      document.getElementById('checkers-table').innerHTML =
-        '<tr><th>Name</th><th>PIN</th><th>Active</th></tr>' +
-        checkers.map(function (c) {
-          return '<tr><td>' + escapeHtml(c.Name) + '</td><td>' + escapeHtml(String(c.PIN)) + '</td>' +
-            '<td><label class="switch-label"><input type="checkbox" ' + (c.Active ? 'checked' : '') +
-            ' onchange="toggleChecker(\'' + c.ID + '\', this.checked)"> Active</label></td></tr>';
+  var USER_ROLES = ['Checker', 'Dispatch Manager', 'Admin'];
+  var TRUCK_FIELD_STYLE = 'width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:8px;font-size:14px;background:#fff;margin-bottom:0;';
+
+  function loadUsers() {
+    callApi('listCheckers', []).then(function (users) {
+      document.getElementById('users-table').innerHTML =
+        '<tr><th>Name</th><th>PIN</th><th>Role</th><th>Active</th><th></th></tr>' +
+        users.map(function (u) {
+          var role = u.Role || 'Checker';
+          return '<tr>' +
+            '<td><input type="text" style="' + TRUCK_FIELD_STYLE + '" value="' + escapeHtml(u.Name) + '" onchange="updateUserField(\'' + u.ID + '\', \'Name\', this.value)"></td>' +
+            '<td><input type="text" style="' + TRUCK_FIELD_STYLE + '" value="' + escapeHtml(String(u.PIN)) + '" onchange="updateUserField(\'' + u.ID + '\', \'PIN\', this.value)"></td>' +
+            '<td><select style="' + TRUCK_FIELD_STYLE + '" onchange="updateUserField(\'' + u.ID + '\', \'Role\', this.value)">' +
+              USER_ROLES.map(function (r) { return '<option value="' + r + '"' + (r === role ? ' selected' : '') + '>' + r + '</option>'; }).join('') +
+            '</select></td>' +
+            '<td><label class="switch-label"><input type="checkbox" ' + (u.Active !== false ? 'checked' : '') +
+            ' onchange="updateUserField(\'' + u.ID + '\', \'Active\', this.checked)"> Active</label></td>' +
+            '<td><button class="btn btn-danger" onclick="deleteUserUi(\'' + u.ID + '\', ' + JSON.stringify(u.Name) + ')">Delete</button></td>' +
+            '</tr>';
         }).join('');
     }).catch(showFatalError);
   }
 
-  function addCheckerUi() {
-    var name = document.getElementById('new-checker-name').value.trim();
-    var pin = document.getElementById('new-checker-pin').value.trim();
+  function addUserUi() {
+    var name = document.getElementById('new-user-name').value.trim();
+    var pin = document.getElementById('new-user-pin').value.trim();
+    var role = document.getElementById('new-user-role').value;
     if (!name || !pin) return;
-    callApi('addChecker', [name, pin]).then(function () {
-      document.getElementById('new-checker-name').value = '';
-      document.getElementById('new-checker-pin').value = '';
-      loadCheckers();
+    callApi('addChecker', [name, pin, role]).then(function () {
+      document.getElementById('new-user-name').value = '';
+      document.getElementById('new-user-pin').value = '';
+      document.getElementById('new-user-role').value = 'Checker';
+      loadUsers();
     }).catch(showFatalError);
   }
 
-  function toggleChecker(id, active) {
-    callApi('updateChecker', [id, { Active: active }]).catch(showFatalError);
+  function updateUserField(id, field, value) {
+    var patch = {};
+    patch[field] = value;
+    // Reload on failure too (e.g. the "can't demote the only Admin" guard) -
+    // otherwise the dropdown/checkbox is left showing the rejected value
+    // even though the backend never saved it.
+    callApi('updateChecker', [id, patch]).then(loadUsers).catch(function (err) {
+      showFatalError(err);
+      loadUsers();
+    });
   }
 
-  var TRUCK_FIELD_STYLE = 'width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:8px;font-size:14px;background:#fff;margin-bottom:0;';
+  function deleteUserUi(id, name) {
+    if (!confirm('Delete user "' + name + '"? This cannot be undone.')) return;
+    callApi('deleteChecker', [id]).then(function () {
+      loadUsers();
+    }).catch(showFatalError);
+  }
 
   function loadTrucks() {
     callApi('listTrucks', [false]).then(function (trucks) {
@@ -1271,24 +1236,6 @@
         '<span class="badge ' + statusBadgeClass + '">' + escapeHtml(t.status) + '</span></div>' +
         warningLine + ordersHtml + '</div>';
     }).join('');
-  }
-
-  function changeAdminPin() {
-    var pin = document.getElementById('new-admin-pin').value.trim();
-    if (!pin) return;
-    callApi('setAdminPin', [pin]).then(function () {
-      document.getElementById('new-admin-pin').value = '';
-      alert('Admin PIN updated.');
-    }).catch(showFatalError);
-  }
-
-  function changeDispatchManagerPin() {
-    var pin = document.getElementById('new-dm-pin').value.trim();
-    if (!pin) return;
-    callApi('setDispatchManagerPin', [pin]).then(function () {
-      document.getElementById('new-dm-pin').value = '';
-      alert('Dispatch Manager PIN updated.');
-    }).catch(showFatalError);
   }
 
   // ------------------------------------------------------------------

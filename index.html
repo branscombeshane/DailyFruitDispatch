@@ -3,9 +3,23 @@
 <head>
   <base target="_top">
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
   <title>Daily Fruit - Dispatch</title>
   <meta name="theme-color" content="#3F6C4B">
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%233F6C4B'/%3E%3Crect x='16' y='34' width='44' height='28' rx='3' fill='white'/%3E%3Crect x='60' y='44' width='22' height='18' rx='2' fill='white'/%3E%3Crect x='65' y='48' width='9' height='8' rx='1' fill='%233F6C4B'/%3E%3Ccircle cx='32' cy='65' r='8' fill='white'/%3E%3Ccircle cx='32' cy='65' r='3' fill='%233F6C4B'/%3E%3Ccircle cx='70' cy='65' r='8' fill='white'/%3E%3Ccircle cx='70' cy='65' r='3' fill='%233F6C4B'/%3E%3C/svg%3E">
+
+  <!-- Installable-app support: manifest + icons for Android/Chrome's "Add
+       to Home Screen" and iOS Safari's "Add to Home Screen" (which reads
+       apple-touch-icon and apple-mobile-web-app-* tags rather than the
+       manifest). See sw.js for the service worker that Android/Chrome also
+       requires before it will offer the install prompt. -->
+  <link rel="manifest" href="manifest.json">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Dispatch">
+  <meta name="mobile-web-app-capable" content="yes">
+
   <style>
     :root {
       --green: #3F6C4B;
@@ -416,8 +430,25 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-09-05-3';
+  var BUILD_VERSION = 'build-2026-09-06-1';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
+
+  // Registers the service worker that makes the app installable on a phone's
+  // home screen (Android/Chrome requires one before it will offer the
+  // install prompt; iOS Safari's "Add to Home Screen" doesn't need it but
+  // isn't bothered by it either). See sw.js for what it does and, just as
+  // importantly, what it deliberately does NOT cache (the API).
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', function () {
+      navigator.serviceWorker.register('sw.js').catch(function () {
+        // Installability is a nice-to-have, not a requirement to run the
+        // app - if registration fails for any reason (e.g. opened directly
+        // from the Apps Script /exec URL rather than GitHub Pages, where a
+        // service worker can't be registered on someone else's origin),
+        // the app itself still works exactly as before.
+      });
+    });
+  }
 
   function callApi(action, params) {
     // Every call is a GET (see SETUP.md - Apps Script's /exec redirect drops

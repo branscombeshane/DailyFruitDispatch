@@ -255,10 +255,13 @@
         </div>
       </div>
 
-      <!-- Orders pane -->
+      <!-- Orders pane: only orders already allocated to THIS truck - the
+           full searchable order list lives behind "+ Add Order" instead, so
+           this doesn't show every order in today's Packing & Production
+           data by default. -->
       <div class="tabpane" id="tabpane-orders">
-        <input type="text" id="order-search" placeholder="Search by order number or customer" oninput="debouncedSearch()">
-        <div id="orders-list"></div>
+        <button class="btn btn-secondary btn-block" style="margin-bottom:14px;" onclick="openAddOrderModal()">+ Add Order</button>
+        <div id="my-orders-list"></div>
       </div>
 
       <div class="card" style="margin-top:20px;">
@@ -315,6 +318,32 @@
       <div id="dispatch-warnings"></div>
       <button class="btn btn-danger btn-block" style="margin-bottom:10px;" onclick="confirmDispatch()">Yes, dispatch anyway</button>
       <button class="btn btn-secondary btn-block" onclick="closeDispatchModal()">Cancel</button>
+    </div>
+  </div>
+
+  <!-- Add an order to this truck: the full searchable list of today's
+       orders lives here instead of on the main Orders pane, since most
+       trucks only carry a handful of orders out of everything on today's
+       board. -->
+  <div class="modal-backdrop" id="add-order-modal">
+    <div class="modal">
+      <h3 style="margin-top:0;">Add an order to this truck</h3>
+      <input type="text" id="add-order-search" placeholder="Search by order number or customer" oninput="debouncedAddOrderSearch()">
+      <div id="add-order-list"></div>
+      <button class="btn btn-secondary btn-block" style="margin-top:12px;" onclick="closeAddOrderModal()">Cancel</button>
+    </div>
+  </div>
+
+  <!-- Truck already dispatched today - some trucks run more than one
+       dispatch a day, so reopening one that's already been dispatched needs
+       an explicit choice rather than silently resuming it. -->
+  <div class="modal-backdrop" id="dispatch-choice-modal">
+    <div class="modal">
+      <h3 style="margin-top:0;">Already dispatched today</h3>
+      <div class="hint" id="dispatch-choice-info" style="margin-bottom:16px;"></div>
+      <button class="btn btn-primary btn-block" style="margin-bottom:10px;" onclick="chooseEditDispatch()">Edit current dispatch</button>
+      <button class="btn btn-secondary btn-block" style="margin-bottom:10px;" onclick="chooseNewDispatch()">Start a new dispatch</button>
+      <button class="btn btn-secondary btn-block" onclick="closeDispatchChoiceModal()">Cancel</button>
     </div>
   </div>
 
@@ -430,7 +459,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-09-06-1';
+  var BUILD_VERSION = 'build-2026-09-06-2';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -537,7 +566,7 @@
   function showTrucks() {
     document.getElementById('trucks-checker-name').textContent = state.checker.name;
     showScreen('screen-trucks');
-    callApi('listTrucks', [true]).then(renderTrucks).catch(showFatalError);
+    callApi('getTrucksForSelection', []).then(renderTrucks).catch(showFatalError);
   }
 
   function renderTrucks(trucks) {
@@ -548,18 +577,70 @@
     }
     el.innerHTML = trucks.map(function (t) {
       var meta = [t.Registration, t.Type].filter(Boolean).join(' - ');
+      // A truck can run more than one dispatch a day, so "dispatched" and
+      // "still has an active/in-progress session right now" aren't mutually
+      // exclusive - show both when they apply.
+      var badges = '';
+      if (t.dispatchCountToday > 0) {
+        var label = t.dispatchCountToday > 1 ? 'Dispatched x' + t.dispatchCountToday : 'Dispatched';
+        badges += '<span class="badge badge-dispatched" style="margin-left:6px;">' + label + '</span>';
+      }
+      if (t.hasActiveSessionToday) {
+        badges += '<span class="badge badge-progress" style="margin-left:6px;">In progress</span>';
+      }
       return '<div class="tile" onclick="selectTruck(\'' + t.ID + '\')">' +
-        '<div><div class="name">' + escapeHtml(t.Name) + '</div><div class="meta">' + escapeHtml(meta) + '</div></div>' +
+        '<div><div class="name">' + escapeHtml(t.Name) + badges + '</div><div class="meta">' + escapeHtml(meta) + '</div></div>' +
         '<div>&rsaquo;</div></div>';
     }).join('');
   }
 
+  // Some trucks run more than one dispatch a day. Selecting a truck that
+  // still has an in-progress session (or none at all yet today) goes
+  // straight in, same as always - but if every session for it today has
+  // already been dispatched, that has to be an explicit choice rather than
+  // silently reopening (or silently duplicating) that dispatch.
+  var pendingTruckId = null;
+  var pendingLatestDispatchedSessionId = null;
+
   function selectTruck(truckId) {
-    callApi('startTruckSession', [truckId, state.checker.id, state.checker.name]).then(function (result) {
-      state.session = result.session;
-      state.orderChecks = result.orderChecks;
-      enterWorkspace();
+    pendingTruckId = truckId;
+    callApi('getTruckSessionsForTruckToday', [truckId]).then(function (sessions) {
+      var hasActive = sessions.some(function (s) { return s.Status === 'In Progress'; });
+      if (hasActive || sessions.length === 0) {
+        enterViaStartTruckSession(truckId);
+        return;
+      }
+      var latest = sessions[sessions.length - 1];
+      pendingLatestDispatchedSessionId = latest.ID;
+      document.getElementById('dispatch-choice-info').textContent =
+        'Trip ' + latest.tripNumber + ' was dispatched at ' + formatTime(latest.DispatchedAt) +
+        '. You can reopen it to make changes, or start a new trip for this truck today.';
+      document.getElementById('dispatch-choice-modal').classList.add('active');
     }).catch(showFatalError);
+  }
+
+  function enterViaStartTruckSession(truckId) {
+    callApi('startTruckSession', [truckId, state.checker.id, state.checker.name]).then(applySessionResult).catch(showFatalError);
+  }
+
+  function applySessionResult(result) {
+    state.session = result.session;
+    state.orderChecks = result.orderChecks;
+    enterWorkspace();
+  }
+
+  function chooseEditDispatch() {
+    closeDispatchChoiceModal();
+    callApi('getTruckSessionState', [pendingLatestDispatchedSessionId]).then(applySessionResult).catch(showFatalError);
+  }
+
+  function chooseNewDispatch() {
+    closeDispatchChoiceModal();
+    callApi('startNewTruckSession', [pendingTruckId, state.checker.id, state.checker.name]).then(applySessionResult).catch(showFatalError);
+  }
+
+  function closeDispatchChoiceModal() {
+    document.getElementById('dispatch-choice-modal').classList.remove('active');
   }
 
   // ------------------------------------------------------------------
@@ -576,7 +657,7 @@
     renderTrip();
     showScreen('screen-workspace');
     showWsTab('trays');
-    refreshOrders();
+    refreshMyOrders();
     if (!state.session.Driver || !state.session.Route) openTripModal(); // prompt for it right away when loading the truck
   }
 
@@ -629,7 +710,7 @@
     document.getElementById('tabpane-trays').classList.toggle('active', tab === 'trays');
     document.getElementById('tabpane-orders').classList.toggle('active', tab === 'orders');
     showScreen('screen-workspace');
-    if (tab === 'orders') refreshOrders();
+    if (tab === 'orders') refreshMyOrders();
   }
 
   function saveTrayCounts() {
@@ -648,23 +729,73 @@
   }
 
   // ------------------------------------------------------------------
-  // ORDERS SEARCH
+  // ORDERS - this truck's own allocated orders (the main Orders pane)
   // ------------------------------------------------------------------
-  var searchTimer = null;
-  function debouncedSearch() {
-    clearTimeout(searchTimer);
-    searchTimer = setTimeout(refreshOrders, 300);
-  }
-
-  function refreshOrders() {
-    var q = document.getElementById('order-search').value;
-    var listEl = document.getElementById('orders-list');
+  function refreshMyOrders() {
+    var listEl = document.getElementById('my-orders-list');
     listEl.innerHTML = '<div class="empty">Loading...</div>';
-    callApi('searchOrders', [state.session.ID, q]).then(renderOrders).catch(showFatalError);
+    callApi('getOrdersForSession', [state.session.ID]).then(renderMyOrders).catch(showFatalError);
   }
 
-  function renderOrders(orders) {
-    var el = document.getElementById('orders-list');
+  function renderMyOrders(orders) {
+    var el = document.getElementById('my-orders-list');
+    if (orders.length === 0) {
+      el.innerHTML = '<div class="empty">No orders allocated to this truck yet. Tap "+ Add Order" to find and add one.</div>';
+      return;
+    }
+    el.innerHTML = orders.map(function (o) {
+      var badgeClass = o.status === 'Complete' ? 'badge-complete' : (o.status === 'In Progress' ? 'badge-progress' : 'badge-pending');
+      return '<div class="tile" onclick="openOrder(\'' + o.orderId + '\')">' +
+        '<div><div class="name">' + escapeHtml(o.orderNumber) + ' - ' + escapeHtml(o.customer) + '</div>' +
+        '<div class="meta">' + o.itemCount + ' item(s)</div></div>' +
+        '<div><span class="badge ' + badgeClass + '">' + escapeHtml(o.status) + '</span></div></div>';
+    }).join('');
+  }
+
+  function openOrder(orderId) {
+    // Harmless no-op if it's not open - lets a tap from either the main
+    // Orders list or the Add Order search share this same function.
+    closeAddOrderModal();
+    state.currentOrderId = orderId;
+    callApi('getOrderForChecking', [state.session.ID, orderId]).then(function (result) {
+      state.currentOrder = result;
+      renderOrderDetail();
+      showScreen('screen-order');
+    }).catch(showFatalError);
+  }
+
+  // ------------------------------------------------------------------
+  // ADD ORDER - the full searchable list of today's orders, for finding one
+  // to allocate to this truck. Kept separate from the main Orders pane
+  // above so that pane only ever shows what's actually on this truck,
+  // instead of every order in today's Packing & Production data.
+  // ------------------------------------------------------------------
+  var addOrderSearchTimer = null;
+  function debouncedAddOrderSearch() {
+    clearTimeout(addOrderSearchTimer);
+    addOrderSearchTimer = setTimeout(refreshAddOrderSearch, 300);
+  }
+
+  function openAddOrderModal() {
+    document.getElementById('add-order-search').value = '';
+    document.getElementById('add-order-modal').classList.add('active');
+    refreshAddOrderSearch();
+  }
+
+  function closeAddOrderModal() {
+    var modal = document.getElementById('add-order-modal');
+    if (modal) modal.classList.remove('active');
+  }
+
+  function refreshAddOrderSearch() {
+    var q = document.getElementById('add-order-search').value;
+    var listEl = document.getElementById('add-order-list');
+    listEl.innerHTML = '<div class="empty">Loading...</div>';
+    callApi('searchOrders', [state.session.ID, q]).then(renderAddOrderResults).catch(showFatalError);
+  }
+
+  function renderAddOrderResults(orders) {
+    var el = document.getElementById('add-order-list');
     if (orders.length === 0) {
       el.innerHTML = '<div class="empty">No orders found for today.</div>';
       return;
@@ -678,15 +809,6 @@
         '<div class="meta">' + o.itemCount + ' item(s)</div>' + warn + '</div>' +
         '<div><span class="badge ' + badgeClass + '">' + badgeText + '</span></div></div>';
     }).join('');
-  }
-
-  function openOrder(orderId) {
-    state.currentOrderId = orderId;
-    callApi('getOrderForChecking', [state.session.ID, orderId]).then(function (result) {
-      state.currentOrder = result;
-      renderOrderDetail();
-      showScreen('screen-order');
-    }).catch(showFatalError);
   }
 
   function allocateOrderUi() {

@@ -156,6 +156,17 @@
     .row-inline { display: flex; gap: 8px; align-items: center; }
     .row-inline input { margin-bottom: 0; }
     .switch-label { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 400; color: var(--text); }
+    /* A bare input[type=date] otherwise renders at the browser's tiny native
+       size next to a full-size .btn, which is what looked wrong here -
+       giving it the same padding/border/font/height as the other text
+       inputs (and letting it grow to fill the row) lines it up with the
+       Today button instead of looking like an afterthought beside it. */
+    .date-viewing-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 6px; }
+    .date-viewing-row input[type=date] {
+      flex: 1; min-width: 150px; margin-bottom: 0;
+      padding: 10px 12px; font-size: 15px; border: 1px solid var(--border); border-radius: 8px;
+    }
+    .date-viewing-row .btn { padding: 10px 16px; font-size: 15px; }
 
     /* --- Admin dashboard --- */
     .stat-tile { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 14px 18px; min-width: 120px; flex: 1; }
@@ -422,17 +433,17 @@
           <div id="order-search-results" style="margin-top:10px;"></div>
         </div>
         <div class="card">
-          <div class="row-inline" style="align-items:center; margin-bottom:6px;">
+          <div class="date-viewing-row">
             <label style="margin:0;">Viewing</label>
             <input type="date" id="dashboard-date-picker" onchange="loadOverview()">
             <button class="btn btn-secondary" onclick="resetDashboardDateToToday()">Today</button>
           </div>
-          <p class="hint" style="margin-top:0;">Pick a previous date to check that day's trucks and orders - the "today's orders" and overdue sections below always reflect right now, regardless of what's selected here.</p>
+          <p class="hint" style="margin-top:0;">Picking a date here updates everything below - trucks, orders due, and overdue warnings - as of that date.</p>
           <div id="dashboard-summary" style="display:flex; flex-wrap:wrap; gap:12px;"></div>
         </div>
         <div class="card">
-          <h3 style="margin-top:0;">Today's orders - dispatched vs outstanding</h3>
-          <p class="hint">Everything due for delivery today, so you can confirm at the end of the day that it's all accounted for.</p>
+          <h3 style="margin-top:0;" id="fulfillment-title">Today's orders - dispatched vs outstanding</h3>
+          <p class="hint" id="fulfillment-hint">Everything due for delivery today, so you can confirm at the end of the day that it's all accounted for.</p>
           <div id="fulfillment-summary" style="display:flex; flex-wrap:wrap; gap:12px; margin-bottom:14px;"></div>
           <div id="fulfillment-outstanding"></div>
         </div>
@@ -516,7 +527,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-09-07-15';
+  var BUILD_VERSION = 'build-2026-09-07-16';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -1474,6 +1485,17 @@
     return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
   }
 
+  // 'yyyy-MM-dd' -> a short human date ("6 Sep") for section titles when
+  // viewing a day other than today - parsed as separate Y/M/D components
+  // (not passed straight to `new Date()`) so it isn't shifted by the
+  // browser's local timezone.
+  function formatDateForDisplay(dateStr) {
+    var parts = (dateStr || '').split('-').map(Number);
+    if (parts.length !== 3) return dateStr;
+    var d = new Date(parts[0], parts[1] - 1, parts[2]);
+    return d.toLocaleDateString('en-ZA', { day: 'numeric', month: 'short' });
+  }
+
   function resetDashboardDateToToday() {
     document.getElementById('dashboard-date-picker').value = todayDateInputValue();
     loadOverview();
@@ -1485,11 +1507,11 @@
     if (!dateInput.value) dateInput.value = todayStr;
     if (!dateInput.max) dateInput.max = todayStr; // no picking a future date - there's nothing there yet
     callApi('getDashboardForDate', [dateInput.value]).then(renderDashboard).catch(showFatalError);
-    // The order-fulfillment summary and overdue warnings are always about
-    // right now, regardless of which date is selected above - they're an
-    // operational "did today actually go out ok" check, not a report you'd
-    // browse historically like the truck cards below.
-    callApi('getOrderFulfillmentOverview', []).then(renderFulfillmentOverview).catch(showFatalError);
+    // The order-fulfillment summary and overdue warnings now move together
+    // with the rest of the page - pass the same selected date through so
+    // "orders due" and "overdue" are evaluated as of THAT day too, instead
+    // of always meaning right now regardless of what's picked above.
+    callApi('getOrderFulfillmentOverview', [dateInput.value]).then(renderFulfillmentOverview).catch(showFatalError);
   }
 
   // Populated by renderFulfillmentOverview, keyed by orderId, so the "Mark
@@ -1501,22 +1523,36 @@
     fulfillmentOrdersById = {};
     data.today.outstanding.concat(data.overdueWarnings).forEach(function (o) { fulfillmentOrdersById[o.orderId] = o; });
 
+    // This section now tracks whichever date is selected above (see
+    // loadOverview), instead of always meaning "right now" - swap the
+    // wording between "today" and the picked date so it's clear which one
+    // is being shown.
+    var isViewingToday = data.date === todayDateInputValue();
+    var dayLabel = isViewingToday ? 'today' : formatDateForDisplay(data.date);
+    document.getElementById('fulfillment-title').textContent = isViewingToday
+      ? "Today's orders - dispatched vs outstanding"
+      : 'Orders due ' + dayLabel + ' - dispatched vs outstanding';
+    document.getElementById('fulfillment-hint').textContent = isViewingToday
+      ? "Everything due for delivery today, so you can confirm at the end of the day that it's all accounted for."
+      : 'Everything due for delivery on ' + dayLabel + '.';
+
     var t = data.today;
     document.getElementById('fulfillment-summary').innerHTML =
-      statTile(t.total, 'Orders due today') +
+      statTile(t.total, 'Orders due ' + dayLabel) +
       statTile(t.dispatchedCount, 'Dispatched') +
       statTile(t.collectedCount, 'Collected') +
       statTile(t.outstandingCount, 'Outstanding', t.outstandingCount > 0);
 
     var outstandingEl = document.getElementById('fulfillment-outstanding');
     outstandingEl.innerHTML = t.outstanding.length === 0
-      ? '<div class="empty">All of today\'s orders are dispatched or collected.</div>'
+      ? '<div class="empty">All orders due ' + dayLabel + ' are dispatched or collected.</div>'
       : t.outstanding.map(function (o) { return fulfillmentOrderRow(o, false); }).join('');
 
     var overdueEl = document.getElementById('overdue-warnings');
+    var overdueTitle = 'Overdue as of ' + dayLabel + ' - not dispatched or collected (' + data.overdueWarnings.length + ')';
     overdueEl.innerHTML = data.overdueWarnings.length === 0 ? '' :
       '<div class="card dash-truck-card dash-alert">' +
-      '<h3 style="margin-top:0; color:var(--red);">Overdue - not dispatched or collected (' + data.overdueWarnings.length + ')</h3>' +
+      '<h3 style="margin-top:0; color:var(--red);">' + escapeHtml(overdueTitle) + '</h3>' +
       data.overdueWarnings.map(function (o) { return fulfillmentOrderRow(o, true); }).join('') +
       '</div>';
   }

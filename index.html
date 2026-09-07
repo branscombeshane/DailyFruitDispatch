@@ -95,7 +95,7 @@
     .badge-complete { background: #e2f2e4; color: var(--green-dark); }
     .badge-dispatched { background: #dcedc8; color: var(--green-dark); }
 
-    input[type=text], input[type=password], input[type=number] {
+    input[type=text], input[type=password], input[type=number], input[type=tel] {
       width: 100%; padding: 14px; font-size: 16px; border: 1px solid var(--border); border-radius: 10px; margin-bottom: 12px;
     }
     label { font-size: 13px; font-weight: 600; color: var(--grey); display: block; margin-bottom: 6px; }
@@ -328,10 +328,19 @@
     <div class="modal">
       <h3 style="margin-top:0;">Driver(s) & route for this truck today</h3>
       <div class="hint" id="trip-modal-hint" style="display:none; margin-bottom:10px;">Required before you can start checking this truck - enter at least one driver and a route to continue.</div>
-      <label>Driver(s) - up to 3</label>
-      <input type="text" id="driver-name-input-1" placeholder="Driver 1 name" autocomplete="off">
-      <input type="text" id="driver-name-input-2" placeholder="Driver 2 name (optional)" autocomplete="off">
-      <input type="text" id="driver-name-input-3" placeholder="Driver 3 name (optional)" autocomplete="off">
+      <label>Driver(s) - up to 3. A contact number is required for each driver entered.</label>
+      <div style="display:flex; gap:8px;">
+        <input type="text" id="driver-name-input-1" placeholder="Driver 1 name" autocomplete="off" style="flex:1; margin-bottom:8px;">
+        <input type="tel" id="driver-phone-input-1" placeholder="Contact number" autocomplete="off" style="flex:1; margin-bottom:8px;">
+      </div>
+      <div style="display:flex; gap:8px;">
+        <input type="text" id="driver-name-input-2" placeholder="Driver 2 name (optional)" autocomplete="off" style="flex:1; margin-bottom:8px;">
+        <input type="tel" id="driver-phone-input-2" placeholder="Contact number" autocomplete="off" style="flex:1; margin-bottom:8px;">
+      </div>
+      <div style="display:flex; gap:8px;">
+        <input type="text" id="driver-name-input-3" placeholder="Driver 3 name (optional)" autocomplete="off" style="flex:1; margin-bottom:12px;">
+        <input type="tel" id="driver-phone-input-3" placeholder="Contact number" autocomplete="off" style="flex:1; margin-bottom:12px;">
+      </div>
       <input type="text" id="route-name-input" placeholder="Route / area" autocomplete="off">
       <div class="error" id="trip-modal-error"></div>
       <button class="btn btn-primary btn-block" style="margin-bottom:10px;" onclick="saveTrip()">Save</button>
@@ -507,7 +516,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-09-06-14';
+  var BUILD_VERSION = 'build-2026-09-07-15';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -665,7 +674,7 @@
         dispatchStatus = 'Truck record not found';
       }
       var truckText = escapeHtml(r.truckName || 'Unknown') + (r.route ? ' (' + escapeHtml(r.route) + ')' : '');
-      var driverText = r.driver ? escapeHtml(r.driver) : 'Not recorded yet';
+      var driverText = r.driver ? escapeHtml(formatDriversWithContacts(r.driver, r.driverContacts)) : 'Not recorded yet';
       // Label small and muted, value bigger and dark - the driver/truck/
       // status are exactly what a customer care call needs to read out
       // loud, so they need to stand out at least as much as the order
@@ -760,7 +769,7 @@
       if (t.trips && t.trips.length > 0) {
         tripsHtml = t.trips.map(function (trip, idx) {
           var tripLabel = t.trips.length > 1 ? 'Trip ' + trip.tripNumber + ' - ' + escapeHtml(trip.status) : escapeHtml(trip.status);
-          var driverText = trip.driver ? 'Driver: ' + escapeHtml(trip.driver) : 'Driver not set';
+          var driverText = trip.driver ? 'Driver: ' + escapeHtml(formatDriversWithContacts(trip.driver, trip.driverContacts)) : 'Driver not set';
           var routeText = trip.route ? ' &middot; Route: ' + escapeHtml(trip.route) : '';
           var ordersHtml = trip.orders.length > 0
             ? trip.orders.map(function (o) {
@@ -849,18 +858,35 @@
     if (!state.session.Driver || !state.session.Route) openTripModal(); // prompt for it right away when loading the truck
   }
 
+  // Driver and DriverContacts are two parallel comma-separated fields
+  // ("Sipho, Thabo" / "082 123 4567, 083 234 5678") - same index in each
+  // is the same driver. This combines them into "Sipho (082 123 4567),
+  // Thabo (083 234 5678)" for display anywhere a driver name shows up. A
+  // driver saved before contact numbers existed just shows the bare name.
+  function formatDriversWithContacts(driverStr, contactsStr) {
+    var names = (driverStr || '').split(',').map(function (n) { return n.trim(); }).filter(Boolean);
+    if (names.length === 0) return '';
+    var contacts = (contactsStr || '').split(',').map(function (n) { return n.trim(); });
+    return names.map(function (name, i) {
+      return contacts[i] ? name + ' (' + contacts[i] + ')' : name;
+    }).join(', ');
+  }
+
   function renderTrip() {
-    document.getElementById('ws-driver-name').textContent = state.session.Driver || 'Not set - tap to add';
+    document.getElementById('ws-driver-name').textContent = formatDriversWithContacts(state.session.Driver, state.session.DriverContacts) || 'Not set - tap to add';
     document.getElementById('ws-route-name').textContent = state.session.Route || 'Not set - tap to add';
   }
 
   function openTripModal() {
-    // Driver is stored as a single comma-separated field ("Sipho, Thabo") to
-    // keep the sheet schema unchanged - split it back out across the 3 inputs.
-    var existingDrivers = (state.session.Driver || '').split(',').map(function (n) { return n.trim(); }).filter(Boolean);
-    document.getElementById('driver-name-input-1').value = existingDrivers[0] || '';
-    document.getElementById('driver-name-input-2').value = existingDrivers[1] || '';
-    document.getElementById('driver-name-input-3').value = existingDrivers[2] || '';
+    // Driver/DriverContacts are stored as parallel comma-separated fields
+    // ("Sipho, Thabo" / "082 123 4567, 083 234 5678") to keep the sheet
+    // schema unchanged - split them back out across the 3 name/phone pairs.
+    var existingDrivers = (state.session.Driver || '').split(',').map(function (n) { return n.trim(); });
+    var existingContacts = (state.session.DriverContacts || '').split(',').map(function (n) { return n.trim(); });
+    for (var i = 1; i <= 3; i++) {
+      document.getElementById('driver-name-input-' + i).value = existingDrivers[i - 1] || '';
+      document.getElementById('driver-phone-input-' + i).value = existingContacts[i - 1] || '';
+    }
     document.getElementById('route-name-input').value = state.session.Route || '';
     document.getElementById('trip-modal-error').textContent = '';
 
@@ -882,23 +908,29 @@
   }
 
   function saveTrip() {
-    var drivers = [
-      document.getElementById('driver-name-input-1').value.trim(),
-      document.getElementById('driver-name-input-2').value.trim(),
-      document.getElementById('driver-name-input-3').value.trim()
-    ].filter(Boolean);
+    var drivers = [];
+    var contacts = [];
+    for (var i = 1; i <= 3; i++) {
+      var name = document.getElementById('driver-name-input-' + i).value.trim();
+      var phone = document.getElementById('driver-phone-input-' + i).value.trim();
+      if (!name) continue;
+      drivers.push(name);
+      contacts.push(phone);
+    }
     var route = document.getElementById('route-name-input').value.trim();
 
     if (drivers.length === 0 || !route) {
       document.getElementById('trip-modal-error').textContent = 'Enter at least one driver name and a route before continuing.';
       return;
     }
+    if (contacts.some(function (c) { return !c; })) {
+      document.getElementById('trip-modal-error').textContent = 'Enter a contact number for every driver.';
+      return;
+    }
 
-    Promise.all([
-      callApi('updateSessionDriver', [state.session.ID, drivers]),
-      callApi('updateSessionRoute', [state.session.ID, route])
-    ]).then(function () {
+    callApi('updateSessionTrip', [state.session.ID, drivers, contacts, route]).then(function () {
       state.session.Driver = drivers.join(', ');
+      state.session.DriverContacts = contacts.join(', ');
       state.session.Route = route;
       renderTrip();
       closeTripModal();
@@ -1128,15 +1160,40 @@
     showWsTab('orders');
   }
 
+  // One save-chain per item ID, so if a checker taps an item again (e.g.
+  // Packed, then Undo) before the first tap's save has come back, the two
+  // saves still reach the server in the order they were tapped instead of
+  // as two overlapping requests that could land out of order and leave
+  // the sheet on the wrong final status.
+  var itemSaveChains = {};
+
   function markItem(itemId, status, reasonId) {
-    callApi('setItemStatus', [itemId, status, reasonId || '', state.checker.name]).then(function () {
-      // Refresh the item locally
-      var item = state.currentOrder.items.filter(function (i) { return i.ID === itemId; })[0];
-      item.Status = status;
-      if (status !== 'No Stock') { item.NoStockReason = ''; item.CheckedBy = state.checker.name; }
-      else { item.CheckedBy = state.checker.name; }
-      renderOrderDetail();
-    }).catch(showFatalError);
+    var item = state.currentOrder.items.filter(function (i) { return i.ID === itemId; })[0];
+
+    // Update the screen right away and let the save happen in the
+    // background (below) - a tap used to wait on the full round trip
+    // (network + the server's lock + its sheet reads/writes) before
+    // anything visibly changed, which is what made "Packed" feel slow.
+    // Every tap still saves immediately; only WHEN the screen updates has
+    // changed, not when the data is written.
+    item.Status = status;
+    if (status !== 'No Stock') { item.NoStockReason = ''; item.CheckedBy = state.checker.name; }
+    else { item.CheckedBy = state.checker.name; }
+    renderOrderDetail();
+
+    var previousSave = itemSaveChains[itemId] || Promise.resolve();
+    itemSaveChains[itemId] = previousSave.then(function () {
+      return callApi('setItemStatus', [itemId, status, reasonId || '', state.checker.name]);
+    }).catch(function (err) {
+      // The save failed - re-fetch what's actually on record rather than
+      // guessing what to roll back to, since more taps on this order may
+      // have queued up (and even saved fine) since this one was made.
+      showFatalError(err);
+      return callApi('getOrderForChecking', [state.session.ID, state.currentOrderId]).then(function (result) {
+        state.currentOrder = result;
+        renderOrderDetail();
+      });
+    });
   }
 
   function openReasonModal(itemId) {
@@ -1511,7 +1568,7 @@
       var durationText = t.durationMinutes !== null ? (t.durationMinutes + ' min from load to dispatch') : '';
       var metaParts = [
         'Checker: ' + (t.checkerName || '-'),
-        'Driver: ' + (t.driver || 'not set'),
+        'Driver: ' + (t.driver ? formatDriversWithContacts(t.driver, t.driverContacts) : 'not set'),
         'Route: ' + (t.route || 'not set'),
         'Trays: ' + (traysNotEntered(t) ? 'not entered' : 'S:' + (t.traySmall || 0) + ' M:' + (t.trayMedium || 0) + ' L:' + (t.trayLarge || 0) + ' O:' + (t.trayOther || 0)),
         'Started ' + formatTime(t.startedAt)

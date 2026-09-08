@@ -77,6 +77,38 @@
     .btn-block { width: 100%; }
     .btn:disabled { opacity: 0.5; }
 
+    /* --- Loading feedback ---
+       Two layers, both driven off the same in-flight API call counter (see
+       apiCallStarted/apiCallFinished in the script below):
+       1. Whichever .btn was actually tapped gets a small spinner added to
+          its own label and is disabled until its request settles.
+       2. A thin bar sweeps across the very top of the screen for the whole
+          time ANY call is in flight, as a catch-all for actions that don't
+          go through a .btn (search-as-you-type, an inline edit saving) and
+          for cases where the tapped button gets hidden by a screen change
+          before its own request finishes. */
+    @keyframes btn-spinner-spin { to { transform: rotate(360deg); } }
+    .btn-spinner {
+      display: inline-block; width: 14px; height: 14px; margin-right: 8px;
+      border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%;
+      animation: btn-spinner-spin 0.6s linear infinite; flex-shrink: 0;
+    }
+    #global-loading-bar {
+      position: fixed; top: 0; left: 0; right: 0; height: 3px; z-index: 9999;
+      pointer-events: none; overflow: hidden;
+    }
+    #global-loading-bar::before {
+      content: ''; display: block; height: 100%; width: 35%;
+      background: var(--green); opacity: 0; transform: translateX(-100%);
+    }
+    #global-loading-bar.active::before {
+      opacity: 1; animation: global-loading-sweep 1s ease-in-out infinite;
+    }
+    @keyframes global-loading-sweep {
+      0% { transform: translateX(-100%); }
+      100% { transform: translateX(385%); }
+    }
+
     /* --- Cards / tiles --- */
     .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin-bottom: 12px; }
     .tile {
@@ -184,6 +216,14 @@
   </style>
 </head>
 <body>
+
+  <!-- Global "something is loading" indicator - a thin sweeping bar across
+       the very top of the screen, shown for the whole time ANY API call is
+       in flight (see apiCallStarted/apiCallFinished below), regardless of
+       what triggered it - a button tap, a search-as-you-type, an inline
+       edit saving. This is the catch-all; the specific button that was
+       tapped (if any) ALSO gets its own spinner - see setButtonLoading. -->
+  <div id="global-loading-bar" aria-hidden="true"></div>
 
   <!-- Persistent error banner - shown for any failed action, in addition to
        (not instead of) the alert(), in case alert() is ever suppressed by
@@ -527,7 +567,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-09-07-16';
+  var BUILD_VERSION = 'build-2026-09-08-17';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -545,6 +585,66 @@
         // the app itself still works exactly as before.
       });
     });
+  }
+
+  // ------------------------------------------------------------------
+  // LOADING FEEDBACK - a spinner on whichever button was tapped, plus a
+  // global top-of-screen bar, both driven by this one in-flight counter.
+  // Every user action in this app goes through callApi() (see below), so
+  // hooking in there covers every screen automatically instead of having
+  // to wire up a spinner by hand on each of the dozens of buttons.
+  // ------------------------------------------------------------------
+  var pendingApiCalls = 0;
+  var lastClickedBtn = null;
+  var loadingBtns = []; // .btn elements this mechanism has put into a loading state, so they can all be restored together
+
+  // Capture phase, so this always runs before the button's own onclick -
+  // that way lastClickedBtn is set before that handler has a chance to
+  // change the button's content (e.g. openOrder() replacing the whole
+  // order list) or even remove it from the page.
+  document.addEventListener('click', function (e) {
+    var btn = e.target.closest('.btn');
+    if (btn && !btn.disabled) lastClickedBtn = btn;
+  }, true);
+
+  function setButtonLoading(btn, loading) {
+    if (loading) {
+      if (btn.dataset.loading === '1') return; // already showing a spinner for an earlier, still-pending call
+      btn.dataset.loading = '1';
+      btn.dataset.originalHtml = btn.innerHTML;
+      btn.disabled = true;
+      btn.innerHTML = '<span class="btn-spinner"></span>' + btn.innerHTML;
+    } else {
+      if (btn.dataset.loading !== '1') return;
+      btn.disabled = false;
+      btn.innerHTML = btn.dataset.originalHtml;
+      delete btn.dataset.loading;
+      delete btn.dataset.originalHtml;
+    }
+  }
+
+  function apiCallStarted() {
+    pendingApiCalls++;
+    if (pendingApiCalls === 1) {
+      document.getElementById('global-loading-bar').classList.add('active');
+      // lastClickedBtn may already be gone from the page by now (e.g. a
+      // handler like markItem() re-renders its whole row before the save
+      // even starts) - closest()/dataset access on a detached element is
+      // harmless, it just won't be visible, so no need to guard for that.
+      if (lastClickedBtn) {
+        setButtonLoading(lastClickedBtn, true);
+        loadingBtns.push(lastClickedBtn);
+      }
+    }
+  }
+
+  function apiCallFinished() {
+    pendingApiCalls = Math.max(0, pendingApiCalls - 1);
+    if (pendingApiCalls === 0) {
+      document.getElementById('global-loading-bar').classList.remove('active');
+      loadingBtns.forEach(function (btn) { setButtonLoading(btn, false); });
+      loadingBtns = [];
+    }
   }
 
   function callApi(action, params) {
@@ -566,6 +666,7 @@
     var controller = (typeof AbortController !== 'undefined') ? new AbortController() : null;
     var timeoutId = controller ? setTimeout(function () { controller.abort(); }, 20000) : null;
 
+    apiCallStarted();
     return fetch(url, { cache: 'no-store', signal: controller ? controller.signal : undefined })
       .then(function (r) {
         if (timeoutId) clearTimeout(timeoutId);
@@ -579,7 +680,8 @@
         if (timeoutId) clearTimeout(timeoutId);
         if (err && err.name === 'AbortError') throw new Error('Request timed out after 20s (action: ' + action + '). Check your connection and try again.');
         throw err;
-      });
+      })
+      .finally(function () { apiCallFinished(); });
   }
 
   // ------------------------------------------------------------------

@@ -107,20 +107,38 @@
        native disabled state of their own, since pointer-events is what
        actually blocks a repeat click/tap on those. */
     .tap-blocked { pointer-events: none; opacity: 0.55; }
+    /* Amber, not green - the topbar behind this is dark green
+       (--green-dark), so a green bar on top of it was nearly invisible.
+       Amber reads clearly against both the dark green header and the light
+       body background elsewhere on the page. Two segments sweeping at
+       staggered offsets (rather than one bar translating end to end) is the
+       classic "indeterminate progress" look (YouTube/Material's loading
+       bar) - it's a much more obvious "something is happening" cue than a
+       single bar quietly gliding across once a second. */
     #global-loading-bar {
-      position: fixed; top: 0; left: 0; right: 0; height: 3px; z-index: 9999;
-      pointer-events: none; overflow: hidden;
+      position: fixed; top: 0; left: 0; right: 0; height: 4px; z-index: 9999;
+      pointer-events: none; overflow: hidden; background: transparent;
     }
-    #global-loading-bar::before {
-      content: ''; display: block; height: 100%; width: 35%;
-      background: var(--green); opacity: 0; transform: translateX(-100%);
+    #global-loading-bar::before, #global-loading-bar::after {
+      content: ''; position: absolute; top: 0; height: 100%; left: -35%; width: 35%;
+      background: var(--amber); opacity: 0; box-shadow: 0 0 6px rgba(230, 164, 0, 0.9);
     }
     #global-loading-bar.active::before {
-      opacity: 1; animation: global-loading-sweep 1s ease-in-out infinite;
+      opacity: 1; animation: global-loading-sweep-1 1.4s cubic-bezier(0.4, 0, 0.2, 1) infinite;
     }
-    @keyframes global-loading-sweep {
-      0% { transform: translateX(-100%); }
-      100% { transform: translateX(385%); }
+    #global-loading-bar.active::after {
+      opacity: 1; animation: global-loading-sweep-2 1.4s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+      animation-delay: 0.7s;
+    }
+    @keyframes global-loading-sweep-1 {
+      0% { left: -35%; width: 35%; }
+      60% { left: 100%; width: 60%; }
+      100% { left: 100%; width: 60%; }
+    }
+    @keyframes global-loading-sweep-2 {
+      0% { left: -50%; width: 25%; }
+      60% { left: 110%; width: 40%; }
+      100% { left: 110%; width: 40%; }
     }
 
     /* --- Cards / tiles --- */
@@ -147,6 +165,12 @@
     label { font-size: 13px; font-weight: 600; color: var(--grey); display: block; margin-bottom: 6px; }
     .error { color: var(--red); font-size: 14px; margin: 8px 0; min-height: 18px; }
     .hint { color: var(--grey); font-size: 13px; }
+
+    #nod-modal select, #nod-modal textarea {
+      width: 100%; padding: 12px; font-size: 15px; border: 1px solid var(--border); border-radius: 10px;
+      font-family: inherit; box-sizing: border-box; background: #fff;
+    }
+    #nod-modal textarea { resize: vertical; }
 
     /* --- Tabs --- */
     .tabs { display: flex; gap: 8px; margin-bottom: 16px; }
@@ -197,6 +221,12 @@
     .admin-nav { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
     .admin-nav button { padding: 10px 14px; border-radius: 8px; border: 1px solid var(--border); background: #fff; font-size: 14px; }
     .admin-nav button.active { background: var(--green-dark); color: #fff; border-color: var(--green-dark); }
+    /* The Settings sub-nav sits directly under the Dashboard/Settings
+       top-level row, slightly indented and with smaller buttons, so it
+       visually reads as "inside" Settings rather than a second equal row
+       of top-level tabs. */
+    #admin-subnav { margin-top: -8px; padding-left: 4px; border-left: 3px solid var(--border); }
+    #admin-subnav button { padding: 8px 12px; font-size: 13px; }
     table { width: 100%; border-collapse: collapse; font-size: 14px; }
     th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--border); }
     .row-inline { display: flex; gap: 8px; align-items: center; }
@@ -333,6 +363,7 @@
         <div class="sub" id="board-user-name"></div>
       </div>
       <div class="actions">
+        <button onclick="openNonOrderDispatchModal()">Non-Order Dispatch</button>
         <button onclick="backToAdminArea()">Dashboard</button>
         <button onclick="logout()">Log out</button>
       </div>
@@ -480,7 +511,7 @@
   <div class="modal-backdrop" id="trip-modal">
     <div class="modal">
       <h3 style="margin-top:0;">Driver(s) & route for this truck today</h3>
-      <div class="hint" id="trip-modal-hint" style="display:none; margin-bottom:10px;">Required before you can start checking this truck - enter at least one driver and a route to continue.</div>
+      <div class="hint" id="trip-modal-hint" style="display:none; margin-bottom:10px;">Enter at least one driver and a route before checking this truck, or tap "Skip for now" below to come back to it later - it'll keep asking until it's set.</div>
       <label>Driver(s) - pick up to 3 from the list. Picking a driver fills in their contact number automatically, but you can still edit it.</label>
       <div style="display:flex; gap:8px;">
         <select id="driver-select-1" style="flex:1; margin-bottom:8px;" onchange="onDriverSelectChange(1)"></select>
@@ -551,6 +582,32 @@
     </div>
   </div>
 
+  <!-- Non-Order Dispatch: log a truck being sent out for something other
+       than today's order deliveries - an errand, a supplier collection,
+       etc. Dispatch Manager/Admin only, triggered from the Trucks board
+       topbar. Deliberately NOT a TruckSessions record and doesn't touch the
+       usual dispatch checklist at all - just a simple dated log entry (see
+       createNonOrderDispatch/listNonOrderDispatchesForDate in Code.gs). -->
+  <div class="modal-backdrop" id="nod-modal">
+    <div class="modal">
+      <h3 style="margin-top:0;">Non-Order Dispatch</h3>
+      <div class="hint" style="margin-bottom:12px;">For a truck sent out for something other than today's deliveries - an errand, a supplier collection, and so on.</div>
+      <label>Truck</label>
+      <select id="nod-truck-select" style="width:100%; box-sizing:border-box; margin-bottom:12px;"></select>
+      <label>Driver - pick from the list, or type a name below</label>
+      <div style="display:flex; gap:8px;">
+        <select id="nod-driver-select" style="flex:1; margin-bottom:8px;" onchange="onNodDriverSelectChange()"></select>
+        <input type="tel" id="nod-driver-phone-input" placeholder="Contact number" autocomplete="off" style="flex:1; margin-bottom:8px;">
+      </div>
+      <input type="text" id="nod-driver-manual-name-input" placeholder="Or type a driver name not on the list" autocomplete="off" style="margin-bottom:12px;">
+      <label>What's the truck being sent for?</label>
+      <textarea id="nod-details-input" rows="3" placeholder="e.g. Collecting crates from ABC Farms"></textarea>
+      <div class="error" id="nod-modal-error"></div>
+      <button class="btn btn-primary btn-block" style="margin-bottom:10px;" onclick="saveNonOrderDispatch()">Save</button>
+      <button class="btn btn-secondary btn-block" onclick="closeNonOrderDispatchModal()">Cancel</button>
+    </div>
+  </div>
+
   <!-- ============================= ADMIN ============================= -->
   <div id="screen-admin" class="screen">
     <div class="topbar">
@@ -561,8 +618,11 @@
       </div>
     </div>
     <div class="content">
-      <div class="admin-nav">
-        <button class="active" data-pane="overview" onclick="showAdminPane('overview', this)">Dashboard</button>
+      <div class="admin-nav admin-nav-top">
+        <button class="active" data-section="overview" onclick="showAdminSection('overview', this)">Dashboard</button>
+        <button data-section="settings" onclick="showAdminSection('settings', this)">Settings</button>
+      </div>
+      <div class="admin-nav" id="admin-subnav" style="display:none;">
         <button data-pane="users" onclick="showAdminPane('users', this)">Users</button>
         <button data-pane="trucks" onclick="showAdminPane('trucks', this)">Trucks</button>
         <button data-pane="drivers" onclick="showAdminPane('drivers', this)">Drivers</button>
@@ -595,6 +655,7 @@
           <div id="fulfillment-summary" style="display:flex; flex-wrap:wrap; gap:12px; margin-bottom:14px;"></div>
           <div id="fulfillment-outstanding"></div>
         </div>
+        <div id="non-order-dispatches"></div>
         <div id="overdue-warnings"></div>
         <div id="dashboard-trucks"></div>
       </div>
@@ -688,7 +749,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-09-09-22';
+  var BUILD_VERSION = 'build-2026-09-09-23';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -1143,6 +1204,11 @@
           ? '<span class="badge badge-dispatched" style="margin-left:6px;">Dispatched</span>'
           : (t.hasOpenTrip ? '<span class="badge badge-progress" style="margin-left:6px;">In progress</span>' : '');
         var meta = [t.registration, t.type].filter(Boolean).join(' - ');
+        // Who dispatched it and when - if it's dispatched more than once
+        // today, this is the MOST RECENT dispatch (see getTruckAssignmentBoard).
+        var dispatchDetail = (t.allDispatchedToday && t.dispatchedAt)
+          ? '<div class="meta">Dispatched ' + formatTime(t.dispatchedAt) + (t.dispatchedBy ? ' by ' + escapeHtml(t.dispatchedBy) : '') + '</div>'
+          : '';
         var ordersHtml = t.orders.length > 0
           ? t.orders.map(renderBoardOrderChip).join('')
           : '<div class="hint" style="padding:8px 4px; font-style:italic;">Drop an order here</div>';
@@ -1150,6 +1216,7 @@
           '<div class="board-truck-header" onclick="selectTruck(\'' + t.truckId + '\')">' +
             '<div class="name">' + escapeHtml(t.name) + statusBadge + '</div>' +
             (meta ? '<div class="meta">' + escapeHtml(meta) + '</div>' : '') +
+            dispatchDetail +
           '</div>' +
           '<div class="board-truck-orders">' + ordersHtml + '</div>' +
         '</div>';
@@ -1531,14 +1598,21 @@
       document.getElementById('route-name-input').value = state.session.Route || '';
       document.getElementById('trip-modal-error').textContent = '';
 
-      // Driver and route are mandatory before a checker can do anything else
-      // with this truck. If neither is on file yet, this is that mandatory
-      // first prompt - no way to back out without saving valid values, so
-      // Cancel is hidden. Once both are set, reopening this (via the
-      // Driver/Route tiles) is just an edit of already-valid data, so Cancel
-      // is offered again - saveTrip() below still won't accept blanking them.
+      // Driver and route aren't a hard requirement enforced anywhere else in
+      // the app (a truck can still dispatch without them - it just gets
+      // flagged afterward as "dispatched with warnings" on the Dashboard),
+      // so this modal must never be the one place that traps a checker with
+      // no way out. The button is always shown; when neither driver nor
+      // route is on file yet (this is that first prompt, right after
+      // opening the truck), it's labeled "Skip for now" instead of "Cancel"
+      // since there's nothing valid yet to cancel back to - closing it just
+      // leaves the workspace showing "Not set" on both tiles, and the
+      // Driver/Route tiles (or Switch truck) are always reachable once it's
+      // closed. Once both are set, reopening this (via the Driver/Route
+      // tiles) is just an edit of already-valid data - saveTrip() below
+      // still won't accept blanking them out again.
       var mandatory = !state.session.Driver || !state.session.Route;
-      document.getElementById('trip-modal-cancel-btn').style.display = mandatory ? 'none' : '';
+      document.getElementById('trip-modal-cancel-btn').textContent = mandatory ? 'Skip for now' : 'Cancel';
       document.getElementById('trip-modal-hint').style.display = mandatory ? 'block' : 'none';
 
       document.getElementById('trip-modal').classList.add('active');
@@ -1584,6 +1658,75 @@
       renderTrip();
       closeTripModal();
     }).catch(showFatalError);
+  }
+
+  // --- Non-Order Dispatch modal: log a truck being sent out for something
+  // other than today's deliveries. Deliberately simpler than the trip
+  // modal's driver picker (see populateDriverSelects/onDriverSelectChange
+  // above) - just one driver, picked from the list or typed in manually. ---
+  var nodDriversById = {};
+
+  function populateNodTruckSelect() {
+    document.getElementById('nod-truck-select').innerHTML = boardData.trucks.map(function (t) {
+      return '<option value="' + t.truckId + '">' + escapeHtml(t.name) + '</option>';
+    }).join('');
+  }
+
+  function populateNodDriverSelect(drivers) {
+    nodDriversById = {};
+    var optionsHtml = '<option value="">- none -</option>' + drivers.map(function (d) {
+      nodDriversById[d.ID] = d;
+      return '<option value="' + d.ID + '">' + escapeHtml(d.Name) + '</option>';
+    }).join('');
+    document.getElementById('nod-driver-select').innerHTML = optionsHtml;
+  }
+
+  // Same pre-fill-but-still-editable behavior as onDriverSelectChange above.
+  function onNodDriverSelectChange() {
+    var id = document.getElementById('nod-driver-select').value;
+    var driver = nodDriversById[id];
+    document.getElementById('nod-driver-phone-input').value = driver ? (driver.Contact || '') : '';
+  }
+
+  function openNonOrderDispatchModal() {
+    populateNodTruckSelect();
+    document.getElementById('nod-driver-select').value = '';
+    document.getElementById('nod-driver-phone-input').value = '';
+    document.getElementById('nod-driver-manual-name-input').value = '';
+    document.getElementById('nod-details-input').value = '';
+    document.getElementById('nod-modal-error').textContent = '';
+
+    getActiveDriversCached().then(function (drivers) {
+      populateNodDriverSelect(drivers);
+      document.getElementById('nod-modal').classList.add('active');
+    }).catch(showFatalError);
+  }
+
+  function closeNonOrderDispatchModal() {
+    document.getElementById('nod-modal').classList.remove('active');
+  }
+
+  function saveNonOrderDispatch() {
+    var truckId = document.getElementById('nod-truck-select').value;
+    var selectedId = document.getElementById('nod-driver-select').value;
+    var selectedDriver = nodDriversById[selectedId];
+    // Typing a manual name is treated as an override, same as if the
+    // checker picked someone from the list then decided to correct it.
+    var manualName = document.getElementById('nod-driver-manual-name-input').value.trim();
+    var driverName = manualName || (selectedDriver ? selectedDriver.Name : '');
+    var driverContact = document.getElementById('nod-driver-phone-input').value.trim();
+    var details = document.getElementById('nod-details-input').value.trim();
+    var errorEl = document.getElementById('nod-modal-error');
+
+    if (!truckId) { errorEl.textContent = 'Select a truck.'; return; }
+    if (!driverName) { errorEl.textContent = 'Select or enter a driver.'; return; }
+    if (!driverContact) { errorEl.textContent = 'Enter a contact number for the driver.'; return; }
+    if (!details) { errorEl.textContent = 'Enter what the truck is being sent for.'; return; }
+    errorEl.textContent = '';
+
+    callApi('createNonOrderDispatch', [truckId, driverName, driverContact, details, state.checker.id, state.checker.name])
+      .then(function () { closeNonOrderDispatchModal(); })
+      .catch(showFatalError);
   }
 
   function renderTrayUpdated() {
@@ -1972,13 +2115,14 @@
   // There's no separate Admin/Dispatch Manager PIN gate any more - doLogin()
   // calls this directly once authenticateUser reports the signed-in user's
   // role. A Dispatch Manager gets the exact same screen as Admin, just with
-  // every nav tab except Dashboard hidden.
+  // the Settings top-level button (and everything under it) hidden - only
+  // Dashboard is theirs.
   function enterAdminArea(role) {
     state.adminRole = role;
     var restricted = role === 'dispatchManager';
     document.getElementById('admin-area-title').textContent = restricted ? 'Dispatch Manager' : 'Admin';
-    document.querySelectorAll('.admin-nav button').forEach(function (b) {
-      b.style.display = (restricted && b.getAttribute('data-pane') !== 'overview') ? 'none' : '';
+    document.querySelectorAll('.admin-nav-top button').forEach(function (b) {
+      b.style.display = (restricted && b.getAttribute('data-section') !== 'overview') ? 'none' : '';
     });
     // Both Admin and Dispatch Manager now have a truck-checking identity to
     // switch over to (state.checker is set for every login - see doLogin) -
@@ -1989,14 +2133,42 @@
     // even if a previous visit this session left a past date selected.
     document.getElementById('dashboard-date-picker').value = todayDateInputValue();
     showScreen('screen-admin');
-    showAdminPane('overview', document.querySelector('.admin-nav button[data-pane="overview"]'));
+    showAdminSection('overview', document.querySelector('.admin-nav-top button[data-section="overview"]'));
+  }
+
+  // Dashboard and Settings are the two top-level sections; Settings bundles
+  // Users/Trucks/Drivers/No-Stock Reasons/Data Source behind its own
+  // sub-nav (#admin-subnav) instead of listing all 6 as equal top-level
+  // tabs. Opening Settings returns to whichever of its panes was last
+  // visited this session (defaulting to Users the first time), so flipping
+  // back to Dashboard and back to Settings doesn't lose your place.
+  var lastSettingsPane = 'users';
+
+  function showAdminSection(section, btn) {
+    document.querySelectorAll('.admin-nav-top button').forEach(function (b) { b.classList.remove('active'); });
+    if (btn) btn.classList.add('active');
+    var subnav = document.getElementById('admin-subnav');
+    if (section === 'settings') {
+      subnav.style.display = '';
+      showAdminPane(lastSettingsPane, subnav.querySelector('button[data-pane="' + lastSettingsPane + '"]'));
+    } else {
+      subnav.style.display = 'none';
+      showAdminPane('overview', null);
+    }
   }
 
   function showAdminPane(name, btn) {
     document.querySelectorAll('.admin-pane').forEach(function (p) { p.style.display = 'none'; });
     document.getElementById('admin-' + name).style.display = 'block';
-    document.querySelectorAll('.admin-nav button').forEach(function (b) { b.classList.remove('active'); });
-    if (btn) btn.classList.add('active');
+    if (btn) {
+      // Scoped to btn's own nav row (top-level Dashboard/Settings, or the
+      // Settings sub-nav) so switching sub-tabs never clears the top-level
+      // Settings button's active state, and vice versa.
+      var group = btn.closest('.admin-nav');
+      if (group) group.querySelectorAll('button').forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+    }
+    if (name !== 'overview') lastSettingsPane = name;
 
     if (name === 'users') loadUsers();
     if (name === 'trucks') loadTrucks();
@@ -2269,6 +2441,26 @@
     // "orders due" and "overdue" are evaluated as of THAT day too, instead
     // of always meaning right now regardless of what's picked above.
     callApi('getOrderFulfillmentOverview', [dateInput.value]).then(renderFulfillmentOverview).catch(showFatalError);
+    callApi('listNonOrderDispatchesForDate', [dateInput.value]).then(renderNonOrderDispatches).catch(showFatalError);
+  }
+
+  // Non-order dispatches (see openNonOrderDispatchModal above) are simple
+  // dated log entries, not TruckSessions - shown here so Admin/Dispatch
+  // Manager can still see at a glance which trucks were sent out for
+  // something other than today's deliveries, and why.
+  function renderNonOrderDispatches(list) {
+    var el = document.getElementById('non-order-dispatches');
+    if (list.length === 0) { el.innerHTML = ''; return; }
+    el.innerHTML = '<div class="card">' +
+      '<h3 style="margin-top:0;">Non-order dispatches (' + list.length + ')</h3>' +
+      list.map(function (d) {
+        return '<div class="dash-order-row"><div>' +
+          escapeHtml(d.TruckName) + ' - ' + escapeHtml(d.Driver) +
+          ' <span class="hint">(' + formatTime(d.CreatedAt) + (d.CreatedByName ? ', logged by ' + escapeHtml(d.CreatedByName) : '') + ')</span>' +
+          '<div class="hint">' + escapeHtml(d.Details) + '</div>' +
+          '</div></div>';
+      }).join('') +
+      '</div>';
   }
 
   // Populated by renderFulfillmentOverview, keyed by orderId, so the "Mark

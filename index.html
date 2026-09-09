@@ -78,14 +78,22 @@
     .btn:disabled { opacity: 0.5; }
 
     /* --- Loading feedback ---
-       Two layers, both driven off the same in-flight API call counter (see
-       apiCallStarted/apiCallFinished in the script below):
-       1. Whichever .btn was actually tapped gets a small spinner added to
-          its own label and is disabled until its request settles.
+       Two layers, both driven off callApi() (see apiCallStarted/
+       apiCallFinished in the script below):
+       1. Whichever tappable thing was actually tapped - a .btn, an order
+          tile, a truck card header, and a few other one-shot tap targets
+          (see TAP_TARGET_SELECTOR) - gets blocked (dimmed, and unable to
+          receive another click) for as long as ITS OWN triggering call is
+          still in flight, with a small spinner added to a .btn's own label
+          specifically. This is what stops a double-tap from firing the same
+          action twice - each tapped element is tracked independently, so
+          tapping several different things in quick succession (e.g. Packed
+          on a few items in a row) protects each one on its own rather than
+          only the last thing tapped.
        2. A thin bar sweeps across the very top of the screen for the whole
           time ANY call is in flight, as a catch-all for actions that don't
-          go through a .btn (search-as-you-type, an inline edit saving) and
-          for cases where the tapped button gets hidden by a screen change
+          go through a recognized tap target (search-as-you-type) and for
+          cases where the tapped element gets removed by a screen change
           before its own request finishes. */
     @keyframes btn-spinner-spin { to { transform: rotate(360deg); } }
     .btn-spinner {
@@ -93,6 +101,12 @@
       border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%;
       animation: btn-spinner-spin 0.6s linear infinite; flex-shrink: 0;
     }
+    /* Generic "this exact thing was tapped and its request hasn't come back
+       yet" treatment - works for a real <button> (which also gets .disabled,
+       for keyboard/accessibility) and for plain divs like .tile that have no
+       native disabled state of their own, since pointer-events is what
+       actually blocks a repeat click/tap on those. */
+    .tap-blocked { pointer-events: none; opacity: 0.55; }
     #global-loading-bar {
       position: fixed; top: 0; left: 0; right: 0; height: 3px; z-index: 9999;
       pointer-events: none; overflow: hidden;
@@ -258,8 +272,9 @@
        the very top of the screen, shown for the whole time ANY API call is
        in flight (see apiCallStarted/apiCallFinished below), regardless of
        what triggered it - a button tap, a search-as-you-type, an inline
-       edit saving. This is the catch-all; the specific button that was
-       tapped (if any) ALSO gets its own spinner - see setButtonLoading. -->
+       edit saving. This is the catch-all; the specific element that was
+       tapped (if any) ALSO gets its own per-element block/spinner - see
+       setElementBlocked. -->
   <div id="global-loading-bar" aria-hidden="true"></div>
 
   <!-- Persistent error banner - shown for any failed action, in addition to
@@ -466,18 +481,23 @@
     <div class="modal">
       <h3 style="margin-top:0;">Driver(s) & route for this truck today</h3>
       <div class="hint" id="trip-modal-hint" style="display:none; margin-bottom:10px;">Required before you can start checking this truck - enter at least one driver and a route to continue.</div>
-      <label>Driver(s) - up to 3. A contact number is required for each driver entered.</label>
+      <label>Driver(s) - pick up to 3 from the list. Picking a driver fills in their contact number automatically, but you can still edit it.</label>
       <div style="display:flex; gap:8px;">
-        <input type="text" id="driver-name-input-1" placeholder="Driver 1 name" autocomplete="off" style="flex:1; margin-bottom:8px;">
+        <select id="driver-select-1" style="flex:1; margin-bottom:8px;" onchange="onDriverSelectChange(1)"></select>
         <input type="tel" id="driver-phone-input-1" placeholder="Contact number" autocomplete="off" style="flex:1; margin-bottom:8px;">
       </div>
       <div style="display:flex; gap:8px;">
-        <input type="text" id="driver-name-input-2" placeholder="Driver 2 name (optional)" autocomplete="off" style="flex:1; margin-bottom:8px;">
+        <select id="driver-select-2" style="flex:1; margin-bottom:8px;" onchange="onDriverSelectChange(2)"></select>
         <input type="tel" id="driver-phone-input-2" placeholder="Contact number" autocomplete="off" style="flex:1; margin-bottom:8px;">
       </div>
       <div style="display:flex; gap:8px;">
-        <input type="text" id="driver-name-input-3" placeholder="Driver 3 name (optional)" autocomplete="off" style="flex:1; margin-bottom:12px;">
+        <select id="driver-select-3" style="flex:1; margin-bottom:12px;" onchange="onDriverSelectChange(3)"></select>
         <input type="tel" id="driver-phone-input-3" placeholder="Contact number" autocomplete="off" style="flex:1; margin-bottom:12px;">
+      </div>
+      <label>New driver not on the list yet (optional)</label>
+      <div style="display:flex; gap:8px;">
+        <input type="text" id="driver-manual-name-input" placeholder="Driver name" autocomplete="off" style="flex:1; margin-bottom:12px;">
+        <input type="tel" id="driver-manual-phone-input" placeholder="Contact number" autocomplete="off" style="flex:1; margin-bottom:12px;">
       </div>
       <input type="text" id="route-name-input" placeholder="Route / area" autocomplete="off">
       <div class="error" id="trip-modal-error"></div>
@@ -545,6 +565,7 @@
         <button class="active" data-pane="overview" onclick="showAdminPane('overview', this)">Dashboard</button>
         <button data-pane="users" onclick="showAdminPane('users', this)">Users</button>
         <button data-pane="trucks" onclick="showAdminPane('trucks', this)">Trucks</button>
+        <button data-pane="drivers" onclick="showAdminPane('drivers', this)">Drivers</button>
         <button data-pane="reasons" onclick="showAdminPane('reasons', this)">No-Stock Reasons</button>
         <button data-pane="datasource" onclick="showAdminPane('datasource', this)">Data Source</button>
       </div>
@@ -608,6 +629,19 @@
         <div class="card"><p class="hint">Click any field below to edit it - changes save automatically.</p><table id="trucks-table"></table></div>
       </div>
 
+      <div class="admin-pane" id="admin-drivers" style="display:none;">
+        <div class="card">
+          <h3 style="margin-top:0;">Add driver</h3>
+          <p class="hint">Drivers added here show up as dropdown choices when a checker sets up a truck's trip - saves re-typing a name and number every time the same driver goes out.</p>
+          <div class="row-inline">
+            <input type="text" id="new-driver-name" placeholder="Name">
+            <input type="tel" id="new-driver-contact" placeholder="Contact number">
+            <button class="btn btn-primary" onclick="addDriverUi()">Add</button>
+          </div>
+        </div>
+        <div class="card"><p class="hint">Click any field below to edit it - changes save automatically.</p><table id="drivers-table"></table></div>
+      </div>
+
       <div class="admin-pane" id="admin-reasons" style="display:none;">
         <div class="card">
           <h3 style="margin-top:0;">Add reason</h3>
@@ -654,7 +688,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-09-09-21';
+  var BUILD_VERSION = 'build-2026-09-09-22';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -675,62 +709,93 @@
   }
 
   // ------------------------------------------------------------------
-  // LOADING FEEDBACK - a spinner on whichever button was tapped, plus a
-  // global top-of-screen bar, both driven by this one in-flight counter.
-  // Every user action in this app goes through callApi() (see below), so
-  // hooking in there covers every screen automatically instead of having
-  // to wire up a spinner by hand on each of the dozens of buttons.
+  // LOADING FEEDBACK - blocks whichever tappable thing was actually tapped
+  // (a .btn, an order tile, a truck card header, an admin nav tab, ...) for
+  // as long as ITS OWN triggering call is in flight, plus a global
+  // top-of-screen bar for the whole time ANY call is in flight. Every user
+  // action in this app goes through callApi() (see below), so hooking in
+  // there covers every screen automatically instead of having to wire up a
+  // spinner/disable by hand on each of the dozens of tappable things.
+  //
+  // This is deliberately PER-ELEMENT, not just "whatever was tapped most
+  // recently" - tapping several different items' Packed buttons in quick
+  // succession blocks each one independently for its own save, rather than
+  // only protecting the last thing tapped while leaving the earlier ones
+  // (whose saves are still in flight) fully clickable. That's what actually
+  // stops a double-tap from firing the same action twice, and it also cuts
+  // down on the kind of rapid-fire concurrent-request pileup that can queue
+  // up behind Apps Script's single script-wide lock and time a request out -
+  // a tap that visibly did nothing invites another, more impatient tap.
   // ------------------------------------------------------------------
   var pendingApiCalls = 0;
-  var lastClickedBtn = null;
-  var loadingBtns = []; // .btn elements this mechanism has put into a loading state, so they can all be restored together
+  var currentTapTarget = null; // the tappable element behind the most recent click, kept until the next one
+  var tapTargetPendingCounts = new Map(); // element -> how many in-flight calls are currently attributed to it
 
-  // Capture phase, so this always runs before the button's own onclick -
-  // that way lastClickedBtn is set before that handler has a chance to
-  // change the button's content (e.g. openOrder() replacing the whole
-  // order list) or even remove it from the page.
+  // Elements that trigger a one-shot action via onclick and should be
+  // blocked against a repeat tap while that action's call(s) are in flight.
+  // .btn covers every real <button> styled as a primary action; the rest are
+  // the plain-div/bare-button tap targets used elsewhere for the same kind
+  // of one-shot action but without that class.
+  var TAP_TARGET_SELECTOR = '.btn, .tile, .board-truck-header, .reason-option, .admin-nav button, .tab-btn';
+
+  // Capture phase, so this always runs before the target's own onclick -
+  // that way currentTapTarget is set before that handler has a chance to
+  // change the target's content (e.g. openOrder() replacing the whole
+  // order list) or even remove it from the page. Checking tapBlocked here
+  // is mostly redundant with pointer-events:none already stopping the
+  // browser from dispatching the click at all once an element is blocked,
+  // but costs nothing to also check directly.
   document.addEventListener('click', function (e) {
-    var btn = e.target.closest('.btn');
-    if (btn && !btn.disabled) lastClickedBtn = btn;
+    var el = e.target.closest(TAP_TARGET_SELECTOR);
+    if (el && el.dataset.tapBlocked !== '1') currentTapTarget = el;
   }, true);
 
-  function setButtonLoading(btn, loading) {
-    if (loading) {
-      if (btn.dataset.loading === '1') return; // already showing a spinner for an earlier, still-pending call
-      btn.dataset.loading = '1';
-      btn.dataset.originalHtml = btn.innerHTML;
-      btn.disabled = true;
-      btn.innerHTML = '<span class="btn-spinner"></span>' + btn.innerHTML;
+  function setElementBlocked(el, blocked) {
+    if (blocked) {
+      if (el.dataset.tapBlocked === '1') return; // already blocked by an earlier, still-pending call
+      el.dataset.tapBlocked = '1';
+      el.classList.add('tap-blocked');
+      if ('disabled' in el) el.disabled = true; // real form controls also get native disabled, for keyboard/accessibility
+      if (el.classList.contains('btn')) {
+        el.dataset.originalHtml = el.innerHTML;
+        el.innerHTML = '<span class="btn-spinner"></span>' + el.innerHTML;
+      }
     } else {
-      if (btn.dataset.loading !== '1') return;
-      btn.disabled = false;
-      btn.innerHTML = btn.dataset.originalHtml;
-      delete btn.dataset.loading;
-      delete btn.dataset.originalHtml;
-    }
-  }
-
-  function apiCallStarted() {
-    pendingApiCalls++;
-    if (pendingApiCalls === 1) {
-      document.getElementById('global-loading-bar').classList.add('active');
-      // lastClickedBtn may already be gone from the page by now (e.g. a
-      // handler like markItem() re-renders its whole row before the save
-      // even starts) - closest()/dataset access on a detached element is
-      // harmless, it just won't be visible, so no need to guard for that.
-      if (lastClickedBtn) {
-        setButtonLoading(lastClickedBtn, true);
-        loadingBtns.push(lastClickedBtn);
+      if (el.dataset.tapBlocked !== '1') return;
+      delete el.dataset.tapBlocked;
+      el.classList.remove('tap-blocked');
+      if ('disabled' in el) el.disabled = false;
+      if (el.dataset.originalHtml !== undefined) {
+        el.innerHTML = el.dataset.originalHtml;
+        delete el.dataset.originalHtml;
       }
     }
   }
 
-  function apiCallFinished() {
+  function apiCallStarted(tapEl) {
+    pendingApiCalls++;
+    if (pendingApiCalls === 1) document.getElementById('global-loading-bar').classList.add('active');
+    // tapEl may already be gone from the page by now (e.g. a handler like
+    // markItem() re-renders its whole row before the save even starts) -
+    // classList/dataset access on a detached element is harmless, it just
+    // won't be visible, so no need to guard for that.
+    if (tapEl) {
+      tapTargetPendingCounts.set(tapEl, (tapTargetPendingCounts.get(tapEl) || 0) + 1);
+      setElementBlocked(tapEl, true);
+    }
+  }
+
+  function apiCallFinished(tapEl) {
     pendingApiCalls = Math.max(0, pendingApiCalls - 1);
-    if (pendingApiCalls === 0) {
-      document.getElementById('global-loading-bar').classList.remove('active');
-      loadingBtns.forEach(function (btn) { setButtonLoading(btn, false); });
-      loadingBtns = [];
+    if (pendingApiCalls === 0) document.getElementById('global-loading-bar').classList.remove('active');
+    if (tapEl) {
+      var remaining = (tapTargetPendingCounts.get(tapEl) || 1) - 1;
+      if (remaining <= 0) {
+        tapTargetPendingCounts.delete(tapEl);
+        setElementBlocked(tapEl, false);
+      } else {
+        tapTargetPendingCounts.set(tapEl, remaining);
+      }
     }
   }
 
@@ -753,7 +818,12 @@
     var controller = (typeof AbortController !== 'undefined') ? new AbortController() : null;
     var timeoutId = controller ? setTimeout(function () { controller.abort(); }, 20000) : null;
 
-    apiCallStarted();
+    // Captured ONCE here, rather than re-reading currentTapTarget again in
+    // apiCallFinished - that way this call's own start/finish always agree
+    // on which element they're for, even if the user has already tapped
+    // something else by the time this call's response comes back.
+    var tapEl = currentTapTarget;
+    apiCallStarted(tapEl);
     return fetch(url, { cache: 'no-store', signal: controller ? controller.signal : undefined })
       .then(function (r) {
         if (timeoutId) clearTimeout(timeoutId);
@@ -768,7 +838,7 @@
         if (err && err.name === 'AbortError') throw new Error('Request timed out after 20s (action: ' + action + '). Check your connection and try again.');
         throw err;
       })
-      .finally(function () { apiCallFinished(); });
+      .finally(function () { apiCallFinished(tapEl); });
   }
 
   // ------------------------------------------------------------------
@@ -1392,30 +1462,87 @@
     document.getElementById('ws-route-name').textContent = state.session.Route || 'Not set - tap to add';
   }
 
+  // Cache of the driver list as last loaded into the 3 dropdowns, keyed by
+  // ID, so saveTrip() can resolve a select's chosen ID back to a name
+  // without needing another server round-trip.
+  var tripModalDriversById = {};
+
+  function populateDriverSelects(drivers) {
+    tripModalDriversById = {};
+    var optionsHtml = '<option value="">- none -</option>' + drivers.map(function (d) {
+      tripModalDriversById[d.ID] = d;
+      return '<option value="' + d.ID + '">' + escapeHtml(d.Name) + '</option>';
+    }).join('');
+    for (var i = 1; i <= 3; i++) {
+      document.getElementById('driver-select-' + i).innerHTML = optionsHtml;
+    }
+  }
+
+  // Picking a driver from a dropdown pre-fills their contact number - the
+  // whole point of the driver list - but the field stays a normal editable
+  // input in case the number on file is out of date for this trip.
+  function onDriverSelectChange(slot) {
+    var id = document.getElementById('driver-select-' + slot).value;
+    var driver = tripModalDriversById[id];
+    document.getElementById('driver-phone-input-' + slot).value = driver ? (driver.Contact || '') : '';
+  }
+
   function openTripModal() {
     // Driver/DriverContacts are stored as parallel comma-separated fields
     // ("Sipho, Thabo" / "082 123 4567, 083 234 5678") to keep the sheet
-    // schema unchanged - split them back out across the 3 name/phone pairs.
-    var existingDrivers = String(state.session.Driver || '').split(',').map(function (n) { return n.trim(); });
+    // schema unchanged. Up to 3 slots are filled from the pre-set-up Drivers
+    // list (matched back to a dropdown option by name); anything left over
+    // - most often a driver not yet on that list - falls into the one
+    // manual free-text slot instead.
+    var existingDrivers = String(state.session.Driver || '').split(',').map(function (n) { return n.trim(); }).filter(Boolean);
     var existingContacts = String(state.session.DriverContacts || '').split(',').map(function (n) { return n.trim(); });
-    for (var i = 1; i <= 3; i++) {
-      document.getElementById('driver-name-input-' + i).value = existingDrivers[i - 1] || '';
-      document.getElementById('driver-phone-input-' + i).value = existingContacts[i - 1] || '';
-    }
-    document.getElementById('route-name-input').value = state.session.Route || '';
-    document.getElementById('trip-modal-error').textContent = '';
 
-    // Driver and route are mandatory before a checker can do anything else
-    // with this truck. If neither is on file yet, this is that mandatory
-    // first prompt - no way to back out without saving valid values, so
-    // Cancel is hidden. Once both are set, reopening this (via the
-    // Driver/Route tiles) is just an edit of already-valid data, so Cancel
-    // is offered again - saveTrip() below still won't accept blanking them.
-    var mandatory = !state.session.Driver || !state.session.Route;
-    document.getElementById('trip-modal-cancel-btn').style.display = mandatory ? 'none' : '';
-    document.getElementById('trip-modal-hint').style.display = mandatory ? 'block' : 'none';
+    getActiveDriversCached().then(function (drivers) {
+      populateDriverSelects(drivers);
 
-    document.getElementById('trip-modal').classList.add('active');
+      for (var i = 1; i <= 3; i++) {
+        document.getElementById('driver-select-' + i).value = '';
+        document.getElementById('driver-phone-input-' + i).value = '';
+      }
+      document.getElementById('driver-manual-name-input').value = '';
+      document.getElementById('driver-manual-phone-input').value = '';
+
+      var nextSlot = 1;
+      var manualUsed = false;
+      existingDrivers.forEach(function (name, idx) {
+        var contact = existingContacts[idx] || '';
+        var match = drivers.filter(function (d) { return d.Name === name; })[0];
+        if (match && nextSlot <= 3) {
+          document.getElementById('driver-select-' + nextSlot).value = match.ID;
+          document.getElementById('driver-phone-input-' + nextSlot).value = contact || match.Contact || '';
+          nextSlot++;
+        } else if (!manualUsed) {
+          document.getElementById('driver-manual-name-input').value = name;
+          document.getElementById('driver-manual-phone-input').value = contact;
+          manualUsed = true;
+        }
+        // A 5th+ name (only possible on a legacy record saved before the
+        // 4-driver cap) has nowhere left to go in this modal and is
+        // silently dropped, same as the 4-driver cap already enforced by
+        // updateSessionTrip on the server - it's lost from the record only
+        // if the trip is re-saved from here.
+      });
+
+      document.getElementById('route-name-input').value = state.session.Route || '';
+      document.getElementById('trip-modal-error').textContent = '';
+
+      // Driver and route are mandatory before a checker can do anything else
+      // with this truck. If neither is on file yet, this is that mandatory
+      // first prompt - no way to back out without saving valid values, so
+      // Cancel is hidden. Once both are set, reopening this (via the
+      // Driver/Route tiles) is just an edit of already-valid data, so Cancel
+      // is offered again - saveTrip() below still won't accept blanking them.
+      var mandatory = !state.session.Driver || !state.session.Route;
+      document.getElementById('trip-modal-cancel-btn').style.display = mandatory ? 'none' : '';
+      document.getElementById('trip-modal-hint').style.display = mandatory ? 'block' : 'none';
+
+      document.getElementById('trip-modal').classList.add('active');
+    }).catch(showFatalError);
   }
 
   function closeTripModal() {
@@ -1426,16 +1553,23 @@
     var drivers = [];
     var contacts = [];
     for (var i = 1; i <= 3; i++) {
-      var name = document.getElementById('driver-name-input-' + i).value.trim();
+      var id = document.getElementById('driver-select-' + i).value;
+      var driver = tripModalDriversById[id];
       var phone = document.getElementById('driver-phone-input-' + i).value.trim();
-      if (!name) continue;
-      drivers.push(name);
+      if (!driver) continue;
+      drivers.push(driver.Name);
       contacts.push(phone);
+    }
+    var manualName = document.getElementById('driver-manual-name-input').value.trim();
+    var manualPhone = document.getElementById('driver-manual-phone-input').value.trim();
+    if (manualName) {
+      drivers.push(manualName);
+      contacts.push(manualPhone);
     }
     var route = document.getElementById('route-name-input').value.trim();
 
     if (drivers.length === 0 || !route) {
-      document.getElementById('trip-modal-error').textContent = 'Enter at least one driver name and a route before continuing.';
+      document.getElementById('trip-modal-error').textContent = 'Enter at least one driver and a route before continuing.';
       return;
     }
     if (contacts.some(function (c) { return !c; })) {
@@ -1751,6 +1885,28 @@
     });
   }
 
+  // Same short-TTL cache as the No-Stock reasons above, for the same reason -
+  // the driver list barely changes but the trip modal (a truck's start/edit
+  // flow) can be opened repeatedly in quick succession while sorting out
+  // which truck a driver is on. Explicitly invalidated (set to null) by the
+  // admin Drivers CRUD functions above so an edit is picked up immediately
+  // rather than waiting out the TTL.
+  var driversCache = null;
+  var driversCacheAt = 0;
+  var DRIVERS_CACHE_TTL_MS = 5 * 60 * 1000;
+
+  function getActiveDriversCached() {
+    var now = Date.now();
+    if (driversCache && (now - driversCacheAt) < DRIVERS_CACHE_TTL_MS) {
+      return Promise.resolve(driversCache);
+    }
+    return callApi('listDrivers', [true]).then(function (drivers) {
+      driversCache = drivers;
+      driversCacheAt = now;
+      return drivers;
+    });
+  }
+
   function openReasonModal(itemId) {
     state.pendingNoStockItemId = itemId;
     getActiveReasonsCached().then(function (reasons) {
@@ -1844,6 +2000,7 @@
 
     if (name === 'users') loadUsers();
     if (name === 'trucks') loadTrucks();
+    if (name === 'drivers') loadDrivers();
     if (name === 'reasons') loadReasons();
     if (name === 'datasource') loadDataSource();
     if (name === 'overview') loadOverview();
@@ -1944,6 +2101,49 @@
     if (!confirm('Delete truck "' + name + '"? This cannot be undone.')) return;
     callApi('deleteTruck', [id]).then(function () {
       loadTrucks();
+    }).catch(showFatalError);
+  }
+
+  function loadDrivers() {
+    callApi('listDrivers', [false]).then(function (drivers) {
+      document.getElementById('drivers-table').innerHTML =
+        '<tr><th>Name</th><th>Contact</th><th>Active</th><th></th></tr>' +
+        drivers.map(function (d) {
+          return '<tr>' +
+            '<td><input type="text" style="' + TRUCK_FIELD_STYLE + '" value="' + escapeHtml(d.Name) + '" onchange="updateDriverField(\'' + d.ID + '\', \'Name\', this.value)"></td>' +
+            '<td><input type="tel" style="' + TRUCK_FIELD_STYLE + '" value="' + escapeHtml(d.Contact) + '" onchange="updateDriverField(\'' + d.ID + '\', \'Contact\', this.value)"></td>' +
+            '<td><label class="switch-label"><input type="checkbox" ' + (d.Active ? 'checked' : '') +
+            ' onchange="updateDriverField(\'' + d.ID + '\', \'Active\', this.checked)"> Active</label></td>' +
+            '<td><button class="btn btn-danger" onclick="deleteDriverUi(\'' + d.ID + '\', ' + JSON.stringify(d.Name) + ')">Delete</button></td>' +
+            '</tr>';
+        }).join('');
+    }).catch(showFatalError);
+  }
+
+  function addDriverUi() {
+    var name = document.getElementById('new-driver-name').value.trim();
+    var contact = document.getElementById('new-driver-contact').value.trim();
+    if (!name) return;
+    callApi('addDriver', [name, contact]).then(function () {
+      document.getElementById('new-driver-name').value = '';
+      document.getElementById('new-driver-contact').value = '';
+      driversCache = null; // stale after an admin edit - the trip modal should see the new driver right away
+      loadDrivers();
+    }).catch(showFatalError);
+  }
+
+  function updateDriverField(id, field, value) {
+    var patch = {};
+    patch[field] = value;
+    driversCache = null;
+    callApi('updateDriver', [id, patch]).catch(showFatalError);
+  }
+
+  function deleteDriverUi(id, name) {
+    if (!confirm('Delete driver "' + name + '"? This cannot be undone.')) return;
+    driversCache = null;
+    callApi('deleteDriver', [id]).then(function () {
+      loadDrivers();
     }).catch(showFatalError);
   }
 

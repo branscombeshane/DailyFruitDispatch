@@ -327,10 +327,14 @@
       <div class="board-columns">
         <div class="board-col">
           <div class="board-col-title">Trucks</div>
+          <input type="text" id="board-truck-search" placeholder="Search trucks (name, registration, type)..." oninput="renderTruckBoard()"
+            style="width:100%; box-sizing:border-box; padding:10px 12px; border:1px solid var(--border); border-radius:8px; font-size:14px; margin-bottom:10px;">
           <div id="board-trucks-list"></div>
         </div>
         <div class="board-col">
           <div class="board-col-title">Unassigned Orders (<span id="board-unassigned-count">0</span>)</div>
+          <input type="text" id="board-order-search" placeholder="Search orders (number or customer)..." oninput="renderTruckBoard()"
+            style="width:100%; box-sizing:border-box; padding:10px 12px; border:1px solid var(--border); border-radius:8px; font-size:14px; margin-bottom:10px;">
           <div id="board-unassigned-list" class="drop-zone" data-zone="unassigned"></div>
         </div>
       </div>
@@ -650,7 +654,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-09-09-20';
+  var BUILD_VERSION = 'build-2026-09-09-21';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -1012,6 +1016,8 @@
 
   function showTruckBoard() {
     document.getElementById('board-user-name').textContent = state.checker.name;
+    document.getElementById('board-truck-search').value = '';
+    document.getElementById('board-order-search').value = '';
     showScreen('screen-truck-board');
     loadTruckBoard();
   }
@@ -1039,12 +1045,30 @@
       '</div>';
   }
 
+  // Both search boxes filter which CARDS/CHIPS are shown, purely on the
+  // client - boardData itself is never filtered or mutated here, so drag
+  // logic (removeBoardOrder/findBoardTruck, which always need to see
+  // EVERY truck/order regardless of what's currently typed into search)
+  // keeps working exactly as before no matter what's typed in either box.
   function renderTruckBoard() {
+    var truckSearchEl = document.getElementById('board-truck-search');
+    var orderSearchEl = document.getElementById('board-order-search');
+    var truckQueryRaw = (truckSearchEl.value || '').trim();
+    var orderQueryRaw = (orderSearchEl.value || '').trim();
+    var truckQuery = truckQueryRaw.toLowerCase();
+    var orderQuery = orderQueryRaw.toLowerCase();
+
+    var trucksToShow = !truckQuery ? boardData.trucks : boardData.trucks.filter(function (t) {
+      return [t.name, t.registration, t.type].some(function (f) { return (f || '').toLowerCase().indexOf(truckQuery) !== -1; });
+    });
+
     var trucksEl = document.getElementById('board-trucks-list');
     if (boardData.trucks.length === 0) {
       trucksEl.innerHTML = '<div class="empty">No trucks set up yet. Ask an admin to add one.</div>';
+    } else if (trucksToShow.length === 0) {
+      trucksEl.innerHTML = '<div class="empty">No truck matches "' + escapeHtml(truckQueryRaw) + '".</div>';
     } else {
-      trucksEl.innerHTML = boardData.trucks.map(function (t) {
+      trucksEl.innerHTML = trucksToShow.map(function (t) {
         var statusBadge = t.allDispatchedToday
           ? '<span class="badge badge-dispatched" style="margin-left:6px;">Dispatched</span>'
           : (t.hasOpenTrip ? '<span class="badge badge-progress" style="margin-left:6px;">In progress</span>' : '');
@@ -1062,11 +1086,21 @@
       }).join('');
     }
 
+    // The header count always reflects the TRUE number left to assign,
+    // regardless of the search box - it's "how much work is left", not
+    // "how many rows are visible right now".
     document.getElementById('board-unassigned-count').textContent = boardData.unassignedOrders.length;
+    var unassignedToShow = !orderQuery ? boardData.unassignedOrders : boardData.unassignedOrders.filter(function (o) {
+      return [o.orderNumber, o.customer].some(function (f) { return (f || '').toLowerCase().indexOf(orderQuery) !== -1; });
+    });
     var unassignedEl = document.getElementById('board-unassigned-list');
-    unassignedEl.innerHTML = boardData.unassignedOrders.length > 0
-      ? boardData.unassignedOrders.map(renderBoardOrderChip).join('')
-      : '<div class="empty">Nothing left to assign.</div>';
+    if (unassignedToShow.length > 0) {
+      unassignedEl.innerHTML = unassignedToShow.map(renderBoardOrderChip).join('');
+    } else if (boardData.unassignedOrders.length === 0) {
+      unassignedEl.innerHTML = '<div class="empty">Nothing left to assign.</div>';
+    } else {
+      unassignedEl.innerHTML = '<div class="empty">No order matches "' + escapeHtml(orderQueryRaw) + '".</div>';
+    }
 
     attachBoardDragHandlers();
   }
@@ -1076,6 +1110,7 @@
   // just a mouse - the native API has no reliable touch support on iOS
   // Safari, and this app is installed as a phone PWA.
   var boardDrag = null;
+  var boardAutoScrollRAF = null;
 
   function attachBoardDragHandlers() {
     var chips = document.querySelectorAll('#screen-truck-board .board-order-chip[data-draggable="1"]');
@@ -1098,26 +1133,63 @@
     boardDrag = {
       orderId: chip.getAttribute('data-order-id'), chip: chip, ghost: ghost,
       offsetX: e.clientX - rect.left, offsetY: e.clientY - rect.top,
-      currentZoneEl: null
+      currentZoneEl: null, lastX: e.clientX, lastY: e.clientY
     };
 
     if (chip.setPointerCapture) { try { chip.setPointerCapture(e.pointerId); } catch (err) {} }
     chip.onpointermove = onBoardDragMove;
     chip.onpointerup = onBoardDragEnd;
     chip.onpointercancel = onBoardDragEnd;
+
+    // The truck list (or the unassigned list, on a busy day) can easily be
+    // taller than the screen, so the truck a manager wants might be
+    // scrolled out of view the moment they pick an order up. This keeps the
+    // PAGE scrolling toward whichever edge the pointer is held near, the
+    // whole time a drag is active - not just on each pointermove - so
+    // holding still right at the edge keeps it moving instead of stalling.
+    if (!boardAutoScrollRAF) boardAutoScrollRAF = requestAnimationFrame(boardAutoScrollTick);
   }
 
-  function onBoardDragMove(e) {
-    if (!boardDrag) return;
-    boardDrag.ghost.style.left = (e.clientX - boardDrag.offsetX) + 'px';
-    boardDrag.ghost.style.top = (e.clientY - boardDrag.offsetY) + 'px';
-    var under = document.elementFromPoint(e.clientX, e.clientY);
+  // Shared by onBoardDragMove (the pointer itself moved) and
+  // boardAutoScrollTick (the PAGE moved under a pointer that's held still
+  // near an edge) - either way, whatever's now under boardDrag's last known
+  // position is what should be highlighted as the drop target.
+  function updateBoardZoneHighlight() {
+    var under = document.elementFromPoint(boardDrag.lastX, boardDrag.lastY);
     var zone = under && under.closest('.drop-zone');
     if (boardDrag.currentZoneEl && boardDrag.currentZoneEl !== zone) {
       boardDrag.currentZoneEl.classList.remove('drag-over');
     }
     if (zone) zone.classList.add('drag-over');
     boardDrag.currentZoneEl = zone;
+  }
+
+  function boardAutoScrollTick() {
+    if (!boardDrag) { boardAutoScrollRAF = null; return; }
+    var edge = 70; // px from the top/bottom of the viewport that starts scrolling
+    var maxSpeed = 16; // px per frame right at the very edge
+    var vh = window.innerHeight;
+    var y = boardDrag.lastY;
+    var delta = 0;
+    if (y < edge) {
+      delta = -maxSpeed * ((edge - y) / edge);
+    } else if (y > vh - edge) {
+      delta = maxSpeed * ((y - (vh - edge)) / edge);
+    }
+    if (delta) {
+      window.scrollBy(0, delta);
+      updateBoardZoneHighlight(); // keep the highlight in sync as new content scrolls in under a pointer that hasn't itself moved
+    }
+    boardAutoScrollRAF = requestAnimationFrame(boardAutoScrollTick);
+  }
+
+  function onBoardDragMove(e) {
+    if (!boardDrag) return;
+    boardDrag.lastX = e.clientX;
+    boardDrag.lastY = e.clientY;
+    boardDrag.ghost.style.left = (e.clientX - boardDrag.offsetX) + 'px';
+    boardDrag.ghost.style.top = (e.clientY - boardDrag.offsetY) + 'px';
+    updateBoardZoneHighlight();
   }
 
   // Removes an order from wherever it currently sits in boardData (some

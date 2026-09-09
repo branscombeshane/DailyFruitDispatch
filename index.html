@@ -213,6 +213,34 @@
     .dash-warning-line { color: var(--red); font-size: 13px; font-weight: 600; margin-top: 6px; }
     .dash-order-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-top: 1px solid var(--border); font-size: 14px; }
     .dash-nostock-detail { font-size: 12px; color: var(--red); margin-top: 2px; }
+
+    /* --- Trucks board (Dispatch Manager/Admin drag-and-drop assignment) --- */
+    #screen-truck-board .content { max-width: 1100px; }
+    .board-columns { display: flex; gap: 18px; align-items: flex-start; }
+    .board-col { flex: 1; min-width: 0; }
+    @media (max-width: 720px) {
+      .board-columns { flex-direction: column; }
+      .board-col { width: 100%; }
+    }
+    .board-col-title { font-size: 15px; font-weight: 700; margin-bottom: 10px; }
+    .board-truck-card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 14px; margin-bottom: 12px; }
+    .board-truck-header { cursor: pointer; padding-bottom: 8px; margin-bottom: 8px; border-bottom: 1px solid var(--border); }
+    .board-truck-orders { min-height: 44px; border-radius: 8px; }
+    #board-unassigned-list { min-height: 60px; border-radius: 8px; }
+    /* A drop-zone highlights while a dragged chip is over it - the main
+       visual feedback telling the manager "release here to assign". */
+    .drop-zone.drag-over { outline: 2px dashed var(--green); background: #eef5ef; }
+    .board-order-chip {
+      display: flex; align-items: center; padding: 10px 12px; margin-bottom: 6px; border-radius: 8px;
+      border: 1px solid var(--border); background: #fff; font-size: 14px; cursor: grab;
+      /* touch-action:none stops the browser's own scroll gesture from
+         hijacking a touch-drag on a phone - without this, dragging a chip
+         on a phone just scrolls the page instead. */
+      touch-action: none; user-select: none;
+    }
+    .board-order-chip.locked { opacity: 0.6; cursor: default; }
+    .board-order-chip.board-drag-source { opacity: 0.3; }
+    .board-drag-ghost { position: fixed; z-index: 9999; box-shadow: 0 6px 16px rgba(0,0,0,0.28); pointer-events: none; opacity: 0.92; margin: 0 !important; }
   </style>
 </head>
 <body>
@@ -268,6 +296,52 @@
     </div>
   </div>
 
+  <!-- ============================= TRUCKS BOARD (Dispatch Manager/Admin) =============================
+       Morning order assignment: drag an order from the Unassigned column
+       onto a truck to assign it, drag it back to unassign, or onto a
+       different truck to move it. Checkers never see this screen - they
+       land on the plain click-to-open truck list above; tapping a truck's
+       name here opens the exact same workspace they use. -->
+  <div id="screen-truck-board" class="screen">
+    <div class="topbar">
+      <div>
+        <div class="title">Assign Orders</div>
+        <div class="sub" id="board-user-name"></div>
+      </div>
+      <div class="actions">
+        <button onclick="backToAdminArea()">Dashboard</button>
+        <button onclick="logout()">Log out</button>
+      </div>
+    </div>
+    <div class="content">
+      <div class="hint" style="margin-bottom:14px;">Drag an order onto a truck to assign it. Drag it back to Unassigned to remove it, or onto a different truck to move it. Tap a truck's name to open it and start checking.</div>
+      <div class="board-columns">
+        <div class="board-col">
+          <div class="board-col-title">Trucks</div>
+          <div id="board-trucks-list"></div>
+        </div>
+        <div class="board-col">
+          <div class="board-col-title">Unassigned Orders (<span id="board-unassigned-count">0</span>)</div>
+          <div id="board-unassigned-list" class="drop-zone" data-zone="unassigned"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Dispatch blocked: at least one order on this truck isn't fully
+       checked yet - a hard stop, not a warning, so there's no "dispatch
+       anyway" option here (unlike dispatch-modal below). The Dispatch
+       Manager's way around a genuinely stuck order is to drag it off this
+       truck on the Trucks board, not to force past this screen. -->
+  <div class="modal-backdrop" id="dispatch-blocked-modal">
+    <div class="modal">
+      <h3 style="margin-top:0; color:var(--red);">Can't dispatch yet</h3>
+      <div class="hint" id="dispatch-blocked-reason" style="margin-bottom:10px;"></div>
+      <div id="dispatch-blocked-orders" style="margin-bottom:14px;"></div>
+      <button class="btn btn-secondary btn-block" onclick="closeDispatchBlockedModal()">OK</button>
+    </div>
+  </div>
+
   <!-- ============================= TRUCK WORKSPACE ============================= -->
   <div id="screen-workspace" class="screen">
     <div class="topbar">
@@ -276,7 +350,7 @@
         <div class="sub" id="ws-checker-name"></div>
       </div>
       <div class="actions">
-        <button onclick="showTrucks()">Switch truck</button>
+        <button onclick="goToTrucks()">Switch truck</button>
         <button onclick="logout()">Log out</button>
       </div>
     </div>
@@ -425,7 +499,7 @@
   <div class="modal-backdrop" id="add-order-modal">
     <div class="modal">
       <h3 style="margin-top:0;">Add an order to this truck</h3>
-      <input type="text" id="add-order-search" placeholder="Search by order number or customer" oninput="debouncedAddOrderSearch()">
+      <input type="text" id="add-order-search" placeholder="Search by order number or customer" oninput="filterAddOrderResults()">
       <div id="add-order-list"></div>
       <button class="btn btn-secondary btn-block" style="margin-top:12px;" onclick="closeAddOrderModal()">Cancel</button>
     </div>
@@ -449,7 +523,7 @@
     <div class="topbar">
       <div class="title" id="admin-area-title">Admin</div>
       <div class="actions">
-        <button onclick="showTrucks()" id="admin-trucks-btn" style="display:none;">Trucks</button>
+        <button onclick="goToTrucks()" id="admin-trucks-btn" style="display:none;">Trucks</button>
         <button onclick="showLogin()">Log out</button>
       </div>
     </div>
@@ -567,7 +641,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-09-08-17';
+  var BUILD_VERSION = 'build-2026-09-09-19';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -734,7 +808,7 @@
       state.role = res.user.role;
       // Both Admin and Dispatch Manager need a truck-checking identity to
       // go back to - Admin lands on the full Admin area first, but can
-      // switch over to Trucks from there (see enterAdminArea/showTrucks
+      // switch over to Trucks from there (see enterAdminArea/goToTrucks
       // below); a Dispatch Manager lands straight on truck selection, with
       // a Dashboard link available from there and a way back.
       state.checker = { id: res.user.id, name: res.user.name };
@@ -742,8 +816,16 @@
       // Customer Care only ever needs the order lookup - no truck checking,
       // no Admin/Dashboard access at all.
       if (res.user.role === 'Customer Care') { showCustomerCare(); return; }
-      showTrucks();
+      goToTrucks();
     }).catch(showFatalError);
+  }
+
+  // Admin and Dispatch Manager get the drag-and-drop Trucks board (morning
+  // order assignment); a Checker gets the plain click-to-open truck list,
+  // same as always - see the "Board location" decision in SETUP.md.
+  function goToTrucks() {
+    if (state.role === 'Admin' || state.role === 'Dispatch Manager') { showTruckBoard(); return; }
+    showTrucks();
   }
 
   // ------------------------------------------------------------------
@@ -902,6 +984,143 @@
         '<div style="flex:1;"><div class="name">' + escapeHtml(t.Name) + badges + '</div><div class="meta">' + escapeHtml(meta) + '</div>' + tripsHtml + '</div>' +
         '<div>&rsaquo;</div></div>';
     }).join('');
+  }
+
+  // ------------------------------------------------------------------
+  // TRUCKS BOARD (Dispatch Manager/Admin) - morning drag-and-drop
+  // assignment. Reuses selectTruck (below) to open a truck exactly the
+  // same way the checker's plain list does, and reuses the same
+  // assignOrderToTruck/unallocateOrder backend calls a checker's own
+  // "+ Add Order"/Unallocate buttons use - this is a different way to
+  // reach the same underlying allocation, not a separate system.
+  // ------------------------------------------------------------------
+  var boardData = { trucks: [], unassignedOrders: [] };
+
+  function showTruckBoard() {
+    document.getElementById('board-user-name').textContent = state.checker.name;
+    showScreen('screen-truck-board');
+    loadTruckBoard();
+  }
+
+  function loadTruckBoard() {
+    callApi('getTruckAssignmentBoard', []).then(function (data) {
+      boardData = data;
+      renderTruckBoard();
+    }).catch(showFatalError);
+  }
+
+  function renderBoardOrderChip(o) {
+    var locked = !!o.truckDispatched;
+    var dotColor = { 'Pending': '#9aa0a6', 'In Progress': '#8a6100', 'Complete': 'var(--green-dark)' };
+    var dot = o.status
+      ? '<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:' + (dotColor[o.status] || '#9aa0a6') + ';margin-right:8px;flex-shrink:0;"></span>'
+      : '';
+    return '<div class="board-order-chip' + (locked ? ' locked' : '') + '" data-order-id="' + o.orderId + '"' + (locked ? '' : ' data-draggable="1"') + '>' +
+      dot + '<span>' + escapeHtml(o.orderNumber) + ' - ' + escapeHtml(o.customer) + (locked ? ' <span class="hint">(dispatched)</span>' : '') + '</span>' +
+      '</div>';
+  }
+
+  function renderTruckBoard() {
+    var trucksEl = document.getElementById('board-trucks-list');
+    if (boardData.trucks.length === 0) {
+      trucksEl.innerHTML = '<div class="empty">No trucks set up yet. Ask an admin to add one.</div>';
+    } else {
+      trucksEl.innerHTML = boardData.trucks.map(function (t) {
+        var statusBadge = t.allDispatchedToday
+          ? '<span class="badge badge-dispatched" style="margin-left:6px;">Dispatched</span>'
+          : (t.hasOpenTrip ? '<span class="badge badge-progress" style="margin-left:6px;">In progress</span>' : '');
+        var meta = [t.registration, t.type].filter(Boolean).join(' - ');
+        var ordersHtml = t.orders.length > 0
+          ? t.orders.map(renderBoardOrderChip).join('')
+          : '<div class="hint" style="padding:8px 4px; font-style:italic;">Drop an order here</div>';
+        return '<div class="board-truck-card drop-zone" data-zone="truck" data-truck-id="' + t.truckId + '">' +
+          '<div class="board-truck-header" onclick="selectTruck(\'' + t.truckId + '\')">' +
+            '<div class="name">' + escapeHtml(t.name) + statusBadge + '</div>' +
+            (meta ? '<div class="meta">' + escapeHtml(meta) + '</div>' : '') +
+          '</div>' +
+          '<div class="board-truck-orders">' + ordersHtml + '</div>' +
+        '</div>';
+      }).join('');
+    }
+
+    document.getElementById('board-unassigned-count').textContent = boardData.unassignedOrders.length;
+    var unassignedEl = document.getElementById('board-unassigned-list');
+    unassignedEl.innerHTML = boardData.unassignedOrders.length > 0
+      ? boardData.unassignedOrders.map(renderBoardOrderChip).join('')
+      : '<div class="empty">Nothing left to assign.</div>';
+
+    attachBoardDragHandlers();
+  }
+
+  // Custom drag-and-drop built on Pointer Events (not the HTML5 Drag and
+  // Drop API) specifically so it works on a phone's touch screen too, not
+  // just a mouse - the native API has no reliable touch support on iOS
+  // Safari, and this app is installed as a phone PWA.
+  var boardDrag = null;
+
+  function attachBoardDragHandlers() {
+    var chips = document.querySelectorAll('#screen-truck-board .board-order-chip[data-draggable="1"]');
+    for (var i = 0; i < chips.length; i++) {
+      chips[i].onpointerdown = (function (chip) { return function (e) { startBoardDrag(e, chip); }; })(chips[i]);
+    }
+  }
+
+  function startBoardDrag(e, chip) {
+    e.preventDefault();
+    var rect = chip.getBoundingClientRect();
+    var ghost = chip.cloneNode(true);
+    ghost.classList.add('board-drag-ghost');
+    ghost.style.width = rect.width + 'px';
+    ghost.style.left = rect.left + 'px';
+    ghost.style.top = rect.top + 'px';
+    document.body.appendChild(ghost);
+    chip.classList.add('board-drag-source');
+
+    boardDrag = {
+      orderId: chip.getAttribute('data-order-id'), chip: chip, ghost: ghost,
+      offsetX: e.clientX - rect.left, offsetY: e.clientY - rect.top,
+      currentZoneEl: null
+    };
+
+    if (chip.setPointerCapture) { try { chip.setPointerCapture(e.pointerId); } catch (err) {} }
+    chip.onpointermove = onBoardDragMove;
+    chip.onpointerup = onBoardDragEnd;
+    chip.onpointercancel = onBoardDragEnd;
+  }
+
+  function onBoardDragMove(e) {
+    if (!boardDrag) return;
+    boardDrag.ghost.style.left = (e.clientX - boardDrag.offsetX) + 'px';
+    boardDrag.ghost.style.top = (e.clientY - boardDrag.offsetY) + 'px';
+    var under = document.elementFromPoint(e.clientX, e.clientY);
+    var zone = under && under.closest('.drop-zone');
+    if (boardDrag.currentZoneEl && boardDrag.currentZoneEl !== zone) {
+      boardDrag.currentZoneEl.classList.remove('drag-over');
+    }
+    if (zone) zone.classList.add('drag-over');
+    boardDrag.currentZoneEl = zone;
+  }
+
+  function onBoardDragEnd(e) {
+    if (!boardDrag) return;
+    var drag = boardDrag;
+    boardDrag = null;
+    drag.chip.onpointermove = null;
+    drag.chip.onpointerup = null;
+    drag.chip.onpointercancel = null;
+    drag.chip.classList.remove('board-drag-source');
+    drag.ghost.remove();
+    if (drag.currentZoneEl) drag.currentZoneEl.classList.remove('drag-over');
+
+    var zone = drag.currentZoneEl;
+    if (!zone) return; // released somewhere that isn't a drop-zone - no-op
+
+    if (zone.getAttribute('data-zone') === 'unassigned') {
+      callApi('unallocateOrder', [drag.orderId]).then(loadTruckBoard).catch(showFatalError);
+    } else if (zone.getAttribute('data-zone') === 'truck') {
+      var truckId = zone.getAttribute('data-truck-id');
+      callApi('assignOrderToTruck', [truckId, drag.orderId, state.checker.id, state.checker.name]).then(loadTruckBoard).catch(showFatalError);
+    }
   }
 
   // Some trucks run more than one dispatch a day. Selecting a truck that
@@ -1131,16 +1350,20 @@
   // above so that pane only ever shows what's actually on this truck,
   // instead of every order in today's Packing & Production data.
   // ------------------------------------------------------------------
-  var addOrderSearchTimer = null;
-  function debouncedAddOrderSearch() {
-    clearTimeout(addOrderSearchTimer);
-    addOrderSearchTimer = setTimeout(refreshAddOrderSearch, 300);
-  }
+  // The full unfiltered list for today, fetched once per modal open. Typing
+  // in the search box then just filters this in-memory list on every
+  // keystroke - no server round-trip, no debounce needed - matching the
+  // same pattern filterTrucksList() uses on the Select-a-Truck screen.
+  // Before this, every keystroke re-ran the expensive Packing & Production
+  // read on the server (with a 300ms debounce to soften it), which is the
+  // single most expensive thing this app does.
+  var addOrderCache = null;
 
   function openAddOrderModal() {
     document.getElementById('add-order-search').value = '';
     document.getElementById('add-order-modal').classList.add('active');
-    refreshAddOrderSearch();
+    addOrderCache = null;
+    loadAddOrderCache();
   }
 
   function closeAddOrderModal() {
@@ -1148,11 +1371,25 @@
     if (modal) modal.classList.remove('active');
   }
 
-  function refreshAddOrderSearch() {
-    var q = document.getElementById('add-order-search').value;
+  function loadAddOrderCache() {
     var listEl = document.getElementById('add-order-list');
     listEl.innerHTML = '<div class="empty">Loading...</div>';
-    callApi('searchOrders', [state.session.ID, q]).then(renderAddOrderResults).catch(showFatalError);
+    callApi('searchOrders', [state.session.ID, '']).then(function (orders) {
+      addOrderCache = orders;
+      filterAddOrderResults();
+    }).catch(showFatalError);
+  }
+
+  function filterAddOrderResults() {
+    if (!addOrderCache) return; // initial fetch still in flight
+    var q = document.getElementById('add-order-search').value.trim().toLowerCase();
+    var filtered = q
+      ? addOrderCache.filter(function (o) {
+          return String(o.orderNumber).toLowerCase().indexOf(q) !== -1 ||
+                 String(o.customer).toLowerCase().indexOf(q) !== -1;
+        })
+      : addOrderCache;
+    renderAddOrderResults(filtered);
   }
 
   function renderAddOrderResults(orders) {
@@ -1309,9 +1546,31 @@
     });
   }
 
+  // The active No-Stock reasons list barely ever changes during a shift, but
+  // "No Stock" gets tapped constantly while checking a truck - without this,
+  // every single tap re-hit the server for a list that's almost always
+  // identical to the one fetched moments earlier. A short TTL (rather than
+  // caching forever) still picks up an admin's edit within a few minutes,
+  // without needing a full app reload.
+  var reasonsCache = null;
+  var reasonsCacheAt = 0;
+  var REASONS_CACHE_TTL_MS = 5 * 60 * 1000;
+
+  function getActiveReasonsCached() {
+    var now = Date.now();
+    if (reasonsCache && (now - reasonsCacheAt) < REASONS_CACHE_TTL_MS) {
+      return Promise.resolve(reasonsCache);
+    }
+    return callApi('listReasons', [true]).then(function (reasons) {
+      reasonsCache = reasons;
+      reasonsCacheAt = now;
+      return reasons;
+    });
+  }
+
   function openReasonModal(itemId) {
     state.pendingNoStockItemId = itemId;
-    callApi('listReasons', [true]).then(function (reasons) {
+    getActiveReasonsCached().then(function (reasons) {
       document.getElementById('reason-options').innerHTML = reasons.map(function (r) {
         return '<div class="reason-option" onclick="chooseReason(\'' + r.ID + '\')">' + escapeHtml(r.Reason) + '</div>';
       }).join('');
@@ -1336,6 +1595,18 @@
   function attemptDispatch() {
     callApi('markTruckDispatched', [state.session.ID, state.checker.name, false]).then(function (res) {
       if (res.ok) { onDispatched(); return; }
+      // Incomplete orders are a hard block - no "dispatch anyway" option,
+      // unlike the driver/route/tray-count warnings below. The way around a
+      // genuinely stuck order is for the Dispatch Manager to drag it off
+      // this truck on the Trucks board, not to force past this screen.
+      if (res.blocked) {
+        document.getElementById('dispatch-blocked-reason').textContent = res.blockedReason;
+        document.getElementById('dispatch-blocked-orders').innerHTML = res.incompleteOrders.map(function (o) {
+          return '<div class="hint" style="margin-bottom:4px;">- ' + escapeHtml(o.orderNumber) + ' - ' + escapeHtml(o.customer) + ' (' + escapeHtml(o.status) + ')</div>';
+        }).join('');
+        document.getElementById('dispatch-blocked-modal').classList.add('active');
+        return;
+      }
       document.getElementById('dispatch-warnings').innerHTML = res.warnings.map(function (w) {
         return '<div class="hint" style="margin-bottom:6px;">- ' + escapeHtml(w) + '</div>';
       }).join('');
@@ -1349,10 +1620,11 @@
   }
 
   function closeDispatchModal() { document.getElementById('dispatch-modal').classList.remove('active'); }
+  function closeDispatchBlockedModal() { document.getElementById('dispatch-blocked-modal').classList.remove('active'); }
 
   function onDispatched() {
     alert('Truck marked as dispatched.');
-    showTrucks();
+    goToTrucks();
   }
 
   // ------------------------------------------------------------------

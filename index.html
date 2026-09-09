@@ -240,6 +240,15 @@
     }
     .board-order-chip.locked { opacity: 0.6; cursor: default; }
     .board-order-chip.board-drag-source { opacity: 0.3; }
+    /* Shown on the dropped chip itself while its assignOrderToTruck/
+       unallocateOrder call is still in flight (that call can take several
+       seconds - it's a live cross-spreadsheet read against Packing &
+       Production, not just a Dispatch sheet write). The board already
+       updates optimistically on drop, so this isn't "nothing happened yet" -
+       it's "still confirming with the server", and dimming + disabling the
+       chip stops a second drag firing on the same order before the first
+       one has settled. */
+    .board-order-chip.saving { opacity: 0.55; cursor: default; color: #666; }
     .board-drag-ghost { position: fixed; z-index: 9999; box-shadow: 0 6px 16px rgba(0,0,0,0.28); pointer-events: none; opacity: 0.92; margin: 0 !important; }
   </style>
 </head>
@@ -641,7 +650,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-09-09-19';
+  var BUILD_VERSION = 'build-2026-09-09-20';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -995,6 +1004,11 @@
   // reach the same underlying allocation, not a separate system.
   // ------------------------------------------------------------------
   var boardData = { trucks: [], unassignedOrders: [] };
+  // Order IDs with an assignOrderToTruck/unallocateOrder call currently in
+  // flight - see renderBoardOrderChip and onBoardDragEnd. Keyed by orderId
+  // rather than a single flag because nothing stops the manager dragging a
+  // second, different order while the first one is still saving.
+  var savingOrderIds = {};
 
   function showTruckBoard() {
     document.getElementById('board-user-name').textContent = state.checker.name;
@@ -1011,12 +1025,17 @@
 
   function renderBoardOrderChip(o) {
     var locked = !!o.truckDispatched;
+    var saving = !!savingOrderIds[o.orderId];
+    var draggable = !locked && !saving;
     var dotColor = { 'Pending': '#9aa0a6', 'In Progress': '#8a6100', 'Complete': 'var(--green-dark)' };
-    var dot = o.status
-      ? '<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:' + (dotColor[o.status] || '#9aa0a6') + ';margin-right:8px;flex-shrink:0;"></span>'
-      : '';
-    return '<div class="board-order-chip' + (locked ? ' locked' : '') + '" data-order-id="' + o.orderId + '"' + (locked ? '' : ' data-draggable="1"') + '>' +
-      dot + '<span>' + escapeHtml(o.orderNumber) + ' - ' + escapeHtml(o.customer) + (locked ? ' <span class="hint">(dispatched)</span>' : '') + '</span>' +
+    var dot = saving
+      ? '<span class="btn-spinner" style="margin-right:8px;"></span>'
+      : (o.status
+        ? '<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:' + (dotColor[o.status] || '#9aa0a6') + ';margin-right:8px;flex-shrink:0;"></span>'
+        : '');
+    return '<div class="board-order-chip' + (locked ? ' locked' : '') + (saving ? ' saving' : '') + '" data-order-id="' + o.orderId + '"' + (draggable ? ' data-draggable="1"' : '') + '>' +
+      dot + '<span>' + escapeHtml(o.orderNumber) + ' - ' + escapeHtml(o.customer) +
+      (locked ? ' <span class="hint">(dispatched)</span>' : (saving ? ' <span class="hint">saving...</span>' : '')) + '</span>' +
       '</div>';
   }
 
@@ -1101,6 +1120,54 @@
     boardDrag.currentZoneEl = zone;
   }
 
+  // Removes an order from wherever it currently sits in boardData (some
+  // truck's orders array, or unassignedOrders) and returns the removed
+  // order object, or null if it isn't on the board at all (a stale drag -
+  // shouldn't normally happen, since the dragged chip's id always came from
+  // boardData in the first place, but this is safer than throwing).
+  function removeBoardOrder(orderId) {
+    for (var i = 0; i < boardData.unassignedOrders.length; i++) {
+      if (String(boardData.unassignedOrders[i].orderId) === String(orderId)) {
+        return boardData.unassignedOrders.splice(i, 1)[0];
+      }
+    }
+    for (var t = 0; t < boardData.trucks.length; t++) {
+      var orders = boardData.trucks[t].orders;
+      for (var j = 0; j < orders.length; j++) {
+        if (String(orders[j].orderId) === String(orderId)) {
+          return orders.splice(j, 1)[0];
+        }
+      }
+    }
+    return null;
+  }
+
+  function findBoardTruck(truckId) {
+    for (var i = 0; i < boardData.trucks.length; i++) {
+      if (String(boardData.trucks[i].truckId) === String(truckId)) return boardData.trucks[i];
+    }
+    return null;
+  }
+
+  // Drop confirmed by the server - just drop the "saving" flag and
+  // re-render (the board's own optimistic move from onBoardDragEnd already
+  // reflects the new state, so there's no full getTruckAssignmentBoard
+  // re-fetch here - see onBoardDragEnd's comment for why that matters).
+  function boardDropSucceeded(orderId) {
+    delete savingOrderIds[orderId];
+    renderTruckBoard();
+  }
+
+  // Drop rejected by the server (e.g. someone else already dispatched that
+  // truck a moment ago) - the optimistic move shown locally may now be
+  // wrong, so fall back to a real reload to resync with the true server
+  // state, same as this used to do on every drop.
+  function boardDropFailed(orderId, err) {
+    delete savingOrderIds[orderId];
+    loadTruckBoard();
+    showFatalError(err);
+  }
+
   function onBoardDragEnd(e) {
     if (!boardDrag) return;
     var drag = boardDrag;
@@ -1115,11 +1182,51 @@
     var zone = drag.currentZoneEl;
     if (!zone) return; // released somewhere that isn't a drop-zone - no-op
 
+    var orderId = drag.orderId;
+
+    // The board updates itself immediately from the drop, rather than
+    // waiting on a fresh getTruckAssignmentBoard() reload after the
+    // assignOrderToTruck/unallocateOrder call finishes - that reload used to
+    // run on every single drop and re-read ALL of today's orders from the
+    // Packing & Production sheet again, on top of the very same read
+    // assignOrderToTruck had just done internally to allocate this one
+    // order. Skipping it is most of why this used to take ~15s. The chip
+    // itself is marked "saving" (see renderBoardOrderChip) so it's obvious
+    // the move isn't confirmed yet, and can't be dragged again until it is.
     if (zone.getAttribute('data-zone') === 'unassigned') {
-      callApi('unallocateOrder', [drag.orderId]).then(loadTruckBoard).catch(showFatalError);
+      var removed = removeBoardOrder(orderId);
+      if (removed) {
+        boardData.unassignedOrders.push({
+          orderId: removed.orderId, orderNumber: removed.orderNumber, customer: removed.customer,
+          itemCount: removed.itemCount
+        });
+      }
+      savingOrderIds[orderId] = true;
+      renderTruckBoard();
+      callApi('unallocateOrder', [orderId])
+        .then(function () { boardDropSucceeded(orderId); })
+        .catch(function (err) { boardDropFailed(orderId, err); });
     } else if (zone.getAttribute('data-zone') === 'truck') {
       var truckId = zone.getAttribute('data-truck-id');
-      callApi('assignOrderToTruck', [truckId, drag.orderId, state.checker.id, state.checker.name]).then(loadTruckBoard).catch(showFatalError);
+      var removedOrder = removeBoardOrder(orderId);
+      var destTruck = findBoardTruck(truckId);
+      if (removedOrder && destTruck) {
+        // Moving an order (onto any truck, including back onto one it was
+        // already on) always resets it to Pending - checking starts over on
+        // the new truck, same as the existing manual Unallocate+Add flow -
+        // see assignOrderToTruck's own comment in Code.gs.
+        destTruck.orders.push({
+          orderId: removedOrder.orderId, orderNumber: removedOrder.orderNumber,
+          customer: removedOrder.customer, status: 'Pending', truckDispatched: false
+        });
+        destTruck.hasOpenTrip = true;
+        destTruck.allDispatchedToday = false;
+      }
+      savingOrderIds[orderId] = true;
+      renderTruckBoard();
+      callApi('assignOrderToTruck', [truckId, orderId, state.checker.id, state.checker.name])
+        .then(function () { boardDropSucceeded(orderId); })
+        .catch(function (err) { boardDropFailed(orderId, err); });
     }
   }
 
@@ -1196,9 +1303,13 @@
   // Thabo (083 234 5678)" for display anywhere a driver name shows up. A
   // driver saved before contact numbers existed just shows the bare name.
   function formatDriversWithContacts(driverStr, contactsStr) {
-    var names = (driverStr || '').split(',').map(function (n) { return n.trim(); }).filter(Boolean);
+    // Sheet cells that look numeric (e.g. a contact number with no leading
+    // zero issue, or a driver name that's all digits) come back from Apps
+    // Script as a JS number, not a string - String(...) here guards against
+    // "(x || '').split is not a function" when that happens.
+    var names = String(driverStr || '').split(',').map(function (n) { return n.trim(); }).filter(Boolean);
     if (names.length === 0) return '';
-    var contacts = (contactsStr || '').split(',').map(function (n) { return n.trim(); });
+    var contacts = String(contactsStr || '').split(',').map(function (n) { return n.trim(); });
     return names.map(function (name, i) {
       return contacts[i] ? name + ' (' + contacts[i] + ')' : name;
     }).join(', ');
@@ -1213,8 +1324,8 @@
     // Driver/DriverContacts are stored as parallel comma-separated fields
     // ("Sipho, Thabo" / "082 123 4567, 083 234 5678") to keep the sheet
     // schema unchanged - split them back out across the 3 name/phone pairs.
-    var existingDrivers = (state.session.Driver || '').split(',').map(function (n) { return n.trim(); });
-    var existingContacts = (state.session.DriverContacts || '').split(',').map(function (n) { return n.trim(); });
+    var existingDrivers = String(state.session.Driver || '').split(',').map(function (n) { return n.trim(); });
+    var existingContacts = String(state.session.DriverContacts || '').split(',').map(function (n) { return n.trim(); });
     for (var i = 1; i <= 3; i++) {
       document.getElementById('driver-name-input-' + i).value = existingDrivers[i - 1] || '';
       document.getElementById('driver-phone-input-' + i).value = existingContacts[i - 1] || '';

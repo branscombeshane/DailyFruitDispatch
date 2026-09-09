@@ -90,11 +90,13 @@
           tapping several different things in quick succession (e.g. Packed
           on a few items in a row) protects each one on its own rather than
           only the last thing tapped.
-       2. A thin bar sweeps across the very top of the screen for the whole
-          time ANY call is in flight, as a catch-all for actions that don't
-          go through a recognized tap target (search-as-you-type) and for
-          cases where the tapped element gets removed by a screen change
-          before its own request finishes. */
+       2. A centered, dimmed overlay (#global-loading-overlay) shows for the
+          whole time ANY call is in flight, as a catch-all for actions that
+          don't go through a recognized tap target (search-as-you-type) and
+          for cases where the tapped element gets removed by a screen change
+          before its own request finishes. It never blocks input itself
+          (pointer-events: none throughout), so it's purely a visual cue -
+          the actual double-tap protection is layer 1 above. */
     @keyframes btn-spinner-spin { to { transform: rotate(360deg); } }
     .btn-spinner {
       display: inline-block; width: 14px; height: 14px; margin-right: 8px;
@@ -107,39 +109,27 @@
        native disabled state of their own, since pointer-events is what
        actually blocks a repeat click/tap on those. */
     .tap-blocked { pointer-events: none; opacity: 0.55; }
-    /* Amber, not green - the topbar behind this is dark green
-       (--green-dark), so a green bar on top of it was nearly invisible.
-       Amber reads clearly against both the dark green header and the light
-       body background elsewhere on the page. Two segments sweeping at
-       staggered offsets (rather than one bar translating end to end) is the
-       classic "indeterminate progress" look (YouTube/Material's loading
-       bar) - it's a much more obvious "something is happening" cue than a
-       single bar quietly gliding across once a second. */
-    #global-loading-bar {
-      position: fixed; top: 0; left: 0; right: 0; height: 4px; z-index: 9999;
-      pointer-events: none; overflow: hidden; background: transparent;
+    /* A thin bar along the top edge of the screen turned out to be easy to
+       miss no matter what color it was (green blended into the dark-green
+       topbar; even amber was tucked away at the very top edge, outside
+       where attention naturally sits). Replaced with a centered, dimmed
+       overlay instead - much harder to miss - built to never actually
+       block anything: pointer-events: none the whole way through, so a
+       background request (search-as-you-type, an inline edit autosaving)
+       never traps a tap or keystroke underneath it. */
+    #global-loading-overlay {
+      position: fixed; inset: 0; z-index: 9999; display: flex; align-items: center; justify-content: center;
+      background: rgba(20, 30, 24, 0); opacity: 0; pointer-events: none;
+      transition: opacity 0.18s ease, background-color 0.18s ease;
     }
-    #global-loading-bar::before, #global-loading-bar::after {
-      content: ''; position: absolute; top: 0; height: 100%; left: -35%; width: 35%;
-      background: var(--amber); opacity: 0; box-shadow: 0 0 6px rgba(230, 164, 0, 0.9);
+    #global-loading-overlay.active { background: rgba(20, 30, 24, 0.32); opacity: 1; }
+    .global-loading-pill {
+      display: flex; align-items: center; gap: 10px; background: var(--card); color: var(--text);
+      padding: 12px 22px; border-radius: 999px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+      font-size: 14px; font-weight: 600; transform: scale(0.92); transition: transform 0.18s ease;
     }
-    #global-loading-bar.active::before {
-      opacity: 1; animation: global-loading-sweep-1 1.4s cubic-bezier(0.4, 0, 0.2, 1) infinite;
-    }
-    #global-loading-bar.active::after {
-      opacity: 1; animation: global-loading-sweep-2 1.4s cubic-bezier(0.4, 0, 0.2, 1) infinite;
-      animation-delay: 0.7s;
-    }
-    @keyframes global-loading-sweep-1 {
-      0% { left: -35%; width: 35%; }
-      60% { left: 100%; width: 60%; }
-      100% { left: 100%; width: 60%; }
-    }
-    @keyframes global-loading-sweep-2 {
-      0% { left: -50%; width: 25%; }
-      60% { left: 110%; width: 40%; }
-      100% { left: 110%; width: 40%; }
-    }
+    #global-loading-overlay.active .global-loading-pill { transform: scale(1); }
+    .global-loading-pill .btn-spinner { color: var(--green); margin-right: 0; }
 
     /* --- Cards / tiles --- */
     .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin-bottom: 12px; }
@@ -270,6 +260,15 @@
     .board-truck-card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 14px; margin-bottom: 12px; }
     .board-truck-header { cursor: pointer; padding-bottom: 8px; margin-bottom: 8px; border-bottom: 1px solid var(--border); }
     .board-truck-orders { min-height: 44px; border-radius: 8px; }
+    /* Truck name/registration/meta had no styling of their own here (only
+       .tile had it) - name, registration, and the dispatched-time line all
+       rendered as identical plain text with no visual hierarchy, reported
+       as "a blur of text". Name is now the clear headline; registration/type
+       is secondary; the dispatched-time/checker line is smaller and quieter
+       still, since it's the least important of the three at a glance. */
+    .board-truck-header .name { font-size: 16px; font-weight: 700; }
+    .board-truck-header .meta { font-size: 13px; color: var(--grey); margin-top: 2px; }
+    .board-truck-header .dispatch-meta { font-size: 11.5px; color: var(--grey); opacity: 0.85; margin-top: 3px; font-style: italic; }
     #board-unassigned-list { min-height: 60px; border-radius: 8px; }
     /* A drop-zone highlights while a dragged chip is over it - the main
        visual feedback telling the manager "release here to assign". */
@@ -305,7 +304,7 @@
        edit saving. This is the catch-all; the specific element that was
        tapped (if any) ALSO gets its own per-element block/spinner - see
        setElementBlocked. -->
-  <div id="global-loading-bar" aria-hidden="true"></div>
+  <div id="global-loading-overlay" aria-hidden="true"><div class="global-loading-pill"><span class="btn-spinner"></span>Loading&hellip;</div></div>
 
   <!-- Persistent error banner - shown for any failed action, in addition to
        (not instead of) the alert(), in case alert() is ever suppressed by
@@ -749,7 +748,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-09-09-23';
+  var BUILD_VERSION = 'build-2026-09-09-24';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -835,7 +834,7 @@
 
   function apiCallStarted(tapEl) {
     pendingApiCalls++;
-    if (pendingApiCalls === 1) document.getElementById('global-loading-bar').classList.add('active');
+    if (pendingApiCalls === 1) document.getElementById('global-loading-overlay').classList.add('active');
     // tapEl may already be gone from the page by now (e.g. a handler like
     // markItem() re-renders its whole row before the save even starts) -
     // classList/dataset access on a detached element is harmless, it just
@@ -848,7 +847,7 @@
 
   function apiCallFinished(tapEl) {
     pendingApiCalls = Math.max(0, pendingApiCalls - 1);
-    if (pendingApiCalls === 0) document.getElementById('global-loading-bar').classList.remove('active');
+    if (pendingApiCalls === 0) document.getElementById('global-loading-overlay').classList.remove('active');
     if (tapEl) {
       var remaining = (tapTargetPendingCounts.get(tapEl) || 1) - 1;
       if (remaining <= 0) {
@@ -1207,7 +1206,7 @@
         // Who dispatched it and when - if it's dispatched more than once
         // today, this is the MOST RECENT dispatch (see getTruckAssignmentBoard).
         var dispatchDetail = (t.allDispatchedToday && t.dispatchedAt)
-          ? '<div class="meta">Dispatched ' + formatTime(t.dispatchedAt) + (t.dispatchedBy ? ' by ' + escapeHtml(t.dispatchedBy) : '') + '</div>'
+          ? '<div class="dispatch-meta">Dispatched ' + formatTime(t.dispatchedAt) + (t.dispatchedBy ? ' by ' + escapeHtml(t.dispatchedBy) : '') + '</div>'
           : '';
         var ordersHtml = t.orders.length > 0
           ? t.orders.map(renderBoardOrderChip).join('')

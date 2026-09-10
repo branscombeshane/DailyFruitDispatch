@@ -213,13 +213,18 @@
     .item-row:last-child { border-bottom: none; }
     .item-row .desc { font-weight: 700; font-size: 16px; }
     .item-row .qty { color: var(--grey); font-size: 14px; margin-top: 2px; }
-    .item-actions { display: flex; gap: 10px; margin-top: 10px; }
-    .item-actions .btn { flex: 1; padding: 12px; font-size: 14px; }
+    /* flex-wrap + a min-width lets the 3-button Pending row (Packed/Edit
+       Qty/No Stock) wrap onto two lines on a narrow phone instead of
+       squeezing each label unreadably thin - the 2-button rows (Packed or
+       No Stock items) still end up one per line same as before. */
+    .item-actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+    .item-actions .btn { flex: 1 1 30%; min-width: 90px; padding: 12px 8px; font-size: 13px; }
     .item-row.resolved-packed { opacity: 0.7; }
     .item-row.resolved-nostock { opacity: 0.7; }
     .status-line { font-size: 13px; font-weight: 700; margin-top: 8px; }
     .status-line.packed { color: var(--green-dark); }
     .status-line.nostock { color: var(--red); }
+    .status-line.qty-adjusted { color: var(--amber); }
 
     .modal-backdrop {
       position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: none;
@@ -230,10 +235,6 @@
       background: #fff; width: 100%; max-width: 480px; border-radius: 16px 16px 0 0;
       padding: 20px; max-height: 80vh; overflow-y: auto;
     }
-    .reason-option {
-      padding: 14px; border: 1px solid var(--border); border-radius: 10px; margin-bottom: 8px; font-size: 15px;
-    }
-    .reason-option:active { background: #fbeaea; border-color: var(--red); }
 
     .empty { text-align: center; color: var(--grey); padding: 40px 20px; }
 
@@ -291,6 +292,7 @@
     .dash-warning-line { color: var(--red); font-size: 13px; font-weight: 600; margin-top: 6px; }
     .dash-order-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-top: 1px solid var(--border); font-size: 14px; }
     .dash-nostock-detail { font-size: 12px; color: var(--red); margin-top: 2px; }
+    .dash-shortpacked-detail { font-size: 12px; color: var(--amber); margin-top: 2px; }
 
     /* --- Trucks board (Dispatch Manager/Admin drag-and-drop assignment) --- */
     #screen-truck-board .content { max-width: 1100px; }
@@ -581,12 +583,15 @@
     </div>
   </div>
 
-  <!-- No-stock reason picker -->
-  <div class="modal-backdrop" id="reason-modal">
+  <!-- Adjust packed quantity - e.g. ordered 5kg, only 4kg available -->
+  <div class="modal-backdrop" id="qty-modal">
     <div class="modal">
-      <h3 style="margin-top:0;">Reason for no stock</h3>
-      <div id="reason-options"></div>
-      <button class="btn btn-secondary btn-block" onclick="closeReasonModal()">Cancel</button>
+      <h3 style="margin-top:0;">Adjust packed quantity</h3>
+      <div class="hint" id="qty-modal-ordered" style="margin-top:0;"></div>
+      <input type="number" id="qty-modal-input" inputmode="decimal" step="any" min="0" autocomplete="off">
+      <div class="error" id="qty-modal-error"></div>
+      <button class="btn btn-primary btn-block" style="margin-bottom:10px;" onclick="saveQtyModal()">Save &amp; Mark Packed</button>
+      <button class="btn btn-secondary btn-block" onclick="closeQtyModal()">Cancel</button>
     </div>
   </div>
 
@@ -672,7 +677,6 @@
         <button data-pane="users" onclick="showAdminPane('users', this)">Users</button>
         <button data-pane="trucks" onclick="showAdminPane('trucks', this)">Trucks</button>
         <button data-pane="drivers" onclick="showAdminPane('drivers', this)">Drivers</button>
-        <button data-pane="reasons" onclick="showAdminPane('reasons', this)">No-Stock Reasons</button>
         <button data-pane="datasource" onclick="showAdminPane('datasource', this)">Data Source</button>
       </div>
 
@@ -749,17 +753,6 @@
         <div class="card"><p class="hint">Click any field below to edit it - changes save automatically.</p><table id="drivers-table"></table></div>
       </div>
 
-      <div class="admin-pane" id="admin-reasons" style="display:none;">
-        <div class="card">
-          <h3 style="margin-top:0;">Add reason</h3>
-          <div class="row-inline">
-            <input type="text" id="new-reason-text" placeholder="Reason">
-            <button class="btn btn-primary" onclick="addReasonUi()">Add</button>
-          </div>
-        </div>
-        <div class="card"><table id="reasons-table"></table></div>
-      </div>
-
       <div class="admin-pane" id="admin-datasource" style="display:none;">
         <div class="card">
           <h3 style="margin-top:0;">Packing & Production connection</h3>
@@ -795,7 +788,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-09-10-29';
+  var BUILD_VERSION = 'build-2026-09-10-30';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -843,7 +836,7 @@
   // .btn covers every real <button> styled as a primary action; the rest are
   // the plain-div/bare-button tap targets used elsewhere for the same kind
   // of one-shot action but without that class.
-  var TAP_TARGET_SELECTOR = '.btn, .tile, .board-truck-header, .reason-option, .admin-nav button, .tab-btn';
+  var TAP_TARGET_SELECTOR = '.btn, .tile, .board-truck-header, .admin-nav button, .tab-btn';
 
   // Capture phase, so this always runs before the target's own onclick -
   // that way currentTapTarget is set before that handler has a chance to
@@ -956,7 +949,7 @@
     session: null,        // current truck session object
     orderChecks: [],
     currentOrder: null,   // { orderCheck, items }
-    pendingNoStockItemId: null,
+    pendingQtyItemId: null,
     adminRole: null,      // null | 'admin' | 'dispatchManager' - which role got them into screen-admin
     role: null            // the signed-in user's actual role: 'Admin' | 'Dispatch Manager' | 'Checker'
   };
@@ -2082,15 +2075,37 @@
     document.getElementById('od-customer').textContent = oc.Customer;
 
     el.innerHTML = result.items.map(function (item) {
-      var statusLine = '';
-      if (item.Status === 'Packed') statusLine = '<div class="status-line packed">Packed by ' + escapeHtml(item.CheckedBy) + '</div>';
-      if (item.Status === 'No Stock') statusLine = '<div class="status-line nostock">No stock: ' + escapeHtml(item.NoStockReason) + '</div>';
+      // A blank/missing PackedQty means "packed the full ordered Qty" - the
+      // common case, and the plain "Packed" tap never sets it. Only the
+      // Edit Qty button (below) ever records a different amount, so this
+      // is the one place that decides whether the "Qty adjusted" flag shows.
+      var isAdjusted = item.Status === 'Packed' && item.PackedQty !== '' && item.PackedQty !== null && item.PackedQty !== undefined &&
+        Number(item.PackedQty) !== Number(item.Qty);
 
-      var actions = item.Status === 'Pending'
-        ? '<div class="item-actions">' +
+      var statusLine = '';
+      if (item.Status === 'Packed') {
+        statusLine = '<div class="status-line packed">Packed by ' + escapeHtml(item.CheckedBy) + '</div>';
+        if (isAdjusted) {
+          statusLine += '<div class="status-line qty-adjusted">Qty adjusted - packed ' + escapeHtml(String(item.PackedQty)) +
+            ' ' + escapeHtml(item.Unit || '') + ' (ordered ' + escapeHtml(String(item.Qty)) + ')</div>';
+        }
+      }
+      if (item.Status === 'No Stock') statusLine = '<div class="status-line nostock">No stock</div>';
+
+      var editBtn = '<button class="btn btn-secondary" onclick="openQtyModal(\'' + item.ID + '\')">Edit Qty</button>';
+      var actions;
+      if (item.Status === 'Pending') {
+        actions = '<div class="item-actions">' +
           '<button class="btn btn-primary" onclick="markItem(\'' + item.ID + '\', \'Packed\')">Packed</button>' +
-          '<button class="btn btn-danger" onclick="openReasonModal(\'' + item.ID + '\')">No Stock</button></div>'
-        : '<div class="item-actions"><button class="btn btn-secondary" onclick="markItem(\'' + item.ID + '\', \'Pending\')">Undo</button></div>';
+          editBtn +
+          '<button class="btn btn-danger" onclick="markItem(\'' + item.ID + '\', \'No Stock\')">No Stock</button></div>';
+      } else if (item.Status === 'Packed') {
+        actions = '<div class="item-actions">' +
+          '<button class="btn btn-secondary" onclick="markItem(\'' + item.ID + '\', \'Pending\')">Undo</button>' +
+          editBtn + '</div>';
+      } else {
+        actions = '<div class="item-actions"><button class="btn btn-secondary" onclick="markItem(\'' + item.ID + '\', \'Pending\')">Undo</button></div>';
+      }
 
       return '<div class="item-row">' +
         '<div class="desc">' + escapeHtml(item.ProductDescription) + '</div>' +
@@ -2114,7 +2129,7 @@
   // the sheet on the wrong final status.
   var itemSaveChains = {};
 
-  function markItem(itemId, status, reasonId) {
+  function markItem(itemId, status, packedQty) {
     var item = state.currentOrder.items.filter(function (i) { return i.ID === itemId; })[0];
 
     // Update the screen right away and let the save happen in the
@@ -2124,13 +2139,13 @@
     // Every tap still saves immediately; only WHEN the screen updates has
     // changed, not when the data is written.
     item.Status = status;
-    if (status !== 'No Stock') { item.NoStockReason = ''; item.CheckedBy = state.checker.name; }
-    else { item.CheckedBy = state.checker.name; }
+    item.CheckedBy = state.checker.name;
+    item.PackedQty = (status === 'Packed' && packedQty !== undefined && packedQty !== null && packedQty !== '') ? packedQty : '';
     renderOrderDetail();
 
     var previousSave = itemSaveChains[itemId] || Promise.resolve();
     itemSaveChains[itemId] = previousSave.then(function () {
-      return callApi('setItemStatus', [itemId, status, reasonId || '', state.checker.name]);
+      return callApi('setItemStatus', [itemId, status, state.checker.name, item.PackedQty]);
     }).catch(function (err) {
       // The save failed - re-fetch what's actually on record rather than
       // guessing what to roll back to, since more taps on this order may
@@ -2143,34 +2158,14 @@
     });
   }
 
-  // The active No-Stock reasons list barely ever changes during a shift, but
-  // "No Stock" gets tapped constantly while checking a truck - without this,
-  // every single tap re-hit the server for a list that's almost always
-  // identical to the one fetched moments earlier. A short TTL (rather than
-  // caching forever) still picks up an admin's edit within a few minutes,
-  // without needing a full app reload.
-  var reasonsCache = null;
-  var reasonsCacheAt = 0;
-  var REASONS_CACHE_TTL_MS = 5 * 60 * 1000;
-
-  function getActiveReasonsCached() {
-    var now = Date.now();
-    if (reasonsCache && (now - reasonsCacheAt) < REASONS_CACHE_TTL_MS) {
-      return Promise.resolve(reasonsCache);
-    }
-    return callApi('listReasons', [true]).then(function (reasons) {
-      reasonsCache = reasons;
-      reasonsCacheAt = now;
-      return reasons;
-    });
-  }
-
-  // Same short-TTL cache as the No-Stock reasons above, for the same reason -
-  // the driver list barely changes but the trip modal (a truck's start/edit
+  // The driver list barely changes but the trip modal (a truck's start/edit
   // flow) can be opened repeatedly in quick succession while sorting out
-  // which truck a driver is on. Explicitly invalidated (set to null) by the
-  // admin Drivers CRUD functions above so an edit is picked up immediately
-  // rather than waiting out the TTL.
+  // which truck a driver is on - a short TTL cache avoids re-hitting the
+  // server for a list that's almost always identical to the one fetched
+  // moments earlier, while still picking up an admin's edit within a few
+  // minutes. Explicitly invalidated (set to null) by the admin Drivers CRUD
+  // functions above so an edit is picked up immediately rather than
+  // waiting out the TTL.
   var driversCache = null;
   var driversCacheAt = 0;
   var DRIVERS_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -2187,25 +2182,36 @@
     });
   }
 
-  function openReasonModal(itemId) {
-    state.pendingNoStockItemId = itemId;
-    getActiveReasonsCached().then(function (reasons) {
-      document.getElementById('reason-options').innerHTML = reasons.map(function (r) {
-        return '<div class="reason-option" onclick="chooseReason(\'' + r.ID + '\')">' + escapeHtml(r.Reason) + '</div>';
-      }).join('');
-      document.getElementById('reason-modal').classList.add('active');
-    }).catch(showFatalError);
+  // Lets a checker record packing less (or more) than the ordered Qty -
+  // e.g. ordered 5kg of tomatoes but only 4kg were available - without a
+  // separate status: the item still ends up Packed, just flagged (see the
+  // "Qty adjusted" line in renderOrderDetail above) so it's easy to spot
+  // afterward, on this screen and on the Admin Dashboard.
+  function openQtyModal(itemId) {
+    var item = state.currentOrder.items.filter(function (i) { return i.ID === itemId; })[0];
+    if (!item) return;
+    state.pendingQtyItemId = itemId;
+    document.getElementById('qty-modal-ordered').textContent = 'Ordered: ' + item.Qty + ' ' + (item.Unit || '');
+    var input = document.getElementById('qty-modal-input');
+    input.value = (item.PackedQty !== '' && item.PackedQty !== null && item.PackedQty !== undefined) ? item.PackedQty : item.Qty;
+    document.getElementById('qty-modal-error').textContent = '';
+    document.getElementById('qty-modal').classList.add('active');
   }
 
-  function chooseReason(reasonId) {
-    var itemId = state.pendingNoStockItemId;
-    closeReasonModal();
-    markItem(itemId, 'No Stock', reasonId);
+  function saveQtyModal() {
+    var itemId = state.pendingQtyItemId;
+    var val = parseFloat(document.getElementById('qty-modal-input').value);
+    if (isNaN(val) || val < 0) {
+      document.getElementById('qty-modal-error').textContent = 'Enter a valid quantity.';
+      return;
+    }
+    closeQtyModal();
+    markItem(itemId, 'Packed', val);
   }
 
-  function closeReasonModal() {
-    document.getElementById('reason-modal').classList.remove('active');
-    state.pendingNoStockItemId = null;
+  function closeQtyModal() {
+    document.getElementById('qty-modal').classList.remove('active');
+    state.pendingQtyItemId = null;
   }
 
   // ------------------------------------------------------------------
@@ -2310,7 +2316,6 @@
     if (name === 'users') loadUsers();
     if (name === 'trucks') loadTrucks();
     if (name === 'drivers') loadDrivers();
-    if (name === 'reasons') loadReasons();
     if (name === 'datasource') loadDataSource();
     if (name === 'overview') loadOverview();
   }
@@ -2454,31 +2459,6 @@
     callApi('deleteDriver', [id]).then(function () {
       loadDrivers();
     }).catch(showFatalError);
-  }
-
-  function loadReasons() {
-    callApi('listReasons', [false]).then(function (reasons) {
-      document.getElementById('reasons-table').innerHTML =
-        '<tr><th>Reason</th><th>Active</th></tr>' +
-        reasons.map(function (r) {
-          return '<tr><td>' + escapeHtml(r.Reason) + '</td>' +
-            '<td><label class="switch-label"><input type="checkbox" ' + (r.Active ? 'checked' : '') +
-            ' onchange="toggleReason(\'' + r.ID + '\', this.checked)"> Active</label></td></tr>';
-        }).join('');
-    }).catch(showFatalError);
-  }
-
-  function addReasonUi() {
-    var text = document.getElementById('new-reason-text').value.trim();
-    if (!text) return;
-    callApi('addReason', [text]).then(function () {
-      document.getElementById('new-reason-text').value = '';
-      loadReasons();
-    }).catch(showFatalError);
-  }
-
-  function toggleReason(id, active) {
-    callApi('updateReason', [id, { Active: active }]).catch(showFatalError);
   }
 
   function loadDataSource() {
@@ -2675,6 +2655,7 @@
       statTile(s.inProgressCount, 'In progress') +
       statTile(s.totalOrders, 'Orders checked') +
       statTile(s.totalNoStockItems, 'No-stock items', s.totalNoStockItems > 0) +
+      statTile(s.totalShortPackedItems, 'Short-packed items', s.totalShortPackedItems > 0) +
       statTile(s.forcedDispatchCount, 'Dispatched with warnings', s.forcedDispatchCount > 0);
 
     var trucksEl = document.getElementById('dashboard-trucks');
@@ -2705,12 +2686,25 @@
         ? '<div class="dash-order-row"><span class="hint">No orders opened on this truck.</span></div>'
         : t.orders.map(function (o) {
             var badgeClass = o.status === 'Complete' ? 'badge-complete' : (o.status === 'In Progress' ? 'badge-progress' : 'badge-pending');
+            // Reason text (d.reason) can still be non-empty on older rows
+            // from before the No-Stock Reasons feature was removed - shown
+            // when present, but no longer collected going forward.
             var noStockDetail = o.noStockCount > 0
-              ? '<div class="dash-nostock-detail">' + o.noStockDetails.map(function (d) { return escapeHtml(d.description) + ' - ' + escapeHtml(d.reason); }).join('; ') + '</div>'
+              ? '<div class="dash-nostock-detail">' + o.noStockDetails.map(function (d) {
+                  return escapeHtml(d.description) + (d.reason ? ' - ' + escapeHtml(d.reason) : '');
+                }).join('; ') + '</div>'
+              : '';
+            var shortPackedDetail = o.shortPackedCount > 0
+              ? '<div class="dash-shortpacked-detail">' + o.shortPackedDetails.map(function (d) {
+                  return escapeHtml(d.description) + ' - packed ' + escapeHtml(String(d.packedQty)) + ' ' + escapeHtml(d.unit || '') +
+                    ' (ordered ' + escapeHtml(String(d.orderedQty)) + ')';
+                }).join('; ') + '</div>'
               : '';
             return '<div class="dash-order-row"><div><div>' + escapeHtml(o.orderNumber) + ' - ' + escapeHtml(o.customer) +
-              '</div>' + noStockDetail + '</div><div><span class="badge ' + badgeClass + '">' + o.status + '</span> ' +
-              '<span class="hint">' + o.packedCount + '/' + o.itemCount + ' packed' + (o.noStockCount ? ', ' + o.noStockCount + ' no-stock' : '') + '</span></div></div>';
+              '</div>' + noStockDetail + shortPackedDetail + '</div><div><span class="badge ' + badgeClass + '">' + o.status + '</span> ' +
+              '<span class="hint">' + o.packedCount + '/' + o.itemCount + ' packed' +
+              (o.noStockCount ? ', ' + o.noStockCount + ' no-stock' : '') +
+              (o.shortPackedCount ? ', ' + o.shortPackedCount + ' short-packed' : '') + '</span></div></div>';
           }).join('');
 
       return '<div class="dash-truck-card' + (t.dispatchedWithWarnings ? ' dash-alert' : '') + '">' +

@@ -233,11 +233,24 @@
     .admin-nav { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
     .admin-nav button { padding: 10px 14px; border-radius: 8px; border: 1px solid var(--border); background: #fff; font-size: 14px; }
     .admin-nav button.active { background: var(--green-dark); color: #fff; border-color: var(--green-dark); }
-    /* The Settings sub-nav sits directly under the Dashboard/Settings
-       top-level row, slightly indented and with smaller buttons, so it
-       visually reads as "inside" Settings rather than a second equal row
+    /* Dashboard/Settings live in the topbar itself (dark green, fixed at
+       the top of the screen) rather than as the first row of the scrollable
+       content below it - Settings was reported as looking like it belonged
+       "inside the dashboard window" when it sat there instead. Same pill
+       shape as every other topbar button, just with its own active state
+       (solid white) since the usual dark-green "active" fill would
+       disappear against the topbar's own background. */
+    .topbar .admin-nav-top { margin: 6px 0 0; }
+    .topbar .admin-nav-top button {
+      background: rgba(255,255,255,0.15); color: #fff; border: 1px solid rgba(255,255,255,0.4);
+      padding: 8px 14px; font-size: 14px; font-weight: 600;
+    }
+    .topbar .admin-nav-top button.active { background: #fff; color: var(--green-dark); border-color: #fff; }
+    /* The Settings sub-nav sits at the top of the scrollable content,
+       right under the topbar's Dashboard/Settings row, slightly indented
+       so it visually reads as "inside" Settings rather than a second row
        of top-level tabs. */
-    #admin-subnav { margin-top: -8px; padding-left: 4px; border-left: 3px solid var(--border); }
+    #admin-subnav { padding-left: 4px; border-left: 3px solid var(--border); }
     #admin-subnav button { padding: 8px 12px; font-size: 13px; }
     table { width: 100%; border-collapse: collapse; font-size: 14px; }
     th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--border); }
@@ -632,17 +645,19 @@
   <!-- ============================= ADMIN ============================= -->
   <div id="screen-admin" class="screen">
     <div class="topbar">
-      <div class="title" id="admin-area-title">Admin</div>
+      <div>
+        <div class="title" id="admin-area-title">Admin</div>
+        <div class="admin-nav admin-nav-top">
+          <button class="active" data-section="overview" onclick="showAdminSection('overview', this)">Dashboard</button>
+          <button data-section="settings" onclick="showAdminSection('settings', this)">Settings</button>
+        </div>
+      </div>
       <div class="actions">
         <button onclick="goToTrucks()" id="admin-trucks-btn" style="display:none;">Trucks</button>
         <button onclick="showLogin()">Log out</button>
       </div>
     </div>
     <div class="content">
-      <div class="admin-nav admin-nav-top">
-        <button class="active" data-section="overview" onclick="showAdminSection('overview', this)">Dashboard</button>
-        <button data-section="settings" onclick="showAdminSection('settings', this)">Settings</button>
-      </div>
       <div class="admin-nav" id="admin-subnav" style="display:none;">
         <button data-pane="users" onclick="showAdminPane('users', this)">Users</button>
         <button data-pane="trucks" onclick="showAdminPane('trucks', this)">Trucks</button>
@@ -770,7 +785,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-09-10-25';
+  var BUILD_VERSION = 'build-2026-09-10-26';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's

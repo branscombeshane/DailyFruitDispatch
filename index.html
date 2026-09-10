@@ -149,6 +149,28 @@
     .badge-complete { background: #e2f2e4; color: var(--green-dark); }
     .badge-dispatched { background: #dcedc8; color: var(--green-dark); }
 
+    /* Select-a-truck tile: when a truck has run more than one trip today,
+       each trip used to be separated by just a thin top border - easy to
+       miss, especially once both trips say "Dispatched" and the only
+       difference is a small "Trip 2" label buried in a wall of text. Each
+       trip now gets its own shaded, bordered block with a clear numbered
+       tag and a status-colored left edge, so trip 1 vs trip 2 (dispatched
+       vs still in progress, different driver, etc.) reads at a glance
+       instead of needing a close read. Only used once there's more than
+       one trip - a truck with just its one trip today keeps the plain,
+       unboxed layout, since there's nothing to separate. */
+    .trip-block {
+      background: #f4f7f4; border: 1px solid var(--border); border-left-width: 4px;
+      border-radius: 8px; padding: 8px 10px; margin-top: 10px;
+    }
+    .trip-block.trip-dispatched { border-left-color: var(--green-dark); }
+    .trip-block.trip-in-progress { border-left-color: #8a6100; }
+    .trip-block-header { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+    .trip-number-tag {
+      display: inline-block; background: var(--text); color: #fff; font-size: 11px; font-weight: 700;
+      padding: 2px 8px; border-radius: 6px; text-transform: uppercase; letter-spacing: 0.03em;
+    }
+
     input[type=text], input[type=password], input[type=number], input[type=tel] {
       width: 100%; padding: 14px; font-size: 16px; border: 1px solid var(--border); border-radius: 10px; margin-bottom: 12px;
     }
@@ -748,7 +770,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-09-09-24';
+  var BUILD_VERSION = 'build-2026-09-10-25';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -1105,8 +1127,8 @@
       var dotColor = { 'Pending': '#9aa0a6', 'In Progress': '#8a6100', 'Complete': 'var(--green-dark)' };
       var tripsHtml;
       if (t.trips && t.trips.length > 0) {
-        tripsHtml = t.trips.map(function (trip, idx) {
-          var tripLabel = t.trips.length > 1 ? 'Trip ' + trip.tripNumber + ' - ' + escapeHtml(trip.status) : escapeHtml(trip.status);
+        var multiTrip = t.trips.length > 1;
+        tripsHtml = t.trips.map(function (trip) {
           var driverText = trip.driver ? 'Driver: ' + escapeHtml(formatDriversWithContacts(trip.driver, trip.driverContacts)) : 'Driver not set';
           var routeText = trip.route ? ' &middot; Route: ' + escapeHtml(trip.route) : '';
           var ordersHtml = trip.orders.length > 0
@@ -1115,9 +1137,24 @@
                   (dotColor[o.status] || '#9aa0a6') + ';margin-right:6px;"></span>' + escapeHtml(o.orderNumber) + ' - ' + escapeHtml(o.customer) + '</div>';
               }).join('')
             : '<div class="meta" style="margin-top:2px; margin-left:12px; font-style:italic;">No orders allocated yet</div>';
-          var dividerStyle = idx > 0 ? 'margin-top:8px; padding-top:8px; border-top:1px solid var(--border);' : 'margin-top:6px;';
-          return '<div style="' + dividerStyle + '">' +
-            '<div class="meta" style="font-weight:700; color:#444;">' + tripLabel + ' &middot; ' + driverText + routeText + '</div>' +
+
+          // Only one trip today - the separation problem doesn't exist yet,
+          // so keep the original plain, unboxed layout rather than adding
+          // visual weight (a numbered tag, a shaded box) that has nothing
+          // to distinguish itself from.
+          if (!multiTrip) {
+            return '<div style="margin-top:6px;">' +
+              '<div class="meta" style="font-weight:700; color:#444;">' + escapeHtml(trip.status) + ' &middot; ' + driverText + routeText + '</div>' +
+              ordersHtml + '</div>';
+          }
+
+          var tripStatusClass = trip.status === 'Dispatched' ? 'trip-dispatched' : 'trip-in-progress';
+          return '<div class="trip-block ' + tripStatusClass + '">' +
+            '<div class="trip-block-header">' +
+              '<span class="trip-number-tag">Trip ' + trip.tripNumber + '</span>' +
+              '<span class="badge ' + (trip.status === 'Dispatched' ? 'badge-dispatched' : 'badge-progress') + '">' + escapeHtml(trip.status) + '</span>' +
+            '</div>' +
+            '<div class="meta" style="margin-top:5px; font-weight:600; color:#444;">' + driverText + routeText + '</div>' +
             ordersHtml + '</div>';
         }).join('');
       } else {

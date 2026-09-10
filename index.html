@@ -251,11 +251,16 @@
        (solid white) since the usual dark-green "active" fill would
        disappear against the topbar's own background. */
     .topbar .admin-nav-top { margin: 6px 0 0; }
-    .topbar .admin-nav-top button {
+    /* .admin-section-btn is a marker class shared by the Dashboard and
+       Settings buttons wherever they sit in the topbar (Dashboard stays in
+       admin-nav-top; Settings now sits in .actions next to Log out - see
+       the HTML comment there) so they keep the same "section tab" look and
+       active/inactive toggle regardless of DOM position. */
+    .topbar .admin-section-btn {
       background: rgba(255,255,255,0.15); color: #fff; border: 1px solid rgba(255,255,255,0.4);
       padding: 8px 14px; font-size: 14px; font-weight: 600;
     }
-    .topbar .admin-nav-top button.active { background: #fff; color: var(--green-dark); border-color: #fff; }
+    .topbar .admin-section-btn.active { background: #fff; color: var(--green-dark); border-color: #fff; }
     /* The Settings sub-nav sits at the top of the scrollable content,
        right under the topbar's Dashboard/Settings row, slightly indented
        so it visually reads as "inside" Settings rather than a second row
@@ -663,12 +668,16 @@
       <div>
         <div class="title" id="admin-area-title">Admin</div>
         <div class="admin-nav admin-nav-top">
-          <button class="active" data-section="overview" onclick="showAdminSection('overview', this)">Dashboard</button>
-          <button data-section="settings" onclick="showAdminSection('settings', this)">Settings</button>
+          <button class="active admin-section-btn" data-section="overview" onclick="showAdminSection('overview', this)">Dashboard</button>
         </div>
       </div>
       <div class="actions">
         <button onclick="goToTrucks()" id="admin-trucks-btn" style="display:none;">Trucks</button>
+        <!-- Kept right next to Log out (not next to Dashboard above) so its
+             position never shifts regardless of which section is active -
+             see the matching board-settings-btn placement on the Trucks
+             board topbar, which already sits next to Log out the same way. -->
+        <button class="admin-section-btn" data-section="settings" onclick="showAdminSection('settings', this)">Settings</button>
         <button onclick="showLogin()">Log out</button>
       </div>
     </div>
@@ -788,7 +797,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-09-10-30';
+  var BUILD_VERSION = 'build-2026-09-10-31';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -1090,7 +1099,7 @@
   // flash of the Dashboard in between.
   function goToSettings() {
     enterAdminArea(state.role === 'Admin' ? 'admin' : 'dispatchManager');
-    showAdminSection('settings', document.querySelector('.admin-nav-top button[data-section="settings"]'));
+    showAdminSection('settings', document.querySelector('.admin-section-btn[data-section="settings"]'));
   }
 
   // Cache of the last full fetch, so the search box below can filter locally
@@ -2264,7 +2273,7 @@
     state.adminRole = role;
     var restricted = role === 'dispatchManager';
     document.getElementById('admin-area-title').textContent = restricted ? 'Dispatch Manager' : 'Admin';
-    document.querySelectorAll('.admin-nav-top button').forEach(function (b) {
+    document.querySelectorAll('.admin-section-btn').forEach(function (b) {
       b.style.display = (restricted && b.getAttribute('data-section') !== 'overview') ? 'none' : '';
     });
     // Both Admin and Dispatch Manager now have a truck-checking identity to
@@ -2276,7 +2285,7 @@
     // even if a previous visit this session left a past date selected.
     document.getElementById('dashboard-date-picker').value = todayDateInputValue();
     showScreen('screen-admin');
-    showAdminSection('overview', document.querySelector('.admin-nav-top button[data-section="overview"]'));
+    showAdminSection('overview', document.querySelector('.admin-section-btn[data-section="overview"]'));
   }
 
   // Dashboard and Settings are the two top-level sections; Settings bundles
@@ -2288,7 +2297,7 @@
   var lastSettingsPane = 'users';
 
   function showAdminSection(section, btn) {
-    document.querySelectorAll('.admin-nav-top button').forEach(function (b) { b.classList.remove('active'); });
+    document.querySelectorAll('.admin-section-btn').forEach(function (b) { b.classList.remove('active'); });
     if (btn) btn.classList.add('active');
     var subnav = document.getElementById('admin-subnav');
     if (section === 'settings') {

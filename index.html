@@ -408,6 +408,7 @@
       <div class="actions">
         <button onclick="openNonOrderDispatchModal()">Non-Order Dispatch</button>
         <button onclick="backToAdminArea()">Dashboard</button>
+        <button onclick="goToSettings()" id="board-settings-btn" style="display:none;">Settings</button>
         <button onclick="logout()">Log out</button>
       </div>
     </div>
@@ -794,7 +795,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-09-10-28';
+  var BUILD_VERSION = 'build-2026-09-10-29';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -1088,6 +1089,17 @@
     enterAdminArea(state.role === 'Admin' ? 'admin' : 'dispatchManager');
   }
 
+  // Shortcut from the Trucks board straight into Settings (Users/Trucks/
+  // Drivers/Data Source), instead of always landing on the Dashboard first
+  // and having to tap Settings from there. enterAdminArea() always lands on
+  // Dashboard as its last step, so this switches to Settings right after -
+  // both run synchronously before the browser paints, so there's no visible
+  // flash of the Dashboard in between.
+  function goToSettings() {
+    enterAdminArea(state.role === 'Admin' ? 'admin' : 'dispatchManager');
+    showAdminSection('settings', document.querySelector('.admin-nav-top button[data-section="settings"]'));
+  }
+
   // Cache of the last full fetch, so the search box below can filter locally
   // (truck name/registration/type, order number/customer, or driver name)
   // without a round-trip for every keystroke.
@@ -1209,6 +1221,11 @@
     document.getElementById('board-user-name').textContent = state.checker.name;
     document.getElementById('board-truck-search').value = '';
     document.getElementById('board-order-search').value = '';
+    // Settings (Users/Trucks/Drivers/Data Source) is Admin-only, same
+    // restriction as the Settings tab inside the Admin area itself - a
+    // Dispatch Manager only ever gets Dashboard there, so no point
+    // surfacing a shortcut to a section they can't open.
+    document.getElementById('board-settings-btn').style.display = (state.role === 'Admin') ? '' : 'none';
     showScreen('screen-truck-board');
     loadTruckBoard();
   }

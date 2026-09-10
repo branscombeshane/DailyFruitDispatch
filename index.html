@@ -171,6 +171,14 @@
       padding: 2px 8px; border-radius: 6px; text-transform: uppercase; letter-spacing: 0.03em;
     }
 
+    /* Condensed per-trip strip on the Trucks Board card (a truck dispatched
+       more than once today) - same idea as .trip-block above but lighter
+       weight, since a board card is smaller and there can be many on screen
+       at once. */
+    .board-trip-strip { margin-top: 4px; display: flex; flex-direction: column; gap: 2px; }
+    .board-trip-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .board-trip-row .dispatch-meta { margin-top: 0; }
+
     input[type=text], input[type=password], input[type=number], input[type=tel] {
       width: 100%; padding: 14px; font-size: 16px; border: 1px solid var(--border); border-radius: 10px; margin-bottom: 12px;
     }
@@ -785,7 +793,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-09-10-26';
+  var BUILD_VERSION = 'build-2026-09-10-27';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -1255,11 +1263,34 @@
           ? '<span class="badge badge-dispatched" style="margin-left:6px;">Dispatched</span>'
           : (t.hasOpenTrip ? '<span class="badge badge-progress" style="margin-left:6px;">In progress</span>' : '');
         var meta = [t.registration, t.type].filter(Boolean).join(' - ');
-        // Who dispatched it and when - if it's dispatched more than once
-        // today, this is the MOST RECENT dispatch (see getTruckAssignmentBoard).
-        var dispatchDetail = (t.allDispatchedToday && t.dispatchedAt)
-          ? '<div class="dispatch-meta">Dispatched ' + formatTime(t.dispatchedAt) + (t.dispatchedBy ? ' by ' + escapeHtml(t.dispatchedBy) : '') + '</div>'
-          : '';
+        // If this truck has more than one trip today, show each trip's own
+        // status/driver/time as its own tagged row instead of collapsing
+        // them into a single "most recent dispatch" line - same "Trip 1" /
+        // "Trip 2" idea as the checker's Select-a-truck list.
+        var multiTrip = t.trips && t.trips.length > 1;
+        var dispatchDetail;
+        if (multiTrip) {
+          dispatchDetail = '<div class="board-trip-strip">' + t.trips.map(function (trip) {
+            var line;
+            if (trip.status === 'Dispatched') {
+              line = trip.dispatchedAt
+                ? 'Dispatched ' + formatTime(trip.dispatchedAt) + (trip.dispatchedBy ? ' by ' + escapeHtml(trip.dispatchedBy) : '')
+                : 'Dispatched';
+            } else {
+              line = trip.driver ? 'Driver: ' + escapeHtml(formatDriversWithContacts(trip.driver, trip.driverContacts)) : 'In progress';
+            }
+            return '<div class="board-trip-row">' +
+              '<span class="trip-number-tag">Trip ' + trip.tripNumber + '</span>' +
+              '<span class="dispatch-meta">' + line + '</span>' +
+            '</div>';
+          }).join('') + '</div>';
+        } else {
+          // Who dispatched it and when - with only one trip today there's
+          // nothing to separate, so this stays the plain one-liner it always was.
+          dispatchDetail = (t.allDispatchedToday && t.dispatchedAt)
+            ? '<div class="dispatch-meta">Dispatched ' + formatTime(t.dispatchedAt) + (t.dispatchedBy ? ' by ' + escapeHtml(t.dispatchedBy) : '') + '</div>'
+            : '';
+        }
         var ordersHtml = t.orders.length > 0
           ? t.orders.map(renderBoardOrderChip).join('')
           : '<div class="hint" style="padding:8px 4px; font-style:italic;">Drop an order here</div>';

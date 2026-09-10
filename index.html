@@ -171,16 +171,17 @@
       padding: 2px 8px; border-radius: 6px; text-transform: uppercase; letter-spacing: 0.03em;
     }
 
-    /* Condensed per-trip strip on the Trucks Board card (a truck dispatched
-       more than once today) - same idea as .trip-block above but lighter
-       weight, since a board card is smaller and there can be many on screen
-       at once. */
-    .board-trip-strip { margin-top: 4px; display: flex; flex-direction: column; gap: 2px; }
-    .board-trip-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-    .board-trip-row .dispatch-meta { margin-top: 0; }
-
-    input[type=text], input[type=password], input[type=number], input[type=tel] {
+    /* select used to be left at the browser's own default look (square
+       corners, a heavier black border) while every text input got the
+       app's rounded/light-border style - reported as "looks odd" on the
+       driver-picker dropdowns specifically, but this affects every select
+       in the app (a couple of admin ones too), so it's fixed once here
+       rather than one screen at a time. #nod-modal already had its own
+       near-identical scoped copy of this for its selects (fine to leave -
+       harmless duplicate, same values). */
+    input[type=text], input[type=password], input[type=number], input[type=tel], select {
       width: 100%; padding: 14px; font-size: 16px; border: 1px solid var(--border); border-radius: 10px; margin-bottom: 12px;
+      font-family: inherit; background: #fff; color: var(--text);
     }
     label { font-size: 13px; font-weight: 600; color: var(--grey); display: block; margin-bottom: 6px; }
     .error { color: var(--red); font-size: 14px; margin: 8px 0; min-height: 18px; }
@@ -793,7 +794,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-09-10-27';
+  var BUILD_VERSION = 'build-2026-09-10-28';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -1263,14 +1264,25 @@
           ? '<span class="badge badge-dispatched" style="margin-left:6px;">Dispatched</span>'
           : (t.hasOpenTrip ? '<span class="badge badge-progress" style="margin-left:6px;">In progress</span>' : '');
         var meta = [t.registration, t.type].filter(Boolean).join(' - ');
-        // If this truck has more than one trip today, show each trip's own
-        // status/driver/time as its own tagged row instead of collapsing
-        // them into a single "most recent dispatch" line - same "Trip 1" /
-        // "Trip 2" idea as the checker's Select-a-truck list.
+        // If this truck has more than one trip today, group its orders
+        // under their own trip - each trip gets its own status/driver/time
+        // line AND the orders that were actually checked against it, so
+        // it's clear which order went out on trip 1 vs trip 2 rather than
+        // pooling everything under one truck. Same "trip-block" treatment
+        // as the checker's Select-a-truck list, just carrying the board's
+        // own draggable order chips inside each block instead of read-only
+        // order rows.
         var multiTrip = t.trips && t.trips.length > 1;
         var dispatchDetail;
+        var ordersHtml;
         if (multiTrip) {
-          dispatchDetail = '<div class="board-trip-strip">' + t.trips.map(function (trip) {
+          dispatchDetail = '';
+          var ordersByTrip = {};
+          t.orders.forEach(function (o) {
+            if (!ordersByTrip[o.tripNumber]) ordersByTrip[o.tripNumber] = [];
+            ordersByTrip[o.tripNumber].push(o);
+          });
+          ordersHtml = t.trips.map(function (trip) {
             var line;
             if (trip.status === 'Dispatched') {
               line = trip.dispatchedAt
@@ -1279,21 +1291,29 @@
             } else {
               line = trip.driver ? 'Driver: ' + escapeHtml(formatDriversWithContacts(trip.driver, trip.driverContacts)) : 'In progress';
             }
-            return '<div class="board-trip-row">' +
-              '<span class="trip-number-tag">Trip ' + trip.tripNumber + '</span>' +
-              '<span class="dispatch-meta">' + line + '</span>' +
+            var tripOrders = ordersByTrip[trip.tripNumber] || [];
+            var tripOrdersHtml = tripOrders.length > 0
+              ? tripOrders.map(renderBoardOrderChip).join('')
+              : '<div class="hint" style="padding:4px 2px; font-style:italic;">No orders on this trip</div>';
+            var tripStatusClass = trip.status === 'Dispatched' ? 'trip-dispatched' : 'trip-in-progress';
+            return '<div class="trip-block ' + tripStatusClass + '">' +
+              '<div class="trip-block-header">' +
+                '<span class="trip-number-tag">Trip ' + trip.tripNumber + '</span>' +
+                '<span class="dispatch-meta" style="margin-top:0;">' + line + '</span>' +
+              '</div>' +
+              '<div style="margin-top:6px;">' + tripOrdersHtml + '</div>' +
             '</div>';
-          }).join('') + '</div>';
+          }).join('');
         } else {
           // Who dispatched it and when - with only one trip today there's
           // nothing to separate, so this stays the plain one-liner it always was.
           dispatchDetail = (t.allDispatchedToday && t.dispatchedAt)
             ? '<div class="dispatch-meta">Dispatched ' + formatTime(t.dispatchedAt) + (t.dispatchedBy ? ' by ' + escapeHtml(t.dispatchedBy) : '') + '</div>'
             : '';
+          ordersHtml = t.orders.length > 0
+            ? t.orders.map(renderBoardOrderChip).join('')
+            : '<div class="hint" style="padding:8px 4px; font-style:italic;">Drop an order here</div>';
         }
-        var ordersHtml = t.orders.length > 0
-          ? t.orders.map(renderBoardOrderChip).join('')
-          : '<div class="hint" style="padding:8px 4px; font-style:italic;">Drop an order here</div>';
         return '<div class="board-truck-card drop-zone" data-zone="truck" data-truck-id="' + t.truckId + '">' +
           '<div class="board-truck-header" onclick="selectTruck(\'' + t.truckId + '\')">' +
             '<div class="name">' + escapeHtml(t.name) + statusBadge + '</div>' +
@@ -1502,13 +1522,31 @@
       var removedOrder = removeBoardOrder(orderId);
       var destTruck = findBoardTruck(truckId);
       if (removedOrder && destTruck) {
+        // assignOrderToTruck (Code.gs) always lands a dropped order on the
+        // truck's CURRENT open trip, starting a fresh one first if it
+        // doesn't have one yet (including when every trip so far today has
+        // already dispatched) - mirrored here so the optimistic re-render
+        // below tags the order with the right trip and, if a new trip is
+        // being started, shows that trip's block immediately too, instead
+        // of the order seeming to vanish until the next full reload.
+        var openTrip = (destTruck.trips || []).filter(function (tr) { return tr.status === 'In Progress'; })[0];
+        var destTripNumber;
+        if (openTrip) {
+          destTripNumber = openTrip.tripNumber;
+        } else {
+          destTripNumber = (destTruck.trips ? destTruck.trips.length : 0) + 1;
+          destTruck.trips = (destTruck.trips || []).concat([{
+            tripNumber: destTripNumber, status: 'In Progress', driver: '', driverContacts: '', route: '', dispatchedAt: '', dispatchedBy: ''
+          }]);
+        }
         // Moving an order (onto any truck, including back onto one it was
         // already on) always resets it to Pending - checking starts over on
         // the new truck, same as the existing manual Unallocate+Add flow -
         // see assignOrderToTruck's own comment in Code.gs.
         destTruck.orders.push({
           orderId: removedOrder.orderId, orderNumber: removedOrder.orderNumber,
-          customer: removedOrder.customer, status: 'Pending', truckDispatched: false
+          customer: removedOrder.customer, status: 'Pending', truckDispatched: false,
+          tripNumber: destTripNumber
         });
         destTruck.hasOpenTrip = true;
         destTruck.allDispatchedToday = false;

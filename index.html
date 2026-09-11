@@ -797,7 +797,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-09-10-31';
+  var BUILD_VERSION = 'build-2026-09-11-01';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -1261,6 +1261,11 @@
   // EVERY truck/order regardless of what's currently typed into search)
   // keeps working exactly as before no matter what's typed in either box.
   function renderTruckBoard() {
+    // Must run before anything below rebuilds the trucks/unassigned lists -
+    // see abortBoardDrag's own comment for exactly why a drag in progress
+    // has to be torn down first, not left to clean itself up later.
+    abortBoardDrag();
+
     var truckSearchEl = document.getElementById('board-truck-search');
     var orderSearchEl = document.getElementById('board-order-search');
     var truckQueryRaw = (truckSearchEl.value || '').trim();
@@ -1498,8 +1503,28 @@
     showFatalError(err);
   }
 
-  function onBoardDragEnd(e) {
-    if (!boardDrag) return;
+  // Tears down whatever drag is currently in progress (detaches the
+  // pointer handlers, removes the floating ghost element, restores the
+  // source chip's styling) without attempting a drop, and hands back the
+  // drag state that was just cleaned up (or null if nothing was dragging).
+  // Shared by onBoardDragEnd (a real pointerup/pointercancel) and, more
+  // importantly, renderTruckBoard (see the call at its top) - a re-render
+  // rebuilds the trucks/unassigned lists via innerHTML, which destroys
+  // whatever chip element is currently mid-drag. That chip is the only
+  // thing holding the drag's onpointermove/up/cancel handlers and pointer
+  // capture, and a captured element that gets removed from the document
+  // does not reliably fire pointercancel on every browser (iPadOS Safari in
+  // particular) - so without calling this first, the drag's ghost (a
+  // separate node parented directly to document.body, untouched by the
+  // list rebuild) is orphaned on screen forever, and boardDrag itself never
+  // clears, permanently breaking that finger/pointer's ability to drag
+  // anything else. This is exactly the "orders getting stuck on screen" bug:
+  // it happens whenever a re-render lands while a drag is still in flight -
+  // most commonly another order's drop confirming over the network
+  // (boardDropSucceeded -> renderTruckBoard) while the next order is
+  // already being dragged.
+  function abortBoardDrag() {
+    if (!boardDrag) return null;
     var drag = boardDrag;
     boardDrag = null;
     drag.chip.onpointermove = null;
@@ -1508,6 +1533,12 @@
     drag.chip.classList.remove('board-drag-source');
     drag.ghost.remove();
     if (drag.currentZoneEl) drag.currentZoneEl.classList.remove('drag-over');
+    return drag;
+  }
+
+  function onBoardDragEnd(e) {
+    var drag = abortBoardDrag();
+    if (!drag) return;
 
     var zone = drag.currentZoneEl;
     if (!zone) return; // released somewhere that isn't a drop-zone - no-op

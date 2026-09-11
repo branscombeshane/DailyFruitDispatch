@@ -254,13 +254,19 @@
     /* .admin-section-btn is a marker class shared by the Dashboard and
        Settings buttons wherever they sit in the topbar (Dashboard stays in
        admin-nav-top; Settings now sits in .actions next to Log out - see
-       the HTML comment there) so they keep the same "section tab" look and
-       active/inactive toggle regardless of DOM position. */
+       the HTML comment there) so they keep the same active/inactive toggle
+       regardless of DOM position. Only background/border/color are shared
+       here - Settings, sitting in .actions beside Trucks and Log out, must
+       inherit the plain ".topbar button" size/padding/font-weight so all
+       three look like one matched set (Shane: "Settings block not the same
+       size and font as the other blocks"). Dashboard, still in
+       admin-nav-top as its own little tab row, keeps its own smaller/bold
+       "tab" sizing below, scoped so it never leaks onto Settings. */
     .topbar .admin-section-btn {
       background: rgba(255,255,255,0.15); color: #fff; border: 1px solid rgba(255,255,255,0.4);
-      padding: 8px 14px; font-size: 14px; font-weight: 600;
     }
     .topbar .admin-section-btn.active { background: #fff; color: var(--green-dark); border-color: #fff; }
+    .topbar .admin-nav-top .admin-section-btn { padding: 8px 14px; font-size: 14px; font-weight: 600; }
     /* The Settings sub-nav sits at the top of the scrollable content,
        right under the topbar's Dashboard/Settings row, slightly indented
        so it visually reads as "inside" Settings rather than a second row
@@ -797,7 +803,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-09-11-01';
+  var BUILD_VERSION = 'build-2026-09-11-02';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's

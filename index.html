@@ -818,7 +818,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-09-12-01';
+  var BUILD_VERSION = 'build-2026-09-13-01';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -929,14 +929,79 @@
     }
   }
 
+  // Actions verified idempotent - meaning calling them again with the exact
+  // same arguments, because the FIRST call's response was lost even though
+  // the call itself may have already gone through on the server, changes
+  // nothing further. These get up to 2 automatic, silent retries (see
+  // TRANSIENT_RETRY_DELAYS_MS/callApiAttempt_ below) on a transient
+  // failure before the user ever sees an error. Every plain read is
+  // trivially safe to retry (listed individually rather than sniffed from
+  // the action name, so a newly added action defaults to NOT retrying
+  // until someone deliberately checks it and adds it here); the writes
+  // below were each checked against Code.gs: setItemStatus/updateTruck/etc.
+  // overwrite specific fields by ID (repeating the same write is a no-op
+  // change), allocateOrderToTruck/markOrderCollected explicitly no-op if
+  // already done, and unmarkOrderCollected/deleteTruck-style deletes are
+  // harmless to repeat.
+  //
+  // Deliberately NOT included: anything that appends a brand-new row with
+  // no "does this already exist" guard of its own - addChecker, addTruck,
+  // addDriver, createNonOrderDispatch, and startTruckSession/
+  // startNewTruckSession (its session-creation path has no lock around the
+  // check-then-append, unlike allocateOrderToTruck's). Retrying one of
+  // those after a lost response risks creating a silent duplicate row, so
+  // those are left to fail once and surface normally rather than risk that.
+  // assignOrderToTruck is excluded for the same reason one level removed -
+  // it calls startTruckSession itself when the order's truck has no open
+  // trip yet, so it inherits that same unguarded create-a-session race.
+  var RETRYABLE_ACTIONS = {
+    authenticateUser: true, listCheckers: true, listTrucks: true, getTrucksForSelection: true,
+    listDrivers: true, getAdminSettings: true, probeSpreadsheet: true, searchOrders: true,
+    findOrderAcrossTrucks: true, getOrdersForSession: true, getTruckSessionsForTruckToday: true,
+    getTruckSessionState: true, getTruckAssignmentBoard: true, getOrderForChecking: true,
+    getTodaysTruckOverview: true, getDashboardForDate: true, getOrderFulfillmentOverview: true,
+    listNonOrderDispatchesForDate: true,
+    setItemStatus: true, allocateOrderToTruck: true, unallocateOrder: true,
+    markTruckDispatched: true, updateSessionTrip: true, updateTrayCounts: true,
+    updateChecker: true, updateTruck: true, updateDriver: true, deleteChecker: true,
+    deleteTruck: true, deleteDriver: true, saveDataSourceConfig: true,
+    markOrderCollected: true, unmarkOrderCollected: true
+  };
+  // Delays before each automatic retry (~0.8s, then ~2s later) - short
+  // enough that a genuinely transient hiccup (see callApiAttempt_'s comment
+  // below) has almost always cleared by the first retry, without making a
+  // real failure take much longer to finally surface.
+  var TRANSIENT_RETRY_DELAYS_MS = [800, 2000];
+  // setItemStatus/allocateOrderToTruck/updateSessionTrip may legitimately
+  // wait on a lock for several seconds under contention (Code.gs's
+  // per-order cache lock, or its script-wide LockService.waitLock(10000))
+  // before they even start their own work - see markItem's orderSaveChain
+  // comment above for why that contention should now be rare, but a longer
+  // allowance here is worth keeping as a margin regardless.
+  var EXTENDED_TIMEOUT_ACTIONS = { setItemStatus: 35000, allocateOrderToTruck: 35000, updateSessionTrip: 35000 };
+  var DEFAULT_TIMEOUT_MS = 20000;
+
   function callApi(action, params) {
+    // Captured ONCE here, rather than re-reading currentTapTarget again in
+    // apiCallFinished - that way this call's own start/finish always agree
+    // on which element they're for, even if the user has already tapped
+    // something else by the time this call's response comes back. Spans
+    // every automatic retry below, not just the first attempt, so the
+    // tapped element (and the global loading indicator) stays blocked for
+    // the whole sequence rather than flickering unblocked between retries.
+    var tapEl = currentTapTarget;
+    apiCallStarted(tapEl);
+    return callApiAttempt_(action, params, 0).finally(function () { apiCallFinished(tapEl); });
+  }
+
+  function callApiAttempt_(action, params, retryCount) {
     // Every call is a GET (see SETUP.md - Apps Script's /exec redirect drops
     // a POST body), which means browsers and some mobile/carrier proxies can
     // silently serve a cached response for an identical URL instead of
     // hitting the server again - e.g. re-checking the same order right
     // after allocating it would otherwise be able to return the stale
     // "not allocated" result. cache: 'no-store' plus a unique _=timestamp
-    // param on every request makes that impossible.
+    // param on every request (fresh on every retry too) makes that impossible.
     var url = CONFIG.API_URL + '?action=' + encodeURIComponent(action) +
       '&params=' + encodeURIComponent(JSON.stringify(params || [])) +
       '&_=' + Date.now();
@@ -944,16 +1009,12 @@
     // A request that never resolves (a stuck server-side lock, a dropped
     // connection) used to look identical to "the button did nothing" - there
     // was no timeout and no loading indicator. Now it surfaces as an actual
-    // error after 20s instead of hanging silently forever.
+    // error instead of hanging silently forever (or, for a retryable
+    // action, tries again first - see below).
     var controller = (typeof AbortController !== 'undefined') ? new AbortController() : null;
-    var timeoutId = controller ? setTimeout(function () { controller.abort(); }, 20000) : null;
+    var timeoutMs = EXTENDED_TIMEOUT_ACTIONS[action] || DEFAULT_TIMEOUT_MS;
+    var timeoutId = controller ? setTimeout(function () { controller.abort(); }, timeoutMs) : null;
 
-    // Captured ONCE here, rather than re-reading currentTapTarget again in
-    // apiCallFinished - that way this call's own start/finish always agree
-    // on which element they're for, even if the user has already tapped
-    // something else by the time this call's response comes back.
-    var tapEl = currentTapTarget;
-    apiCallStarted(tapEl);
     return fetch(url, { cache: 'no-store', signal: controller ? controller.signal : undefined })
       .then(function (r) {
         if (timeoutId) clearTimeout(timeoutId);
@@ -965,10 +1026,33 @@
       })
       .catch(function (err) {
         if (timeoutId) clearTimeout(timeoutId);
-        if (err && err.name === 'AbortError') throw new Error('Request timed out after 20s (action: ' + action + '). Check your connection and try again.');
+        var isTimeout = !!(err && err.name === 'AbortError');
+        // Code.gs's handleApiRequest_ catches every application-level error
+        // itself and always serializes valid JSON back, even for a failure
+        // (see its comment there) - so a response that fails to parse as
+        // JSON at all (r.json() throwing a SyntaxError) never came from
+        // this app's own code. It means something IN FRONT of the script
+        // answered instead, almost always Apps Script's own per-second
+        // invocation/concurrency quota being briefly hit (an HTML error
+        // page instead of a JSON one) - which normally clears itself a
+        // moment later, hence the retry below rather than failing outright.
+        var isBadResponse = err instanceof SyntaxError;
+        if ((isTimeout || isBadResponse) && RETRYABLE_ACTIONS[action] && retryCount < TRANSIENT_RETRY_DELAYS_MS.length) {
+          return new Promise(function (resolve) { setTimeout(resolve, TRANSIENT_RETRY_DELAYS_MS[retryCount]); })
+            .then(function () { return callApiAttempt_(action, params, retryCount + 1); });
+        }
+        if (isTimeout) {
+          var timeoutErr = new Error('Still waiting to hear back from the server for "' + action + '" - this can happen when a few things save at once and doesn\'t always mean something is wrong. Please try again in a moment.');
+          timeoutErr.isTransient = true;
+          throw timeoutErr;
+        }
+        if (isBadResponse) {
+          var busyErr = new Error('The server was briefly too busy to answer "' + action + '". Please try again in a moment.');
+          busyErr.isTransient = true;
+          throw busyErr;
+        }
         throw err;
-      })
-      .finally(function () { apiCallFinished(tapEl); });
+      });
   }
 
   // ------------------------------------------------------------------
@@ -1998,6 +2082,12 @@
     // Orders list or the Add Order search share this same function.
     closeAddOrderModal();
     state.currentOrderId = orderId;
+    // Fresh save queue for whichever order this turns out to be - see
+    // markItem's orderSaveChain comment above. Leftover saves from a
+    // PREVIOUS order have almost certainly already finished by the time you
+    // navigate to a new one, but this guarantees the new order's first tap
+    // is never made to wait on them regardless.
+    orderSaveChain = Promise.resolve();
     // Selecting an order IS the decision to put it on this truck, so
     // allocate it automatically instead of making that a separate
     // confirmation tap. allocateOrderToTruck is a safe no-op if the order
@@ -2203,12 +2293,34 @@
     showWsTab('orders');
   }
 
-  // One save-chain per item ID, so if a checker taps an item again (e.g.
-  // Packed, then Undo) before the first tap's save has come back, the two
-  // saves still reach the server in the order they were tapped instead of
-  // as two overlapping requests that could land out of order and leave
-  // the sheet on the wrong final status.
-  var itemSaveChains = {};
+  // One shared save-chain for the WHOLE currently-open order (reset in
+  // openOrder below whenever a different order opens) - NOT one chain per
+  // item. Tapping several different items in a burst (the normal way of
+  // checking an order - Packed, Packed, Packed, No Stock, ...) now sends
+  // its setItemStatus calls to the server ONE AT A TIME, in tap order,
+  // instead of all at once.
+  //
+  // This used to be keyed per item ID, which only stopped a REPEAT tap on
+  // the SAME item from racing itself - tapping 10 different items in a row
+  // still fired 10 fully concurrent requests, and every one of them was
+  // also trying to grab the very same per-order lock inside setItemStatus
+  // (see Code.gs) at the same moment. That's a pile of simultaneous Apps
+  // Script executions mostly just waiting on each other's lock, and a live
+  // report of "Request timed out after 20s" - plus, worse, an actual
+  // "<!DOCTYPE ... is not valid JSON" failure (Apps Script's own front door
+  // occasionally answers with an HTML error page instead of ever reaching
+  // this app's code, when it's hit with too many overlapping requests at
+  // once - see callApi's retry logic below) - traced back to exactly that,
+  // and it happened MORE often the more items got tapped in a burst, which
+  // is the normal way of checking an order, not an edge case. Serializing
+  // on the client removes the pile-up at the source: only ever one
+  // setItemStatus in flight for this order at a time, matching what the
+  // per-order lock already assumed.
+  //
+  // The screen itself still updates the instant you tap, same as always -
+  // only WHEN each save actually reaches the server changed, not when the
+  // item visibly shows as Packed/No Stock.
+  var orderSaveChain = Promise.resolve();
 
   function markItem(itemId, status, packedQty) {
     var item = state.currentOrder.items.filter(function (i) { return i.ID === itemId; })[0];
@@ -2224,13 +2336,16 @@
     item.PackedQty = (status === 'Packed' && packedQty !== undefined && packedQty !== null && packedQty !== '') ? packedQty : '';
     renderOrderDetail();
 
-    var previousSave = itemSaveChains[itemId] || Promise.resolve();
-    itemSaveChains[itemId] = previousSave.then(function () {
+    orderSaveChain = orderSaveChain.then(function () {
       return callApi('setItemStatus', [itemId, status, state.checker.name, item.PackedQty]);
     }).catch(function (err) {
-      // The save failed - re-fetch what's actually on record rather than
-      // guessing what to roll back to, since more taps on this order may
-      // have queued up (and even saved fine) since this one was made.
+      // The save failed (or, more likely now, gave up after its own
+      // automatic retries - see callApi) - re-fetch what's actually on
+      // record rather than guessing what to roll back to, since more taps
+      // on this order may have queued up (and even saved fine) since this
+      // one was made. Recovering here (rather than re-throwing) also lets
+      // the NEXT queued item's save go ahead instead of getting stuck
+      // behind this one's failure forever.
       showFatalError(err);
       return callApi('getOrderForChecking', [state.session.ID, state.currentOrderId]).then(function (result) {
         state.currentOrder = result;
@@ -2845,15 +2960,33 @@
   }
 
   function showFatalError(err) {
-    var message = 'Something went wrong: ' + (err && err.message ? err.message : err);
+    // A transient failure (callApiAttempt_'s isTransient errors - the 20s+
+    // timeout, or Apps Script's front door briefly too busy to answer) has
+    // already used up its automatic retries by the time it gets here (see
+    // callApi), and for item-checking specifically the screen re-syncs from
+    // the server right after anyway (see markItem's catch) - so it reads as
+    // a calm heads-up rather than "something went wrong", and skips the
+    // modal alert() a genuine failure still gets, so a slow save doesn't
+    // read as urgently as an actual crash.
+    var isTransient = !!(err && err.isTransient);
+    var message = isTransient ? (err.message || String(err)) : ('Something went wrong: ' + (err && err.message ? err.message : err));
     // Belt and suspenders: an on-page banner that can't be silently
     // suppressed the way a repeated alert() sometimes is, shown alongside
-    // (not instead of) the alert.
+    // (not instead of) the alert - except for a transient notice, which
+    // only ever gets the banner.
     var banner = document.getElementById('error-banner');
     if (banner) {
+      // Amber ("still working"), not red ("broken"), for a transient
+      // notice - same color already used elsewhere for an in-progress
+      // state (see badge-progress) - so the two read as visually distinct
+      // at a glance, not just in wording.
+      banner.style.background = isTransient ? '#8a6100' : '#c0392b';
+      var dismissBtn = banner.querySelector('button');
+      if (dismissBtn) dismissBtn.style.color = isTransient ? '#8a6100' : '#c0392b';
       document.getElementById('error-banner-text').textContent = message;
       banner.style.display = 'block';
     }
+    if (isTransient) return;
     try { alert(message); } catch (e) { /* some contexts block alert() entirely - the banner above still shows */ }
   }
 </script>

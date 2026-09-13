@@ -690,6 +690,7 @@
         <div class="title" id="admin-area-title">Admin</div>
         <div class="admin-nav admin-nav-top">
           <button class="active admin-section-btn" data-section="overview" onclick="showAdminSection('overview', this)">Dashboard</button>
+          <button class="admin-section-btn" data-section="history" onclick="showAdminSection('history', this)">History</button>
         </div>
       </div>
       <div class="actions">
@@ -721,12 +722,8 @@
           <div id="order-search-results" style="margin-top:10px;"></div>
         </div>
         <div class="card">
-          <div class="date-viewing-row">
-            <label style="margin:0;">Viewing</label>
-            <input type="date" id="dashboard-date-picker" onchange="loadOverview()">
-            <button class="btn btn-secondary" onclick="resetDashboardDateToToday()">Today</button>
-          </div>
-          <p class="hint" style="margin-top:0;">Picking a date here updates everything below - trucks, orders due, and overdue warnings - as of that date.</p>
+          <h3 style="margin-top:0;">Today's trucks</h3>
+          <p class="hint" style="margin-top:0;">Always shows today - for a past day, use History above.</p>
           <div id="dashboard-summary" style="display:flex; flex-wrap:wrap; gap:12px;"></div>
         </div>
         <div class="card">
@@ -738,6 +735,33 @@
         <div id="non-order-dispatches"></div>
         <div id="overdue-warnings"></div>
         <div id="dashboard-trucks"></div>
+      </div>
+
+      <!-- History mirrors Dashboard's cards exactly, but for a picked past
+           day instead of always today - see loadHistory()/renderDashboard's
+           idSuffix param below. Kept as a separate admin-managed tab
+           (rather than a date picker inline on Dashboard, which is what
+           this replaced) so Dashboard itself stays a fast, always-current
+           view, same split as the Packing & Production board's live view
+           vs. its separate day/history fetch. -->
+      <div class="admin-pane" id="admin-history" style="display:none;">
+        <div class="card">
+          <div class="date-viewing-row">
+            <label style="margin:0;">Viewing</label>
+            <input type="date" id="history-date-picker" onchange="loadHistory()">
+          </div>
+          <p class="hint" style="margin-top:0;">Pick a past day to see that day's trucks, orders due, and overdue warnings - for today, use Dashboard.</p>
+          <div id="dashboard-summary-history" style="display:flex; flex-wrap:wrap; gap:12px;"></div>
+        </div>
+        <div class="card">
+          <h3 style="margin-top:0;" id="fulfillment-title-history">Orders due</h3>
+          <p class="hint" id="fulfillment-hint-history"></p>
+          <div id="fulfillment-summary-history" style="display:flex; flex-wrap:wrap; gap:12px; margin-bottom:14px;"></div>
+          <div id="fulfillment-outstanding-history"></div>
+        </div>
+        <div id="non-order-dispatches-history"></div>
+        <div id="overdue-warnings-history"></div>
+        <div id="dashboard-trucks-history"></div>
       </div>
 
       <div class="admin-pane" id="admin-users" style="display:none;">
@@ -818,7 +842,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-09-13-01';
+  var BUILD_VERSION = 'build-2026-09-13-02';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -2488,9 +2512,9 @@
     // Admin can dispatch trucks too, not just Dispatch Manager, so this
     // button always shows here.
     document.getElementById('admin-trucks-btn').style.display = '';
-    // Always land back on today's dashboard on a fresh entry into Admin,
-    // even if a previous visit this session left a past date selected.
-    document.getElementById('dashboard-date-picker').value = todayDateInputValue();
+    // Always land back on the Dashboard on a fresh entry into Admin - it has
+    // no date picker of its own any more (always today - see History for
+    // past days), so there's nothing left to reset here.
     showScreen('screen-admin');
     showAdminSection('overview', document.querySelector('.admin-section-btn[data-section="overview"]'));
   }
@@ -2511,8 +2535,11 @@
       subnav.style.display = '';
       showAdminPane(lastSettingsPane, subnav.querySelector('button[data-pane="' + lastSettingsPane + '"]'));
     } else {
+      // 'overview' (Dashboard) or 'history' - each maps directly to its own
+      // admin-pane id (admin-overview/admin-history), unlike Settings which
+      // bundles several panes behind one sub-nav.
       subnav.style.display = 'none';
-      showAdminPane('overview', null);
+      showAdminPane(section, null);
     }
   }
 
@@ -2527,13 +2554,18 @@
       if (group) group.querySelectorAll('button').forEach(function (b) { b.classList.remove('active'); });
       btn.classList.add('active');
     }
-    if (name !== 'overview') lastSettingsPane = name;
+    // 'overview' and 'history' are both top-level sections in their own
+    // right, not Settings sub-tabs - excluding both here (not just
+    // 'overview') stops opening History from being mistaken for "the last
+    // Settings pane visited" and hijacking Settings' own remembered tab.
+    if (name !== 'overview' && name !== 'history') lastSettingsPane = name;
 
     if (name === 'users') loadUsers();
     if (name === 'trucks') loadTrucks();
     if (name === 'drivers') loadDrivers();
     if (name === 'datasource') loadDataSource();
-    if (name === 'overview') loadOverview();
+    if (name === 'overview') loadDashboard();
+    if (name === 'history') loadHistory();
   }
 
   var USER_ROLES = ['Checker', 'Dispatch Manager', 'Customer Care', 'Admin'];
@@ -2758,31 +2790,44 @@
     return d.toLocaleDateString('en-ZA', { day: 'numeric', month: 'short' });
   }
 
-  function resetDashboardDateToToday() {
-    document.getElementById('dashboard-date-picker').value = todayDateInputValue();
-    loadOverview();
+  // Dashboard is always today - no date picker of its own any more (see
+  // History below for any other day). idSuffix '' throughout the render
+  // functions below picks out Dashboard's own set of element ids.
+  function loadDashboard() {
+    var todayStr = todayDateInputValue();
+    callApi('getDashboardForDate', [todayStr]).then(function (data) { renderDashboard(data, ''); }).catch(showFatalError);
+    callApi('getOrderFulfillmentOverview', [todayStr]).then(function (data) { renderFulfillmentOverview(data, ''); }).catch(showFatalError);
+    callApi('listNonOrderDispatchesForDate', [todayStr]).then(function (list) { renderNonOrderDispatches(list, ''); }).catch(showFatalError);
   }
 
-  function loadOverview() {
-    var dateInput = document.getElementById('dashboard-date-picker');
+  // History mirrors loadDashboard exactly (same three calls, same render
+  // functions) but for whichever day is picked, using the '-history'
+  // idSuffix to target its own separate set of element ids so it never
+  // clobbers whatever Dashboard is currently showing. Defaults to
+  // yesterday on first open, since today's own view already lives on
+  // Dashboard - but any past date (or today, for comparison) can still be
+  // picked here.
+  function loadHistory() {
+    var dateInput = document.getElementById('history-date-picker');
     var todayStr = todayDateInputValue();
-    if (!dateInput.value) dateInput.value = todayStr;
+    if (!dateInput.value) {
+      var y = new Date();
+      y.setDate(y.getDate() - 1);
+      var pad = function (n) { return (n < 10 ? '0' : '') + n; };
+      dateInput.value = y.getFullYear() + '-' + pad(y.getMonth() + 1) + '-' + pad(y.getDate());
+    }
     if (!dateInput.max) dateInput.max = todayStr; // no picking a future date - there's nothing there yet
-    callApi('getDashboardForDate', [dateInput.value]).then(renderDashboard).catch(showFatalError);
-    // The order-fulfillment summary and overdue warnings now move together
-    // with the rest of the page - pass the same selected date through so
-    // "orders due" and "overdue" are evaluated as of THAT day too, instead
-    // of always meaning right now regardless of what's picked above.
-    callApi('getOrderFulfillmentOverview', [dateInput.value]).then(renderFulfillmentOverview).catch(showFatalError);
-    callApi('listNonOrderDispatchesForDate', [dateInput.value]).then(renderNonOrderDispatches).catch(showFatalError);
+    callApi('getDashboardForDate', [dateInput.value]).then(function (data) { renderDashboard(data, '-history'); }).catch(showFatalError);
+    callApi('getOrderFulfillmentOverview', [dateInput.value]).then(function (data) { renderFulfillmentOverview(data, '-history'); }).catch(showFatalError);
+    callApi('listNonOrderDispatchesForDate', [dateInput.value]).then(function (list) { renderNonOrderDispatches(list, '-history'); }).catch(showFatalError);
   }
 
   // Non-order dispatches (see openNonOrderDispatchModal above) are simple
   // dated log entries, not TruckSessions - shown here so Admin/Dispatch
   // Manager can still see at a glance which trucks were sent out for
   // something other than today's deliveries, and why.
-  function renderNonOrderDispatches(list) {
-    var el = document.getElementById('non-order-dispatches');
+  function renderNonOrderDispatches(list, idSuffix) {
+    var el = document.getElementById('non-order-dispatches' + idSuffix);
     if (list.length === 0) { el.innerHTML = ''; return; }
     el.innerHTML = '<div class="card">' +
       '<h3 style="margin-top:0;">Non-order dispatches (' + list.length + ')</h3>' +
@@ -2796,61 +2841,63 @@
       '</div>';
   }
 
-  // Populated by renderFulfillmentOverview, keyed by orderId, so the "Mark
-  // Collected" buttons below can look up an order's number/customer without
-  // embedding customer names (which may contain quotes) into onclick HTML.
-  var fulfillmentOrdersById = {};
+  // Populated by renderFulfillmentOverview, keyed by idSuffix then orderId,
+  // so the "Mark Collected" buttons below can look up an order's number/
+  // customer without embedding customer names (which may contain quotes)
+  // into onclick HTML - and so Dashboard's and History's own copies of this
+  // never clobber each other, since both can be loaded into memory at once
+  // (only one is ever visible, but nothing stops both panes having loaded).
+  var fulfillmentOrdersById = { '': {}, '-history': {} };
 
-  function renderFulfillmentOverview(data) {
-    fulfillmentOrdersById = {};
-    data.today.outstanding.concat(data.overdueWarnings).forEach(function (o) { fulfillmentOrdersById[o.orderId] = o; });
+  function renderFulfillmentOverview(data, idSuffix) {
+    fulfillmentOrdersById[idSuffix] = {};
+    data.today.outstanding.concat(data.overdueWarnings).forEach(function (o) { fulfillmentOrdersById[idSuffix][o.orderId] = o; });
 
-    // This section now tracks whichever date is selected above (see
-    // loadOverview), instead of always meaning "right now" - swap the
-    // wording between "today" and the picked date so it's clear which one
-    // is being shown.
+    // Dashboard always passes today's date (always "today" wording);
+    // History passes whichever date is picked there - swap the wording
+    // between "today" and the picked date so it's clear which one is shown.
     var isViewingToday = data.date === todayDateInputValue();
     var dayLabel = isViewingToday ? 'today' : formatDateForDisplay(data.date);
-    document.getElementById('fulfillment-title').textContent = isViewingToday
+    document.getElementById('fulfillment-title' + idSuffix).textContent = isViewingToday
       ? "Today's orders - dispatched vs outstanding"
       : 'Orders due ' + dayLabel + ' - dispatched vs outstanding';
-    document.getElementById('fulfillment-hint').textContent = isViewingToday
+    document.getElementById('fulfillment-hint' + idSuffix).textContent = isViewingToday
       ? "Everything due for delivery today, so you can confirm at the end of the day that it's all accounted for."
       : 'Everything due for delivery on ' + dayLabel + '.';
 
     var t = data.today;
-    document.getElementById('fulfillment-summary').innerHTML =
+    document.getElementById('fulfillment-summary' + idSuffix).innerHTML =
       statTile(t.total, 'Orders due ' + dayLabel) +
       statTile(t.dispatchedCount, 'Dispatched') +
       statTile(t.collectedCount, 'Collected') +
       statTile(t.outstandingCount, 'Outstanding', t.outstandingCount > 0);
 
-    var outstandingEl = document.getElementById('fulfillment-outstanding');
+    var outstandingEl = document.getElementById('fulfillment-outstanding' + idSuffix);
     outstandingEl.innerHTML = t.outstanding.length === 0
       ? '<div class="empty">All orders due ' + dayLabel + ' are dispatched or collected.</div>'
-      : t.outstanding.map(function (o) { return fulfillmentOrderRow(o, false); }).join('');
+      : t.outstanding.map(function (o) { return fulfillmentOrderRow(o, false, idSuffix); }).join('');
 
-    var overdueEl = document.getElementById('overdue-warnings');
+    var overdueEl = document.getElementById('overdue-warnings' + idSuffix);
     var overdueTitle = 'Overdue as of ' + dayLabel + ' - not dispatched or collected (' + data.overdueWarnings.length + ')';
     overdueEl.innerHTML = data.overdueWarnings.length === 0 ? '' :
       '<div class="card dash-truck-card dash-alert">' +
       '<h3 style="margin-top:0; color:var(--red);">' + escapeHtml(overdueTitle) + '</h3>' +
-      data.overdueWarnings.map(function (o) { return fulfillmentOrderRow(o, true); }).join('') +
+      data.overdueWarnings.map(function (o) { return fulfillmentOrderRow(o, true, idSuffix); }).join('') +
       '</div>';
   }
 
-  function fulfillmentOrderRow(o, showDate) {
+  function fulfillmentOrderRow(o, showDate, idSuffix) {
     return '<div class="dash-order-row"><div>' + escapeHtml(o.orderNumber) + ' - ' + escapeHtml(o.customer) +
       (showDate ? ' <span class="hint">(due ' + escapeHtml(o.deliveryDate) + ')</span>' : '') + '</div>' +
-      '<div><button class="btn btn-secondary" style="padding:6px 10px; font-size:13px;" onclick="collectOrderUi(\'' + o.orderId + '\')">Mark Collected</button></div></div>';
+      '<div><button class="btn btn-secondary" style="padding:6px 10px; font-size:13px;" onclick="collectOrderUi(\'' + o.orderId + '\', \'' + idSuffix + '\')">Mark Collected</button></div></div>';
   }
 
-  function collectOrderUi(orderId) {
-    var o = fulfillmentOrdersById[orderId];
+  function collectOrderUi(orderId, idSuffix) {
+    var o = fulfillmentOrdersById[idSuffix][orderId];
     if (!o) return;
     var collectedBy = state.adminRole === 'dispatchManager' ? 'Dispatch Manager' : 'Admin';
     callApi('markOrderCollected', [o.orderId, o.orderNumber, o.customer, collectedBy]).then(function () {
-      loadOverview();
+      if (idSuffix === '-history') loadHistory(); else loadDashboard();
     }).catch(showFatalError);
   }
 
@@ -2862,10 +2909,10 @@
     return ['traySmall', 'trayMedium', 'trayLarge', 'trayOther'].every(function (k) { return t[k] === '' || t[k] === null || t[k] === undefined; });
   }
 
-  function renderDashboard(data) {
+  function renderDashboard(data, idSuffix) {
     var s = data.summary;
     var isToday = data.date === todayDateInputValue();
-    document.getElementById('dashboard-summary').innerHTML =
+    document.getElementById('dashboard-summary' + idSuffix).innerHTML =
       statTile(s.totalTrucks, 'Trucks') +
       statTile(s.dispatchedCount, 'Dispatched') +
       statTile(s.inProgressCount, 'In progress') +
@@ -2874,7 +2921,7 @@
       statTile(s.totalShortPackedItems, 'Short-packed items', s.totalShortPackedItems > 0) +
       statTile(s.forcedDispatchCount, 'Dispatched with warnings', s.forcedDispatchCount > 0);
 
-    var trucksEl = document.getElementById('dashboard-trucks');
+    var trucksEl = document.getElementById('dashboard-trucks' + idSuffix);
     if (data.trucks.length === 0) {
       trucksEl.innerHTML = '<div class="card"><div class="empty">' +
         (isToday ? 'No trucks started today yet.' : 'No trucks started on ' + escapeHtml(data.date) + '.') +

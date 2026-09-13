@@ -140,6 +140,19 @@
     .tile:active { background: #eef3ef; }
     .tile .name { font-size: 17px; font-weight: 700; }
     .tile .meta { font-size: 13px; color: var(--grey); margin-top: 2px; }
+    /* A quiet, deliberately understated "Remove from truck" action inside a
+       tile that's otherwise a big tap target for openOrder() - a full-size
+       btn-danger here would visually compete with the order's own name/badge
+       on every single row. Sized at 44px min-height/width for a comfortable
+       tap target despite the small footprint (see TAP_TARGET_SELECTOR above
+       for how its in-flight state is handled - it rides on the enclosing
+       .tile like every other action inside one). */
+    .tile-remove-btn {
+      background: none; border: 1px solid var(--red); color: var(--red);
+      border-radius: 8px; padding: 8px 10px; font-size: 12px; font-weight: 600;
+      min-height: 44px; flex-shrink: 0;
+    }
+    .tile-remove-btn:active { background: rgba(198, 40, 40, 0.1); }
     .cc-label { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--grey); margin-bottom: 3px; }
     .cc-value { font-size: 16px; font-weight: 600; color: #1a1a1a; }
 
@@ -446,9 +459,11 @@
 
   <!-- Dispatch blocked: at least one order on this truck isn't fully
        checked yet - a hard stop, not a warning, so there's no "dispatch
-       anyway" option here (unlike dispatch-modal below). The Dispatch
-       Manager's way around a genuinely stuck order is to drag it off this
-       truck on the Trucks board, not to force past this screen. -->
+       anyway" option here (unlike dispatch-modal below). Each listed order
+       gets its own Remove button (see attemptDispatch/removeBlockedOrderUi)
+       so a stuck order can be pulled off this truck right here - no longer
+       requires a Dispatch Manager/Admin to drag it off on the separate
+       Trucks board. -->
   <div class="modal-backdrop" id="dispatch-blocked-modal">
     <div class="modal">
       <h3 style="margin-top:0; color:var(--red);">Can't dispatch yet</h3>
@@ -803,7 +818,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-09-11-02';
+  var BUILD_VERSION = 'build-2026-09-12-01';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -1954,8 +1969,28 @@
       return '<div class="tile" onclick="openOrder(\'' + o.orderId + '\')">' +
         '<div><div class="name">' + escapeHtml(o.orderNumber) + ' - ' + escapeHtml(o.customer) + '</div>' +
         '<div class="meta">' + o.itemCount + ' item(s)</div></div>' +
-        '<div><span class="badge ' + badgeClass + '">' + escapeHtml(o.status) + '</span></div></div>';
+        '<div style="display:flex; align-items:center; gap:10px;">' +
+          '<span class="badge ' + badgeClass + '">' + escapeHtml(o.status) + '</span>' +
+          '<button class="tile-remove-btn" onclick="event.stopPropagation(); removeOrderFromTruckUi(\'' + o.orderId + '\', ' + jsStrAttr_(o.orderNumber) + ')">Remove</button>' +
+        '</div></div>';
     }).join('');
+  }
+
+  // Lets a checker pull a stuck/wrong order off THIS truck directly from the
+  // main Orders list, instead of the only previous way out - a Dispatch
+  // Manager or Admin dragging it off on the separate Trucks board (which a
+  // plain Checker can't even open). Most useful right when dispatch is
+  // blocked on an order that's never going to get checked (out of stock
+  // entirely, allocated to the wrong truck, etc.) - remove it here and the
+  // truck can dispatch without it. Same unallocateOrder call and "clears
+  // checking progress" warning as the existing allocated-elsewhere Unallocate
+  // button on the order-detail screen (see unallocateCurrentOrderUi) - this
+  // is just a second, more direct entry point to the same action.
+  function removeOrderFromTruckUi(orderId, orderNumber) {
+    if (!confirm('Remove ' + orderNumber + ' from this truck? Its checking progress will be cleared - it can be allocated fresh to any truck afterwards.')) return;
+    callApi('unallocateOrder', [orderId]).then(function () {
+      refreshMyOrders();
+    }).catch(showFatalError);
   }
 
   function openOrder(orderId) {
@@ -2267,13 +2302,18 @@
     callApi('markTruckDispatched', [state.session.ID, state.checker.name, false]).then(function (res) {
       if (res.ok) { onDispatched(); return; }
       // Incomplete orders are a hard block - no "dispatch anyway" option,
-      // unlike the driver/route/tray-count warnings below. The way around a
-      // genuinely stuck order is for the Dispatch Manager to drag it off
-      // this truck on the Trucks board, not to force past this screen.
+      // unlike the driver/route/tray-count warnings below. The way past a
+      // genuinely stuck order is to remove it from the truck right here
+      // (see removeBlockedOrderUi below) - it no longer requires finding a
+      // Dispatch Manager/Admin to drag it off on the separate Trucks board.
       if (res.blocked) {
         document.getElementById('dispatch-blocked-reason').textContent = res.blockedReason;
         document.getElementById('dispatch-blocked-orders').innerHTML = res.incompleteOrders.map(function (o) {
-          return '<div class="hint" style="margin-bottom:4px;">- ' + escapeHtml(o.orderNumber) + ' - ' + escapeHtml(o.customer) + ' (' + escapeHtml(o.status) + ')</div>';
+          return '<div class="tile" style="padding:12px 14px; margin-bottom:8px;">' +
+            '<div><div class="name" style="font-size:15px;">' + escapeHtml(o.orderNumber) + ' - ' + escapeHtml(o.customer) + '</div>' +
+            '<div class="meta">' + escapeHtml(o.status) + '</div></div>' +
+            '<button class="tile-remove-btn" onclick="removeBlockedOrderUi(\'' + o.orderId + '\', ' + jsStrAttr_(o.orderNumber) + ')">Remove</button>' +
+          '</div>';
         }).join('');
         document.getElementById('dispatch-blocked-modal').classList.add('active');
         return;
@@ -2282,6 +2322,21 @@
         return '<div class="hint" style="margin-bottom:6px;">- ' + escapeHtml(w) + '</div>';
       }).join('');
       document.getElementById('dispatch-modal').classList.add('active');
+    }).catch(showFatalError);
+  }
+
+  // Removes one of the still-incomplete orders straight from the "Can't
+  // dispatch yet" list, then immediately re-attempts the dispatch - which
+  // either succeeds outright, re-opens this same modal with that order gone
+  // from the list (if others are still incomplete), or moves on to the
+  // driver/route/tray-count warnings modal, exactly as if the checker had
+  // tapped "Mark truck as Dispatched" again by hand.
+  function removeBlockedOrderUi(orderId, orderNumber) {
+    if (!confirm('Remove ' + orderNumber + ' from this truck? Its checking progress will be cleared - it can be allocated fresh to any truck afterwards.')) return;
+    callApi('unallocateOrder', [orderId]).then(function () {
+      closeDispatchBlockedModal();
+      refreshMyOrders();
+      attemptDispatch();
     }).catch(showFatalError);
   }
 
@@ -2383,7 +2438,7 @@
             '</select></td>' +
             '<td><label class="switch-label"><input type="checkbox" ' + (u.Active !== false ? 'checked' : '') +
             ' onchange="updateUserField(\'' + u.ID + '\', \'Active\', this.checked)"> Active</label></td>' +
-            '<td><button class="btn btn-danger" onclick="deleteUserUi(\'' + u.ID + '\', ' + JSON.stringify(u.Name) + ')">Delete</button></td>' +
+            '<td><button class="btn btn-danger" onclick="deleteUserUi(\'' + u.ID + '\', ' + jsStrAttr_(u.Name) + ')">Delete</button></td>' +
             '</tr>';
         }).join('');
     }).catch(showFatalError);
@@ -2432,7 +2487,7 @@
             '<td><input type="text" style="' + TRUCK_FIELD_STYLE + '" value="' + escapeHtml(t.Type) + '" onchange="updateTruckField(\'' + t.ID + '\', \'Type\', this.value)"></td>' +
             '<td><label class="switch-label"><input type="checkbox" ' + (t.Active ? 'checked' : '') +
             ' onchange="updateTruckField(\'' + t.ID + '\', \'Active\', this.checked)"> Active</label></td>' +
-            '<td><button class="btn btn-danger" onclick="deleteTruckUi(\'' + t.ID + '\', ' + JSON.stringify(t.Name) + ')">Delete</button></td>' +
+            '<td><button class="btn btn-danger" onclick="deleteTruckUi(\'' + t.ID + '\', ' + jsStrAttr_(t.Name) + ')">Delete</button></td>' +
             '</tr>';
         }).join('');
     }).catch(showFatalError);
@@ -2474,7 +2529,7 @@
             '<td><input type="tel" style="' + TRUCK_FIELD_STYLE + '" value="' + escapeHtml(d.Contact) + '" onchange="updateDriverField(\'' + d.ID + '\', \'Contact\', this.value)"></td>' +
             '<td><label class="switch-label"><input type="checkbox" ' + (d.Active ? 'checked' : '') +
             ' onchange="updateDriverField(\'' + d.ID + '\', \'Active\', this.checked)"> Active</label></td>' +
-            '<td><button class="btn btn-danger" onclick="deleteDriverUi(\'' + d.ID + '\', ' + JSON.stringify(d.Name) + ')">Delete</button></td>' +
+            '<td><button class="btn btn-danger" onclick="deleteDriverUi(\'' + d.ID + '\', ' + jsStrAttr_(d.Name) + ')">Delete</button></td>' +
             '</tr>';
         }).join('');
     }).catch(showFatalError);
@@ -2768,6 +2823,21 @@
     return String(str == null ? '' : str).replace(/[&<>"']/g, function (c) {
       return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
     });
+  }
+
+  // Safely embeds a value as a single-quoted JS string literal inside an
+  // onclick="..." (double-quoted) HTML attribute - e.g.
+  // onclick="fn(' + jsStrAttr_(name) + ')". Escapes backslash/quote for the
+  // JS string itself, THEN HTML-escapes the result for the surrounding
+  // attribute, so a value containing an apostrophe, ampersand, or (as here)
+  // an embedded double quote can't break out of either layer. Plain
+  // JSON.stringify(...) is NOT safe for this - it produces double quotes,
+  // which prematurely close a double-quoted onclick="..." attribute the
+  // instant the browser's HTML parser hits them, well before the JS engine
+  // ever sees the string.
+  function jsStrAttr_(str) {
+    var jsLiteral = "'" + String(str == null ? '' : str).replace(/\\/g, '\\\\').replace(/'/g, "\\'") + "'";
+    return escapeHtml(jsLiteral);
   }
 
   function formatTime(iso) {

@@ -551,6 +551,21 @@
     <div class="content">
       <div id="od-warning" class="error"></div>
       <div class="card" id="od-items"></div>
+      <!-- Only shown when this order's RequiresCoa flag (snapshotted from
+           Packing & Production at allocation time - see allocateOrderToTruck
+           in Code.gs) is true. Ticking this is the checker's own on-screen
+           confirmation that a physical Certificate of Analysis is attached -
+           separate from RequiresCoa itself, and required before Done can be
+           tapped (see renderOrderDetail's doneBtn.disabled below). -->
+      <div class="card" id="od-coa-block" style="display:none; margin-top:20px;">
+        <label style="display:flex; align-items:flex-start; gap:10px; cursor:pointer;">
+          <input type="checkbox" id="od-coa-checkbox" onchange="toggleCoaConfirmed()" style="margin-top:3px; width:20px; height:20px;">
+          <span>
+            <div style="font-weight:600;">COA attached</div>
+            <div class="hint">This order requires a Certificate of Analysis. Confirm the physical COA is attached to the order before it can be marked Done.</div>
+          </span>
+        </label>
+      </div>
       <div class="card" style="margin-top:20px;">
         <button class="btn btn-primary btn-block" id="od-done-btn" onclick="finishOrder()" disabled>Done</button>
       </div>
@@ -842,7 +857,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-09-13-02';
+  var BUILD_VERSION = 'build-2026-09-14-01';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -985,7 +1000,7 @@
     getTruckSessionState: true, getTruckAssignmentBoard: true, getOrderForChecking: true,
     getTodaysTruckOverview: true, getDashboardForDate: true, getOrderFulfillmentOverview: true,
     listNonOrderDispatchesForDate: true,
-    setItemStatus: true, allocateOrderToTruck: true, unallocateOrder: true,
+    setItemStatus: true, setOrderCoaConfirmed: true, allocateOrderToTruck: true, unallocateOrder: true,
     markTruckDispatched: true, updateSessionTrip: true, updateTrayCounts: true,
     updateChecker: true, updateTruck: true, updateDriver: true, deleteChecker: true,
     deleteTruck: true, deleteDriver: true, saveDataSourceConfig: true,
@@ -2247,6 +2262,7 @@
         escapeHtml(result.truckName) + '". Unallocate it from that truck first if it needs to move to this one.</div>' +
         '<button class="btn btn-danger btn-block" id="unallocate-order-btn" onclick="unallocateCurrentOrderUi()">Unallocate from ' + escapeHtml(result.truckName) + '</button>';
       doneBtn.style.display = 'none';
+      document.getElementById('od-coa-block').style.display = 'none';
       return;
     }
 
@@ -2262,6 +2278,7 @@
       el.innerHTML = '<div class="hint" style="margin-bottom:14px;">' + s.itemCount + ' item(s). This order isn\'t allocated to a truck right now.</div>' +
         '<button class="btn btn-primary btn-block" id="allocate-order-btn" onclick="allocateOrderUi()">Allocate to This Truck</button>';
       doneBtn.style.display = 'none';
+      document.getElementById('od-coa-block').style.display = 'none';
       return;
     }
 
@@ -2309,8 +2326,43 @@
     }).join('');
 
     var allResolved = result.items.length > 0 && result.items.every(function (i) { return i.Status !== 'Pending'; });
+
+    // RequiresCoa comes back from the sheet as a real boolean (see
+    // parseBoolCell_/allocateOrderToTruck in Code.gs), but guard with truthy
+    // checks anyway rather than assuming - a blank/undefined cell should
+    // never block Done.
+    var requiresCoa = !!oc.RequiresCoa;
+    var coaConfirmed = !!oc.CoaConfirmed;
+    var coaBlock = document.getElementById('od-coa-block');
+    coaBlock.style.display = requiresCoa ? 'block' : 'none';
+    document.getElementById('od-coa-checkbox').checked = coaConfirmed;
+
     doneBtn.style.display = 'block';
-    doneBtn.disabled = !allResolved;
+    doneBtn.disabled = !allResolved || (requiresCoa && !coaConfirmed);
+  }
+
+  // Ticking/unticking the COA checkbox on the order-detail screen. Mirrors
+  // markItem's optimistic-update-then-save pattern: the checkbox and the
+  // Done button's enabled state update immediately, and the actual
+  // setOrderCoaConfirmed save happens in the background. setOrderCoaConfirmed
+  // is idempotent (see RETRYABLE_ACTIONS below and its own comment in
+  // Code.gs), so on failure the simplest safe recovery is to re-fetch what's
+  // actually on record - same as markItem's catch - rather than trying to
+  // guess whether the save landed.
+  function toggleCoaConfirmed() {
+    var oc = state.currentOrder.orderCheck;
+    var confirmed = document.getElementById('od-coa-checkbox').checked;
+    oc.CoaConfirmed = confirmed;
+    oc.CoaConfirmedBy = confirmed ? state.checker.name : '';
+    renderOrderDetail();
+
+    callApi('setOrderCoaConfirmed', [oc.ID, confirmed, state.checker.name]).catch(function (err) {
+      showFatalError(err);
+      return callApi('getOrderForChecking', [state.session.ID, state.currentOrderId]).then(function (result) {
+        state.currentOrder = result;
+        renderOrderDetail();
+      });
+    });
   }
 
   function finishOrder() {

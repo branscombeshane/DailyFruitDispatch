@@ -227,8 +227,6 @@
        No Stock items) still end up one per line same as before. */
     .item-actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
     .item-actions .btn { flex: 1 1 30%; min-width: 90px; padding: 12px 8px; font-size: 13px; }
-    .item-row.resolved-packed { opacity: 0.7; }
-    .item-row.resolved-nostock { opacity: 0.7; }
     .status-line { font-size: 13px; font-weight: 700; margin-top: 8px; }
     .status-line.packed { color: var(--green-dark); }
     .status-line.nostock { color: var(--red); }
@@ -245,8 +243,6 @@
     }
 
     .empty { text-align: center; color: var(--grey); padding: 40px 20px; }
-
-    .link-btn { background: none; border: none; color: var(--grey); font-size: 13px; text-decoration: underline; }
 
     .admin-nav { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
     .admin-nav button { padding: 10px 14px; border-radius: 8px; border: 1px solid var(--border); background: #fff; font-size: 14px; }
@@ -856,7 +852,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-09-16-01';
+  var BUILD_VERSION = 'build-2026-09-16-02';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's

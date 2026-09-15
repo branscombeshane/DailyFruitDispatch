@@ -189,22 +189,17 @@
        app's rounded/light-border style - reported as "looks odd" on the
        driver-picker dropdowns specifically, but this affects every select
        in the app (a couple of admin ones too), so it's fixed once here
-       rather than one screen at a time. #nod-modal already had its own
-       near-identical scoped copy of this for its selects (fine to leave -
-       harmless duplicate, same values). */
-    input[type=text], input[type=password], input[type=number], input[type=tel], select {
+       rather than one screen at a time. textarea folded into the same rule
+       (previously a scoped copy just for the old Non-Order Dispatch modal,
+       now shared by the Add Job modal's instructions box too). */
+    input[type=text], input[type=password], input[type=number], input[type=tel], select, textarea {
       width: 100%; padding: 14px; font-size: 16px; border: 1px solid var(--border); border-radius: 10px; margin-bottom: 12px;
       font-family: inherit; background: #fff; color: var(--text);
     }
+    textarea { resize: vertical; }
     label { font-size: 13px; font-weight: 600; color: var(--grey); display: block; margin-bottom: 6px; }
     .error { color: var(--red); font-size: 14px; margin: 8px 0; min-height: 18px; }
     .hint { color: var(--grey); font-size: 13px; }
-
-    #nod-modal select, #nod-modal textarea {
-      width: 100%; padding: 12px; font-size: 15px; border: 1px solid var(--border); border-radius: 10px;
-      font-family: inherit; box-sizing: border-box; background: #fff;
-    }
-    #nod-modal textarea { resize: vertical; }
 
     /* --- Tabs --- */
     .tabs { display: flex; gap: 8px; margin-bottom: 16px; }
@@ -432,7 +427,6 @@
         <div class="sub" id="board-user-name"></div>
       </div>
       <div class="actions">
-        <button onclick="openNonOrderDispatchModal()">Non-Order Dispatch</button>
         <button onclick="backToAdminArea()">Dashboard</button>
         <button onclick="goToSettings()" id="board-settings-btn" style="display:none;">Settings</button>
         <button onclick="logout()">Log out</button>
@@ -504,21 +498,27 @@
       <div class="tabpane active" id="tabpane-trays">
         <div class="card">
           <div class="hint">Count of fruit trays loaded on this truck, by size</div>
-          <div class="tray-field-row">
-            <label for="tray-input-small">Small</label>
-            <input type="number" inputmode="numeric" min="0" id="tray-input-small" placeholder="0" onchange="saveTrayCounts()">
-          </div>
-          <div class="tray-field-row">
-            <label for="tray-input-medium">Medium</label>
-            <input type="number" inputmode="numeric" min="0" id="tray-input-medium" placeholder="0" onchange="saveTrayCounts()">
-          </div>
-          <div class="tray-field-row">
-            <label for="tray-input-large">Large</label>
-            <input type="number" inputmode="numeric" min="0" id="tray-input-large" placeholder="0" onchange="saveTrayCounts()">
-          </div>
-          <div class="tray-field-row">
-            <label for="tray-input-other">Other</label>
-            <input type="number" inputmode="numeric" min="0" id="tray-input-other" placeholder="0" onchange="saveTrayCounts()">
+          <label style="display:flex; align-items:center; gap:8px; margin:10px 0; cursor:pointer;">
+            <input type="checkbox" id="tray-no-trays-checkbox" onchange="toggleNoTrays()" style="width:18px; height:18px;">
+            <span>No fruit trays on this dispatch</span>
+          </label>
+          <div id="tray-count-fields">
+            <div class="tray-field-row">
+              <label for="tray-input-small">Small</label>
+              <input type="number" inputmode="numeric" min="0" id="tray-input-small" placeholder="0" onchange="saveTrayCounts()">
+            </div>
+            <div class="tray-field-row">
+              <label for="tray-input-medium">Medium</label>
+              <input type="number" inputmode="numeric" min="0" id="tray-input-medium" placeholder="0" onchange="saveTrayCounts()">
+            </div>
+            <div class="tray-field-row">
+              <label for="tray-input-large">Large</label>
+              <input type="number" inputmode="numeric" min="0" id="tray-input-large" placeholder="0" onchange="saveTrayCounts()">
+            </div>
+            <div class="tray-field-row">
+              <label for="tray-input-other">Other</label>
+              <input type="number" inputmode="numeric" min="0" id="tray-input-other" placeholder="0" onchange="saveTrayCounts()">
+            </div>
           </div>
           <div class="hint" id="tray-updated" style="text-align:center;"></div>
         </div>
@@ -529,7 +529,10 @@
            this doesn't show every order in today's Packing & Production
            data by default. -->
       <div class="tabpane" id="tabpane-orders">
-        <button class="btn btn-secondary btn-block" style="margin-bottom:14px;" onclick="openAddOrderModal()">+ Add Order</button>
+        <div style="display:flex; gap:10px; margin-bottom:14px;">
+          <button class="btn btn-secondary" style="flex:1;" onclick="openAddOrderModal()">+ Add Order</button>
+          <button class="btn btn-secondary" style="flex:1;" onclick="openAddJobModal()">+ Add Job</button>
+        </div>
         <div id="my-orders-list"></div>
       </div>
 
@@ -672,29 +675,25 @@
     </div>
   </div>
 
-  <!-- Non-Order Dispatch: log a truck being sent out for something other
-       than today's order deliveries - an errand, a supplier collection,
-       etc. Dispatch Manager/Admin only, triggered from the Trucks board
-       topbar. Deliberately NOT a TruckSessions record and doesn't touch the
-       usual dispatch checklist at all - just a simple dated log entry (see
-       createNonOrderDispatch/listNonOrderDispatchesForDate in Code.gs). -->
-  <div class="modal-backdrop" id="nod-modal">
+  <!-- Add Job: a non-order instruction on THIS truck's current trip -
+       "collect crates from ABC Farms", "drop pallets at the depot", and so
+       on. Any checker on the truck, right alongside "+ Add Order" in the
+       Orders pane. Replaces the old Non-Order Dispatch feature (Dispatch
+       Manager/Admin only, a separate logged record untouched by the
+       dispatch checklist) per Shane's request 2026-09-16 - a Job IS tied to
+       this trip and DOES block dispatch until marked Done, the same as a
+       real order (see addJobToTruck/setJobStatus in Code.gs). -->
+  <div class="modal-backdrop" id="add-job-modal">
     <div class="modal">
-      <h3 style="margin-top:0;">Non-Order Dispatch</h3>
-      <div class="hint" style="margin-bottom:12px;">For a truck sent out for something other than today's deliveries - an errand, a supplier collection, and so on.</div>
-      <label>Truck</label>
-      <select id="nod-truck-select" style="width:100%; box-sizing:border-box; margin-bottom:12px;"></select>
-      <label>Driver - pick from the list, or type a name below</label>
-      <div style="display:flex; gap:8px;">
-        <select id="nod-driver-select" style="flex:1; margin-bottom:8px;" onchange="onNodDriverSelectChange()"></select>
-        <input type="tel" id="nod-driver-phone-input" placeholder="Contact number" autocomplete="off" style="flex:1; margin-bottom:8px;">
-      </div>
-      <input type="text" id="nod-driver-manual-name-input" placeholder="Or type a driver name not on the list" autocomplete="off" style="margin-bottom:12px;">
-      <label>What's the truck being sent for?</label>
-      <textarea id="nod-details-input" rows="3" placeholder="e.g. Collecting crates from ABC Farms"></textarea>
-      <div class="error" id="nod-modal-error"></div>
-      <button class="btn btn-primary btn-block" style="margin-bottom:10px;" onclick="saveNonOrderDispatch()">Save</button>
-      <button class="btn btn-secondary btn-block" onclick="closeNonOrderDispatchModal()">Cancel</button>
+      <h3 style="margin-top:0;">Add Job</h3>
+      <div class="hint" style="margin-bottom:12px;">For something this truck needs to do that isn't one of today's orders. It'll show up in this truck's Orders list and has to be marked Done before the truck can dispatch, same as a real order.</div>
+      <label for="add-job-subject-input">Order number or subject line</label>
+      <input type="text" id="add-job-subject-input" placeholder="e.g. Collection from ABC Farms" autocomplete="off">
+      <label for="add-job-instructions-input">Instructions</label>
+      <textarea id="add-job-instructions-input" rows="4" placeholder="What needs to happen?"></textarea>
+      <div class="error" id="add-job-modal-error"></div>
+      <button class="btn btn-primary btn-block" style="margin-bottom:10px;" onclick="saveAddJob()">Save</button>
+      <button class="btn btn-secondary btn-block" onclick="closeAddJobModal()">Cancel</button>
     </div>
   </div>
 
@@ -747,7 +746,7 @@
           <div id="fulfillment-summary" style="display:flex; flex-wrap:wrap; gap:12px; margin-bottom:14px;"></div>
           <div id="fulfillment-outstanding"></div>
         </div>
-        <div id="non-order-dispatches"></div>
+        <div id="jobs-today"></div>
         <div id="overdue-warnings"></div>
         <div id="dashboard-trucks"></div>
       </div>
@@ -774,7 +773,7 @@
           <div id="fulfillment-summary-history" style="display:flex; flex-wrap:wrap; gap:12px; margin-bottom:14px;"></div>
           <div id="fulfillment-outstanding-history"></div>
         </div>
-        <div id="non-order-dispatches-history"></div>
+        <div id="jobs-today-history"></div>
         <div id="overdue-warnings-history"></div>
         <div id="dashboard-trucks-history"></div>
       </div>
@@ -857,7 +856,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-09-15-01';
+  var BUILD_VERSION = 'build-2026-09-16-01';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -985,7 +984,7 @@
   //
   // Deliberately NOT included: anything that appends a brand-new row with
   // no "does this already exist" guard of its own - addChecker, addTruck,
-  // addDriver, createNonOrderDispatch, and startTruckSession/
+  // addDriver, addJobToTruck, and startTruckSession/
   // startNewTruckSession (its session-creation path has no lock around the
   // check-then-append, unlike allocateOrderToTruck's). Retrying one of
   // those after a lost response risks creating a silent duplicate row, so
@@ -993,13 +992,16 @@
   // assignOrderToTruck is excluded for the same reason one level removed -
   // it calls startTruckSession itself when the order's truck has no open
   // trip yet, so it inherits that same unguarded create-a-session race.
+  // setJobStatus/removeJob are included since (like setItemStatus and
+  // unallocateOrder respectively) they overwrite-by-ID or no-op if already
+  // gone, same as their order-equivalents above.
   var RETRYABLE_ACTIONS = {
     authenticateUser: true, listCheckers: true, listTrucks: true, getTrucksForSelection: true,
     listDrivers: true, getAdminSettings: true, probeSpreadsheet: true, searchOrders: true,
     findOrderAcrossTrucks: true, getOrdersForSession: true, getTruckSessionsForTruckToday: true,
     getTruckSessionState: true, getTruckAssignmentBoard: true, getOrderForChecking: true,
     getTodaysTruckOverview: true, getDashboardForDate: true, getOrderFulfillmentOverview: true,
-    listNonOrderDispatchesForDate: true,
+    getJobsForSession: true, listJobsForDate: true, setJobStatus: true, removeJob: true,
     setItemStatus: true, setOrderCoaConfirmed: true, allocateOrderToTruck: true, unallocateOrder: true,
     markTruckDispatched: true, updateSessionTrip: true, updateTrayCounts: true,
     updateChecker: true, updateTruck: true, updateDriver: true, deleteChecker: true,
@@ -1499,13 +1501,24 @@
             ordersByTrip[o.tripNumber].push(o);
           });
           ordersHtml = t.trips.map(function (trip) {
+            // Driver must show regardless of trip status - it used to drop
+            // out entirely the moment a trip was marked Dispatched (only the
+            // dispatched-time/by line showed then), which meant a truck with
+            // two dispatches today (Trip 1 and Trip 2, both now Dispatched)
+            // showed driver details for NEITHER trip. Shane reported this
+            // 2026-09-16. Fixed by always building the driver text first and
+            // appending the dispatched info alongside it, not instead of it -
+            // matching how the checker's own truck list (renderTrucks) has
+            // always shown driver independent of status.
+            var driverText = trip.driver ? 'Driver: ' + escapeHtml(formatDriversWithContacts(trip.driver, trip.driverContacts)) : 'Driver not set';
             var line;
             if (trip.status === 'Dispatched') {
-              line = trip.dispatchedAt
+              var dispatchText = trip.dispatchedAt
                 ? 'Dispatched ' + formatTime(trip.dispatchedAt) + (trip.dispatchedBy ? ' by ' + escapeHtml(trip.dispatchedBy) : '')
                 : 'Dispatched';
+              line = driverText + ' &middot; ' + dispatchText;
             } else {
-              line = trip.driver ? 'Driver: ' + escapeHtml(formatDriversWithContacts(trip.driver, trip.driverContacts)) : 'In progress';
+              line = driverText;
             }
             var tripOrders = ordersByTrip[trip.tripNumber] || [];
             var tripOrdersHtml = tripOrders.length > 0
@@ -1860,6 +1873,8 @@
     document.getElementById('tray-input-medium').value = state.session.TrayMedium || '';
     document.getElementById('tray-input-large').value = state.session.TrayLarge || '';
     document.getElementById('tray-input-other').value = state.session.TrayOther || '';
+    document.getElementById('tray-no-trays-checkbox').checked = !!state.session.NoTraysOnTrip;
+    applyNoTraysUi();
     renderTrayUpdated();
     renderTrip();
     showScreen('screen-workspace');
@@ -2022,72 +2037,51 @@
     }).catch(showFatalError);
   }
 
-  // --- Non-Order Dispatch modal: log a truck being sent out for something
-  // other than today's deliveries. Deliberately simpler than the trip
-  // modal's driver picker (see populateDriverSelects/onDriverSelectChange
-  // above) - just one driver, picked from the list or typed in manually. ---
-  var nodDriversById = {};
-
-  function populateNodTruckSelect() {
-    document.getElementById('nod-truck-select').innerHTML = boardData.trucks.map(function (t) {
-      return '<option value="' + t.truckId + '">' + escapeHtml(t.name) + '</option>';
-    }).join('');
+  // --- Add Job modal: add a non-order task directly to this truck's own
+  // trip (replaces the old Non-Order Dispatch, which logged a truck being
+  // sent out untied to any session - Shane's request 2026-09-16 was to tie
+  // it to the truck's own workspace instead, alongside + Add Order, so it
+  // shows in the Orders list and blocks dispatch until marked Done). ---
+  function openAddJobModal() {
+    document.getElementById('add-job-subject-input').value = '';
+    document.getElementById('add-job-instructions-input').value = '';
+    document.getElementById('add-job-modal-error').textContent = '';
+    document.getElementById('add-job-modal').classList.add('active');
   }
 
-  function populateNodDriverSelect(drivers) {
-    nodDriversById = {};
-    var optionsHtml = '<option value="">- none -</option>' + drivers.map(function (d) {
-      nodDriversById[d.ID] = d;
-      return '<option value="' + d.ID + '">' + escapeHtml(d.Name) + '</option>';
-    }).join('');
-    document.getElementById('nod-driver-select').innerHTML = optionsHtml;
+  function closeAddJobModal() {
+    document.getElementById('add-job-modal').classList.remove('active');
   }
 
-  // Same pre-fill-but-still-editable behavior as onDriverSelectChange above.
-  function onNodDriverSelectChange() {
-    var id = document.getElementById('nod-driver-select').value;
-    var driver = nodDriversById[id];
-    document.getElementById('nod-driver-phone-input').value = driver ? (driver.Contact || '') : '';
-  }
+  function saveAddJob() {
+    var subject = document.getElementById('add-job-subject-input').value.trim();
+    var instructions = document.getElementById('add-job-instructions-input').value.trim();
+    var errorEl = document.getElementById('add-job-modal-error');
 
-  function openNonOrderDispatchModal() {
-    populateNodTruckSelect();
-    document.getElementById('nod-driver-select').value = '';
-    document.getElementById('nod-driver-phone-input').value = '';
-    document.getElementById('nod-driver-manual-name-input').value = '';
-    document.getElementById('nod-details-input').value = '';
-    document.getElementById('nod-modal-error').textContent = '';
-
-    getActiveDriversCached().then(function (drivers) {
-      populateNodDriverSelect(drivers);
-      document.getElementById('nod-modal').classList.add('active');
-    }).catch(showFatalError);
-  }
-
-  function closeNonOrderDispatchModal() {
-    document.getElementById('nod-modal').classList.remove('active');
-  }
-
-  function saveNonOrderDispatch() {
-    var truckId = document.getElementById('nod-truck-select').value;
-    var selectedId = document.getElementById('nod-driver-select').value;
-    var selectedDriver = nodDriversById[selectedId];
-    // Typing a manual name is treated as an override, same as if the
-    // checker picked someone from the list then decided to correct it.
-    var manualName = document.getElementById('nod-driver-manual-name-input').value.trim();
-    var driverName = manualName || (selectedDriver ? selectedDriver.Name : '');
-    var driverContact = document.getElementById('nod-driver-phone-input').value.trim();
-    var details = document.getElementById('nod-details-input').value.trim();
-    var errorEl = document.getElementById('nod-modal-error');
-
-    if (!truckId) { errorEl.textContent = 'Select a truck.'; return; }
-    if (!driverName) { errorEl.textContent = 'Select or enter a driver.'; return; }
-    if (!driverContact) { errorEl.textContent = 'Enter a contact number for the driver.'; return; }
-    if (!details) { errorEl.textContent = 'Enter what the truck is being sent for.'; return; }
+    if (!subject) { errorEl.textContent = 'Enter an order number or subject line.'; return; }
+    if (!instructions) { errorEl.textContent = 'Enter the instructions for this job.'; return; }
     errorEl.textContent = '';
 
-    callApi('createNonOrderDispatch', [truckId, driverName, driverContact, details, state.checker.id, state.checker.name])
-      .then(function () { closeNonOrderDispatchModal(); })
+    callApi('addJobToTruck', [state.session.ID, subject, instructions, state.checker.id, state.checker.name])
+      .then(function () {
+        closeAddJobModal();
+        refreshMyOrders();
+      }).catch(showFatalError);
+  }
+
+  // Mark a job Done (or undo back to Pending, in case it was tapped by
+  // mistake - mirrors the forgiving style of order status toggles elsewhere).
+  function toggleJobDone(jobId, currentStatus) {
+    var newStatus = currentStatus === 'Done' ? 'Pending' : 'Done';
+    callApi('setJobStatus', [jobId, newStatus, state.checker.name])
+      .then(function () { refreshMyOrders(); })
+      .catch(showFatalError);
+  }
+
+  function removeJobFromTruckUi(jobId, subject) {
+    if (!confirm('Remove job "' + subject + '"?')) return;
+    callApi('removeJob', [jobId])
+      .then(function () { refreshMyOrders(); })
       .catch(showFatalError);
   }
 
@@ -2105,16 +2099,51 @@
     if (tab === 'orders') refreshMyOrders();
   }
 
+  // Ticking "No fruit trays on this dispatch" greys out and clears the four
+  // count fields (they're meaningless once this is checked - see
+  // updateTrayCounts in Code.gs, which force-blanks them server-side too
+  // regardless of whatever's still showing here) and saves immediately,
+  // same as any other tray edit. Some trips - especially a truck's 2nd
+  // dispatch of the day - never carry trays at all; before this, the only
+  // way to represent that was leaving the counts blank, which
+  // markTruckDispatched couldn't tell apart from someone simply forgetting
+  // to count, and flagged as dispatched-with-warnings either way. Shane
+  // reported this 2026-09-16.
+  function toggleNoTrays() {
+    var noTrays = document.getElementById('tray-no-trays-checkbox').checked;
+    applyNoTraysUi();
+    if (noTrays) {
+      document.getElementById('tray-input-small').value = '';
+      document.getElementById('tray-input-medium').value = '';
+      document.getElementById('tray-input-large').value = '';
+      document.getElementById('tray-input-other').value = '';
+    }
+    saveTrayCounts();
+  }
+
+  // Shared by toggleNoTrays and enterWorkspace (restoring the checkbox's
+  // effect when reopening a trip that was already marked this way) -
+  // purely visual, doesn't touch state.session or make any API call itself.
+  function applyNoTraysUi() {
+    var noTrays = document.getElementById('tray-no-trays-checkbox').checked;
+    document.getElementById('tray-count-fields').style.opacity = noTrays ? '0.5' : '1';
+    ['tray-input-small', 'tray-input-medium', 'tray-input-large', 'tray-input-other'].forEach(function (id) {
+      document.getElementById(id).disabled = noTrays;
+    });
+  }
+
   function saveTrayCounts() {
+    var noTrays = document.getElementById('tray-no-trays-checkbox').checked;
     var small = Math.max(0, parseInt(document.getElementById('tray-input-small').value, 10) || 0);
     var medium = Math.max(0, parseInt(document.getElementById('tray-input-medium').value, 10) || 0);
     var large = Math.max(0, parseInt(document.getElementById('tray-input-large').value, 10) || 0);
     var other = Math.max(0, parseInt(document.getElementById('tray-input-other').value, 10) || 0);
-    state.session.TraySmall = small;
-    state.session.TrayMedium = medium;
-    state.session.TrayLarge = large;
-    state.session.TrayOther = other;
-    callApi('updateTrayCounts', [state.session.ID, small, medium, large, other]).then(function () {
+    state.session.TraySmall = noTrays ? '' : small;
+    state.session.TrayMedium = noTrays ? '' : medium;
+    state.session.TrayLarge = noTrays ? '' : large;
+    state.session.TrayOther = noTrays ? '' : other;
+    state.session.NoTraysOnTrip = noTrays;
+    callApi('updateTrayCounts', [state.session.ID, small, medium, large, other, noTrays]).then(function () {
       state.session.TrayCountUpdatedAt = new Date().toISOString();
       renderTrayUpdated();
     }).catch(showFatalError);
@@ -2126,16 +2155,26 @@
   function refreshMyOrders() {
     var listEl = document.getElementById('my-orders-list');
     listEl.innerHTML = '<div class="empty">Loading...</div>';
-    callApi('getOrdersForSession', [state.session.ID]).then(renderMyOrders).catch(showFatalError);
+    Promise.all([
+      callApi('getOrdersForSession', [state.session.ID]),
+      callApi('getJobsForSession', [state.session.ID])
+    ]).then(function (results) {
+      renderMyOrders(results[0], results[1]);
+    }).catch(showFatalError);
   }
 
-  function renderMyOrders(orders) {
+  // Jobs (added via + Add Job) render in the same list as real orders, right
+  // alongside them, so a checker sees everything blocking dispatch in one
+  // place - but with a "Mark Done"/"Undo" toggle instead of opening an
+  // order-checking screen, since a Job has no items to pack.
+  function renderMyOrders(orders, jobs) {
+    jobs = jobs || [];
     var el = document.getElementById('my-orders-list');
-    if (orders.length === 0) {
+    if (orders.length === 0 && jobs.length === 0) {
       el.innerHTML = '<div class="empty">No orders allocated to this truck yet. Tap "+ Add Order" to find and add one.</div>';
       return;
     }
-    el.innerHTML = orders.map(function (o) {
+    var orderTiles = orders.map(function (o) {
       var badgeClass = o.status === 'Complete' ? 'badge-complete' : (o.status === 'In Progress' ? 'badge-progress' : 'badge-pending');
       return '<div class="tile" onclick="openOrder(\'' + o.orderId + '\')">' +
         '<div><div class="name">' + escapeHtml(o.orderNumber) + ' - ' + escapeHtml(o.customer) + '</div>' +
@@ -2145,6 +2184,17 @@
           '<button class="tile-remove-btn" onclick="event.stopPropagation(); removeOrderFromTruckUi(\'' + o.orderId + '\', ' + jsStrAttr_(o.orderNumber) + ')">Remove</button>' +
         '</div></div>';
     }).join('');
+    var jobTiles = jobs.map(function (j) {
+      var badgeClass = j.Status === 'Done' ? 'badge-complete' : 'badge-pending';
+      return '<div class="tile" onclick="toggleJobDone(\'' + j.ID + '\', ' + jsStrAttr_(j.Status) + ')">' +
+        '<div><div class="name">' + escapeHtml(j.Subject) + ' <span class="hint">(Job)</span></div>' +
+        '<div class="meta">' + escapeHtml(j.Instructions) + '</div></div>' +
+        '<div style="display:flex; align-items:center; gap:10px;">' +
+          '<span class="badge ' + badgeClass + '">' + (j.Status === 'Done' ? 'Done' : 'Mark Done') + '</span>' +
+          '<button class="tile-remove-btn" onclick="event.stopPropagation(); removeJobFromTruckUi(\'' + j.ID + '\', ' + jsStrAttr_(j.Subject) + ')">Remove</button>' +
+        '</div></div>';
+    }).join('');
+    el.innerHTML = jobTiles + orderTiles;
   }
 
   // Lets a checker pull a stuck/wrong order off THIS truck directly from the
@@ -2547,13 +2597,26 @@
       // Dispatch Manager/Admin to drag it off on the separate Trucks board.
       if (res.blocked) {
         document.getElementById('dispatch-blocked-reason').textContent = res.blockedReason;
-        document.getElementById('dispatch-blocked-orders').innerHTML = res.incompleteOrders.map(function (o) {
+        var orderTilesHtml = res.incompleteOrders.map(function (o) {
           return '<div class="tile" style="padding:12px 14px; margin-bottom:8px;">' +
             '<div><div class="name" style="font-size:15px;">' + escapeHtml(o.orderNumber) + ' - ' + escapeHtml(o.customer) + '</div>' +
             '<div class="meta">' + escapeHtml(o.status) + '</div></div>' +
             '<button class="tile-remove-btn" onclick="removeBlockedOrderUi(\'' + o.orderId + '\', ' + jsStrAttr_(o.orderNumber) + ')">Remove</button>' +
           '</div>';
         }).join('');
+        // Jobs get the same "stuck? remove it right here" escape hatch as
+        // orders, plus a Mark Done shortcut - either one clears the block
+        // without leaving this modal.
+        var jobTilesHtml = (res.incompleteJobs || []).map(function (j) {
+          return '<div class="tile" style="padding:12px 14px; margin-bottom:8px;">' +
+            '<div><div class="name" style="font-size:15px;">' + escapeHtml(j.subject) + ' <span class="hint">(Job)</span></div>' +
+            '<div class="meta">' + escapeHtml(j.status) + '</div></div>' +
+            '<div style="display:flex; gap:8px;">' +
+              '<button class="tile-remove-btn" onclick="markBlockedJobDoneUi(\'' + j.jobId + '\')">Mark Done</button>' +
+              '<button class="tile-remove-btn" onclick="removeBlockedJobUi(\'' + j.jobId + '\', ' + jsStrAttr_(j.subject) + ')">Remove</button>' +
+            '</div></div>';
+        }).join('');
+        document.getElementById('dispatch-blocked-orders').innerHTML = orderTilesHtml + jobTilesHtml;
         document.getElementById('dispatch-blocked-modal').classList.add('active');
         return;
       }
@@ -2573,6 +2636,25 @@
   function removeBlockedOrderUi(orderId, orderNumber) {
     if (!confirm('Remove ' + orderNumber + ' from this truck? Its checking progress will be cleared - it can be allocated fresh to any truck afterwards.')) return;
     callApi('unallocateOrder', [orderId]).then(function () {
+      closeDispatchBlockedModal();
+      refreshMyOrders();
+      attemptDispatch();
+    }).catch(showFatalError);
+  }
+
+  // Same re-attempt-immediately pattern as removeBlockedOrderUi above, for
+  // the two ways a Job can stop blocking a stuck dispatch.
+  function markBlockedJobDoneUi(jobId) {
+    callApi('setJobStatus', [jobId, 'Done', state.checker.name]).then(function () {
+      closeDispatchBlockedModal();
+      refreshMyOrders();
+      attemptDispatch();
+    }).catch(showFatalError);
+  }
+
+  function removeBlockedJobUi(jobId, subject) {
+    if (!confirm('Remove job "' + subject + '"?')) return;
+    callApi('removeJob', [jobId]).then(function () {
       closeDispatchBlockedModal();
       refreshMyOrders();
       attemptDispatch();
@@ -2897,7 +2979,7 @@
     var todayStr = todayDateInputValue();
     callApi('getDashboardForDate', [todayStr]).then(function (data) { renderDashboard(data, ''); }).catch(showFatalError);
     callApi('getOrderFulfillmentOverview', [todayStr]).then(function (data) { renderFulfillmentOverview(data, ''); }).catch(showFatalError);
-    callApi('listNonOrderDispatchesForDate', [todayStr]).then(function (list) { renderNonOrderDispatches(list, ''); }).catch(showFatalError);
+    callApi('listJobsForDate', [todayStr]).then(function (list) { renderJobsToday(list, ''); }).catch(showFatalError);
   }
 
   // History mirrors loadDashboard exactly (same three calls, same render
@@ -2919,24 +3001,30 @@
     if (!dateInput.max) dateInput.max = todayStr; // no picking a future date - there's nothing there yet
     callApi('getDashboardForDate', [dateInput.value]).then(function (data) { renderDashboard(data, '-history'); }).catch(showFatalError);
     callApi('getOrderFulfillmentOverview', [dateInput.value]).then(function (data) { renderFulfillmentOverview(data, '-history'); }).catch(showFatalError);
-    callApi('listNonOrderDispatchesForDate', [dateInput.value]).then(function (list) { renderNonOrderDispatches(list, '-history'); }).catch(showFatalError);
+    callApi('listJobsForDate', [dateInput.value]).then(function (list) { renderJobsToday(list, '-history'); }).catch(showFatalError);
   }
 
-  // Non-order dispatches (see openNonOrderDispatchModal above) are simple
-  // dated log entries, not TruckSessions - shown here so Admin/Dispatch
-  // Manager can still see at a glance which trucks were sent out for
-  // something other than today's deliveries, and why.
-  function renderNonOrderDispatches(list, idSuffix) {
-    var el = document.getElementById('non-order-dispatches' + idSuffix);
+  // Jobs (see openAddJobModal in the truck workspace) are non-order tasks
+  // added directly to a specific truck's trip - shown here so Admin/Dispatch
+  // Manager can still see at a glance what's been added across all trucks
+  // and whether it's been marked Done yet. Replaces the old Non-Order
+  // Dispatch dashboard card (Shane's request 2026-09-16).
+  function renderJobsToday(list, idSuffix) {
+    var el = document.getElementById('jobs-today' + idSuffix);
     if (list.length === 0) { el.innerHTML = ''; return; }
     el.innerHTML = '<div class="card">' +
-      '<h3 style="margin-top:0;">Non-order dispatches (' + list.length + ')</h3>' +
-      list.map(function (d) {
-        return '<div class="dash-order-row"><div>' +
-          escapeHtml(d.TruckName) + ' - ' + escapeHtml(d.Driver) +
-          ' <span class="hint">(' + formatTime(d.CreatedAt) + (d.CreatedByName ? ', logged by ' + escapeHtml(d.CreatedByName) : '') + ')</span>' +
-          '<div class="hint">' + escapeHtml(d.Details) + '</div>' +
-          '</div></div>';
+      '<h3 style="margin-top:0;">Jobs (' + list.length + ')</h3>' +
+      list.map(function (j) {
+        var badgeClass = j.status === 'Done' ? 'badge-complete' : 'badge-pending';
+        var doneLine = j.status === 'Done'
+          ? '<div class="hint">Done ' + formatTime(j.doneAt) + (j.doneBy ? ' by ' + escapeHtml(j.doneBy) : '') + '</div>'
+          : '';
+        return '<div class="dash-order-row"><div><div>' +
+          escapeHtml(j.subject) + ' <span class="hint">(' + escapeHtml(j.truckName) + ')</span>' +
+          '</div><div class="hint">' + escapeHtml(j.instructions) + '</div>' +
+          '<div class="hint">Added ' + formatTime(j.createdAt) + (j.createdByName ? ' by ' + escapeHtml(j.createdByName) : '') + '</div>' +
+          doneLine +
+          '</div><div><span class="badge ' + badgeClass + '">' + escapeHtml(j.status) + '</span></div></div>';
       }).join('') +
       '</div>';
   }
@@ -3036,7 +3124,7 @@
         'Checker: ' + (t.checkerName || '-'),
         'Driver: ' + (t.driver ? formatDriversWithContacts(t.driver, t.driverContacts) : 'not set'),
         'Route: ' + (t.route || 'not set'),
-        'Trays: ' + (traysNotEntered(t) ? 'not entered' : 'S:' + (t.traySmall || 0) + ' M:' + (t.trayMedium || 0) + ' L:' + (t.trayLarge || 0) + ' O:' + (t.trayOther || 0)),
+        'Trays: ' + (t.noTraysOnTrip ? 'none (marked)' : (traysNotEntered(t) ? 'not entered' : 'S:' + (t.traySmall || 0) + ' M:' + (t.trayMedium || 0) + ' L:' + (t.trayLarge || 0) + ' O:' + (t.trayOther || 0))),
         'Started ' + formatTime(t.startedAt)
       ];
       if (t.dispatchedAt) metaParts.push('Dispatched ' + formatTime(t.dispatchedAt) + (durationText ? ' (' + durationText + ')' : ''));

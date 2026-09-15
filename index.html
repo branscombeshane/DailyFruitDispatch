@@ -299,6 +299,19 @@
     .stat-tile .stat-value { font-size: 26px; font-weight: 800; }
     .stat-tile .stat-label { font-size: 12px; color: var(--grey); margin-top: 2px; }
     .stat-tile.stat-alert .stat-value { color: var(--red); }
+    /* A clickable tile (one that drills into its own underlying records -
+       see selectDashboardTile_/selectFulfillmentTile_) gets a visible
+       affordance and a distinct selected look, so it reads as a filter
+       toggle rather than just a number. A tile with nothing to drill into
+       (stat-tile-static, e.g. a count with no itemized list behind it)
+       stays exactly as before - plain and unclickable. */
+    .stat-tile.stat-tile-clickable { cursor: pointer; -webkit-tap-highlight-color: transparent; transition: border-color 0.15s, background 0.15s; }
+    .stat-tile.stat-tile-clickable:hover { border-color: var(--green-dark); }
+    .stat-tile.stat-tile-clickable.stat-tile-selected { border-color: var(--green-dark); border-width: 2px; background: #eef7f0; }
+    .stat-tile.stat-tile-clickable.stat-tile-selected.stat-alert { border-color: var(--red); background: #fff0f0; }
+    .dash-filter-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 2px 0 12px; font-size: 13px; color: var(--grey); }
+    .dash-filter-bar button { padding: 6px 12px; font-size: 13px; }
+    .dash-drilldown-list { margin-top: 12px; }
     .dash-truck-card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin-bottom: 12px; }
     .dash-truck-card.dash-alert { border-color: var(--red); background: #fff6f6; }
     .dash-truck-header { display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
@@ -740,6 +753,7 @@
           <h3 style="margin-top:0;" id="fulfillment-title">Today's orders - dispatched vs outstanding</h3>
           <p class="hint" id="fulfillment-hint">Everything due for delivery today, so you can confirm at the end of the day that it's all accounted for.</p>
           <div id="fulfillment-summary" style="display:flex; flex-wrap:wrap; gap:12px; margin-bottom:14px;"></div>
+          <div id="fulfillment-drilldown"></div>
           <div id="fulfillment-outstanding"></div>
         </div>
         <div id="jobs-today"></div>
@@ -767,6 +781,7 @@
           <h3 style="margin-top:0;" id="fulfillment-title-history">Orders due</h3>
           <p class="hint" id="fulfillment-hint-history"></p>
           <div id="fulfillment-summary-history" style="display:flex; flex-wrap:wrap; gap:12px; margin-bottom:14px;"></div>
+          <div id="fulfillment-drilldown-history"></div>
           <div id="fulfillment-outstanding-history"></div>
         </div>
         <div id="jobs-today-history"></div>
@@ -852,7 +867,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-09-16-02';
+  var BUILD_VERSION = 'build-2026-09-16-03';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -3033,7 +3048,15 @@
   // (only one is ever visible, but nothing stops both panes having loaded).
   var fulfillmentOrdersById = { '': {}, '-history': {} };
 
+  // The last data/selected-tile each pane (Dashboard '' / History '-history')
+  // has, so a tile click can just re-render from what's already in memory -
+  // no need to re-fetch anything from the server for what's purely a
+  // client-side filter/expand of data already on the page.
+  var fulfillmentDataByIdSuffix = { '': null, '-history': null };
+  var fulfillmentSelectedTile = { '': null, '-history': null };
+
   function renderFulfillmentOverview(data, idSuffix) {
+    fulfillmentDataByIdSuffix[idSuffix] = data;
     fulfillmentOrdersById[idSuffix] = {};
     data.today.outstanding.concat(data.overdueWarnings).forEach(function (o) { fulfillmentOrdersById[idSuffix][o.orderId] = o; });
 
@@ -3050,11 +3073,14 @@
       : 'Everything due for delivery on ' + dayLabel + '.';
 
     var t = data.today;
+    var sel = fulfillmentSelectedTile[idSuffix];
     document.getElementById('fulfillment-summary' + idSuffix).innerHTML =
-      statTile(t.total, 'Orders due ' + dayLabel) +
-      statTile(t.dispatchedCount, 'Dispatched') +
-      statTile(t.collectedCount, 'Collected') +
-      statTile(t.outstandingCount, 'Outstanding', t.outstandingCount > 0);
+      statTile(t.total, 'Orders due ' + dayLabel, false, { onclick: "selectFulfillmentTile('" + idSuffix + "', 'total')", selected: sel === 'total' }) +
+      statTile(t.dispatchedCount, 'Dispatched', false, { onclick: "selectFulfillmentTile('" + idSuffix + "', 'dispatched')", selected: sel === 'dispatched' }) +
+      statTile(t.collectedCount, 'Collected', false, { onclick: "selectFulfillmentTile('" + idSuffix + "', 'collected')", selected: sel === 'collected' }) +
+      statTile(t.outstandingCount, 'Outstanding', t.outstandingCount > 0, { onclick: "selectFulfillmentTile('" + idSuffix + "', 'outstanding')", selected: sel === 'outstanding' });
+
+    renderFulfillmentDrilldown_(idSuffix);
 
     var outstandingEl = document.getElementById('fulfillment-outstanding' + idSuffix);
     outstandingEl.innerHTML = t.outstanding.length === 0
@@ -3067,6 +3093,40 @@
       '<div class="card dash-truck-card dash-alert">' +
       '<h3 style="margin-top:0; color:var(--red);">' + escapeHtml(overdueTitle) + '</h3>' +
       data.overdueWarnings.map(function (o) { return fulfillmentOrderRow(o, true, idSuffix); }).join('') +
+      '</div>';
+  }
+
+  // Toggles which of the 4 "Orders due/Dispatched/Collected/Outstanding"
+  // tiles is expanded - clicking the already-selected tile again collapses
+  // it, same toggle behavior as the truck-dashboard tiles below. Purely a
+  // re-render from data already fetched, no server round trip.
+  function selectFulfillmentTile(idSuffix, key) {
+    fulfillmentSelectedTile[idSuffix] = fulfillmentSelectedTile[idSuffix] === key ? null : key;
+    renderFulfillmentOverview(fulfillmentDataByIdSuffix[idSuffix], idSuffix);
+  }
+
+  var FULFILLMENT_TILE_LABELS = { total: 'Orders due', dispatched: 'Dispatched', collected: 'Collected', outstanding: 'Outstanding' };
+
+  function renderFulfillmentDrilldown_(idSuffix) {
+    var el = document.getElementById('fulfillment-drilldown' + idSuffix);
+    var key = fulfillmentSelectedTile[idSuffix];
+    if (!key) { el.innerHTML = ''; return; }
+
+    var t = fulfillmentDataByIdSuffix[idSuffix].today;
+    var list = t[key]; // 'total' tile reads t.all - handled just below
+    if (key === 'total') list = t.all;
+
+    el.innerHTML = '<div class="card" style="background:#f7f9f8;">' +
+      '<div class="dash-filter-bar"><strong>' + FULFILLMENT_TILE_LABELS[key] + ' (' + list.length + ')</strong>' +
+      '<button class="btn btn-secondary" onclick="selectFulfillmentTile(\'' + idSuffix + '\', \'' + key + '\')">Close</button></div>' +
+      (list.length === 0
+        ? '<div class="empty">Nothing in this category.</div>'
+        : '<div class="dash-drilldown-list">' + list.map(function (o) {
+            var badge = o.dispatched ? '<span class="badge badge-dispatched">Dispatched</span>' :
+              o.collected ? '<span class="badge badge-complete">Collected</span>' :
+              '<span class="badge badge-pending">Outstanding</span>';
+            return '<div class="dash-order-row"><div>' + escapeHtml(o.orderNumber) + ' - ' + escapeHtml(o.customer) + '</div><div>' + badge + '</div></div>';
+          }).join('') + '</div>') +
       '</div>';
   }
 
@@ -3085,25 +3145,70 @@
     }).catch(showFatalError);
   }
 
-  function statTile(value, label, alert) {
-    return '<div class="stat-tile' + (alert ? ' stat-alert' : '') + '"><div class="stat-value">' + value + '</div><div class="stat-label">' + label + '</div></div>';
+  // opts.onclick (a literal JS expression string, e.g. from a caller-built
+  // "selectXTile('', 'key')" call - callers only ever pass fixed idSuffix/
+  // key values, never raw user input, so no attribute-escaping is needed
+  // here) makes the tile a filter/drilldown toggle; opts.selected marks it
+  // visually active. A tile with no opts.onclick renders exactly as before -
+  // plain, unclickable, no affordance - for a count with nothing to drill
+  // into.
+  function statTile(value, label, alert, opts) {
+    opts = opts || {};
+    var classes = 'stat-tile' + (alert ? ' stat-alert' : '');
+    var attr = '';
+    if (opts.onclick) {
+      classes += ' stat-tile-clickable' + (opts.selected ? ' stat-tile-selected' : '');
+      attr = ' onclick="' + opts.onclick + '"';
+    }
+    return '<div class="' + classes + '"' + attr + '><div class="stat-value">' + value + '</div><div class="stat-label">' + label + '</div></div>';
   }
 
   function traysNotEntered(t) {
     return ['traySmall', 'trayMedium', 'trayLarge', 'trayOther'].every(function (k) { return t[k] === '' || t[k] === null || t[k] === undefined; });
   }
 
+  // Same store-then-toggle-then-re-render-from-memory pattern as the
+  // fulfillment tiles above. Selecting a tile here filters the truck-card
+  // list below down to just the trucks that tile is counting (and, for the
+  // two item-level tiles, further trims each shown truck's own orders down
+  // to just the orders that actually have that issue - a truck flagged for
+  // 1 no-stock item out of 10 orders shouldn't dump all 10 into view).
+  var dashboardDataByIdSuffix = { '': null, '-history': null };
+  var dashboardSelectedTile = { '': null, '-history': null };
+
+  var DASHBOARD_TILE_LABELS = {
+    dispatched: 'Dispatched trucks', inProgress: 'Trucks in progress', ordersChecked: 'Trucks with orders checked',
+    noStock: 'Trucks with no-stock items', shortPacked: 'Trucks with short-packed items', warnings: 'Trucks dispatched with warnings'
+  };
+
+  function selectDashboardTile(idSuffix, key) {
+    dashboardSelectedTile[idSuffix] = dashboardSelectedTile[idSuffix] === key ? null : key;
+    renderDashboard(dashboardDataByIdSuffix[idSuffix], idSuffix);
+  }
+
+  function trucksMatchingTile_(trucks, key) {
+    if (key === 'dispatched') return trucks.filter(function (t) { return t.status === 'Dispatched'; });
+    if (key === 'inProgress') return trucks.filter(function (t) { return t.status === 'In Progress'; });
+    if (key === 'ordersChecked') return trucks.filter(function (t) { return t.orderCount > 0; });
+    if (key === 'noStock') return trucks.filter(function (t) { return t.noStockTotal > 0; });
+    if (key === 'shortPacked') return trucks.filter(function (t) { return t.shortPackedTotal > 0; });
+    if (key === 'warnings') return trucks.filter(function (t) { return t.dispatchedWithWarnings; });
+    return trucks;
+  }
+
   function renderDashboard(data, idSuffix) {
+    dashboardDataByIdSuffix[idSuffix] = data;
     var s = data.summary;
     var isToday = data.date === todayDateInputValue();
+    var selectedKey = dashboardSelectedTile[idSuffix];
     document.getElementById('dashboard-summary' + idSuffix).innerHTML =
-      statTile(s.totalTrucks, 'Trucks') +
-      statTile(s.dispatchedCount, 'Dispatched') +
-      statTile(s.inProgressCount, 'In progress') +
-      statTile(s.totalOrders, 'Orders checked') +
-      statTile(s.totalNoStockItems, 'No-stock items', s.totalNoStockItems > 0) +
-      statTile(s.totalShortPackedItems, 'Short-packed items', s.totalShortPackedItems > 0) +
-      statTile(s.forcedDispatchCount, 'Dispatched with warnings', s.forcedDispatchCount > 0);
+      statTile(s.totalTrucks, 'Trucks', false, { onclick: "selectDashboardTile('" + idSuffix + "', null)", selected: !selectedKey }) +
+      statTile(s.dispatchedCount, 'Dispatched', false, { onclick: "selectDashboardTile('" + idSuffix + "', 'dispatched')", selected: selectedKey === 'dispatched' }) +
+      statTile(s.inProgressCount, 'In progress', false, { onclick: "selectDashboardTile('" + idSuffix + "', 'inProgress')", selected: selectedKey === 'inProgress' }) +
+      statTile(s.totalOrders, 'Orders checked', false, { onclick: "selectDashboardTile('" + idSuffix + "', 'ordersChecked')", selected: selectedKey === 'ordersChecked' }) +
+      statTile(s.totalNoStockItems, 'No-stock items', s.totalNoStockItems > 0, { onclick: "selectDashboardTile('" + idSuffix + "', 'noStock')", selected: selectedKey === 'noStock' }) +
+      statTile(s.totalShortPackedItems, 'Short-packed items', s.totalShortPackedItems > 0, { onclick: "selectDashboardTile('" + idSuffix + "', 'shortPacked')", selected: selectedKey === 'shortPacked' }) +
+      statTile(s.forcedDispatchCount, 'Dispatched with warnings', s.forcedDispatchCount > 0, { onclick: "selectDashboardTile('" + idSuffix + "', 'warnings')", selected: selectedKey === 'warnings' });
 
     var trucksEl = document.getElementById('dashboard-trucks' + idSuffix);
     if (data.trucks.length === 0) {
@@ -3113,7 +3218,18 @@
       return;
     }
 
-    trucksEl.innerHTML = data.trucks.map(function (t) {
+    var visibleTrucks = selectedKey ? trucksMatchingTile_(data.trucks, selectedKey) : data.trucks;
+    var filterBarHtml = selectedKey
+      ? '<div class="dash-filter-bar"><span>Showing: <strong>' + escapeHtml(DASHBOARD_TILE_LABELS[selectedKey]) + '</strong> (' + visibleTrucks.length + ' of ' + data.trucks.length + ')</span>' +
+        '<button class="btn btn-secondary" onclick="selectDashboardTile(\'' + idSuffix + '\', \'' + selectedKey + '\')">Show all trucks</button></div>'
+      : '';
+
+    if (visibleTrucks.length === 0) {
+      trucksEl.innerHTML = filterBarHtml + '<div class="card"><div class="empty">No trucks match this filter.</div></div>';
+      return;
+    }
+
+    trucksEl.innerHTML = filterBarHtml + visibleTrucks.map(function (t) {
       var statusBadgeClass = t.status === 'Dispatched' ? 'badge-dispatched' : 'badge-progress';
       var durationText = t.durationMinutes !== null ? (t.durationMinutes + ' min from load to dispatch') : '';
       var metaParts = [
@@ -3129,9 +3245,18 @@
         ? '<div class="dash-warning-line">Dispatched despite: ' + escapeHtml(t.dispatchWarningsText) + '</div>'
         : '';
 
-      var ordersHtml = t.orders.length === 0
+      // Only the two item-level tiles (noStock/shortPacked) narrow which of
+      // THIS truck's own orders are shown - every other tile filters which
+      // trucks appear at all, but still shows each shown truck's full order
+      // list (trucksMatchingTile_ above already guaranteed at least one
+      // order here matches, for these two keys specifically).
+      var ordersForDisplay = t.orders;
+      if (selectedKey === 'noStock') ordersForDisplay = t.orders.filter(function (o) { return o.noStockCount > 0; });
+      else if (selectedKey === 'shortPacked') ordersForDisplay = t.orders.filter(function (o) { return o.shortPackedCount > 0; });
+
+      var ordersHtml = ordersForDisplay.length === 0
         ? '<div class="dash-order-row"><span class="hint">No orders opened on this truck.</span></div>'
-        : t.orders.map(function (o) {
+        : ordersForDisplay.map(function (o) {
             var badgeClass = o.status === 'Complete' ? 'badge-complete' : (o.status === 'In Progress' ? 'badge-progress' : 'badge-pending');
             // Reason text (d.reason) can still be non-empty on older rows
             // from before the No-Stock Reasons feature was removed - shown

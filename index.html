@@ -857,7 +857,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-09-14-01';
+  var BUILD_VERSION = 'build-2026-09-15-01';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -1113,6 +1113,12 @@
   function showScreen(id) {
     document.querySelectorAll('.screen').forEach(function (s) { s.classList.remove('active'); });
     document.getElementById(id).classList.add('active');
+    // The Trucks Board's auto-refresh (see startBoardPolling/stopBoardPolling
+    // below) must never keep running once the user has navigated somewhere
+    // else - showScreen is the one place every navigation in the app passes
+    // through, so stopping it here (rather than at each individual place
+    // that navigates away from the board) can't miss an exit path.
+    if (id !== 'screen-truck-board') stopBoardPolling();
   }
 
   function showLogin() {
@@ -1374,6 +1380,7 @@
     document.getElementById('board-settings-btn').style.display = (state.role === 'Admin') ? '' : 'none';
     showScreen('screen-truck-board');
     loadTruckBoard();
+    startBoardPolling();
   }
 
   function loadTruckBoard() {
@@ -1381,6 +1388,47 @@
       boardData = data;
       renderTruckBoard();
     }).catch(showFatalError);
+  }
+
+  // Auto-refresh while the Trucks Board stays open - with several Dispatch
+  // Managers/checkers all viewing (and dragging on) this same board at
+  // once, a static snapshot from whenever the screen was opened would hide
+  // everyone else's allocations/status changes until this person happened
+  // to navigate away and back. showScreen() below stops this the instant
+  // the user leaves screen-truck-board for anywhere else, so it never
+  // outlives the screen it belongs to. Shane's explicit request
+  // (2026-09-15) after asking how live the board was with 5 checkers on it
+  // at once.
+  var BOARD_POLL_INTERVAL_MS = 15000;
+  var boardPollTimer = null;
+
+  function startBoardPolling() {
+    stopBoardPolling(); // guards against a stray double interval if this is ever called twice in a row
+    boardPollTimer = setInterval(pollTruckBoard, BOARD_POLL_INTERVAL_MS);
+  }
+
+  function stopBoardPolling() {
+    if (boardPollTimer) { clearInterval(boardPollTimer); boardPollTimer = null; }
+  }
+
+  // Skipped entirely (not even attempted) while a drag gesture is live
+  // (boardDrag) or any chip has a move still saving (savingOrderIds) -
+  // overwriting boardData out from under either would yank an order chip
+  // away mid-drag or clobber a "saving..." chip before its own
+  // success/failure handling (boardDropSucceeded/boardDropFailed) runs.
+  // Re-checked after the fetch too, since a drag can start while this
+  // call is still in flight. Fails silently (no showFatalError) rather
+  // than surfacing a banner/alert every 15s on a persistent connection
+  // issue - a background refresh is exactly the kind of failure that
+  // should just quietly try again next tick instead of interrupting
+  // whatever the person is doing.
+  function pollTruckBoard() {
+    if (boardDrag || Object.keys(savingOrderIds).length > 0) return;
+    callApi('getTruckAssignmentBoard', []).then(function (data) {
+      if (boardDrag || Object.keys(savingOrderIds).length > 0) return;
+      boardData = data;
+      renderTruckBoard();
+    }).catch(function () { /* quietly try again on the next tick */ });
   }
 
   function renderBoardOrderChip(o) {

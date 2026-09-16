@@ -378,6 +378,21 @@
        one has settled. */
     .board-order-chip.saving { opacity: 0.55; cursor: default; color: #666; }
     .board-drag-ghost { position: fixed; z-index: 9999; box-shadow: 0 6px 16px rgba(0,0,0,0.28); pointer-events: none; opacity: 0.92; margin: 0 !important; }
+    /* Shane's 2026-09-16 request: flag an order right here in Dispatch when
+       Production hasn't actually finished the work for it yet (see
+       productionWarningBadge/productionMetaLineHtml + deriveProductionStatus_
+       in Code.gs). Amber, not red - this is informational, not a hard block
+       the way an incomplete item check is. */
+    .prod-warn-badge {
+      display: inline-flex; align-items: center; gap: 3px; font-size: 11px; font-weight: 600;
+      color: #8a6100; background: #fff3d6; border: 1px solid #e8c164; border-radius: 6px;
+      padding: 2px 6px; margin-left: 8px; white-space: nowrap;
+    }
+    .prod-warn-line { color: #8a6100; font-size: 12.5px; margin-top: 2px; }
+    .prod-warn-banner {
+      background: #fff3d6; border: 1px solid #e8c164; border-radius: 10px; padding: 12px 14px;
+      color: #6b4a00; font-size: 14px; margin-bottom: 14px;
+    }
   </style>
 </head>
 <body>
@@ -573,6 +588,14 @@
     </div>
     <div class="content">
       <div id="od-warning" class="error"></div>
+      <!-- Shane's 2026-09-16 request: show right here whenever Production
+           hasn't actually finished this order's work yet (see
+           productionWarningBadge/deriveProductionStatus_'s comments) -
+           purely informational, never blocks Done, unlike the COA block
+           below. Shown/hidden and filled in by renderOrderDetail for
+           every state this screen can be in (allocated here, allocated
+           elsewhere, or not yet allocated at all). -->
+      <div class="prod-warn-banner" id="od-production-block" style="display:none;"></div>
       <div class="card" id="od-items"></div>
       <!-- Only shown when this order's RequiresCoa flag (snapshotted from
            Packing & Production at allocation time - see allocateOrderToTruck
@@ -1494,7 +1517,8 @@
         : '');
     return '<div class="board-order-chip' + (locked ? ' locked' : '') + (saving ? ' saving' : '') + '" data-order-id="' + o.orderId + '"' + (draggable ? ' data-draggable="1"' : '') + '>' +
       dot + '<span>' + escapeHtml(o.orderNumber) + ' - ' + escapeHtml(o.customer) +
-      (locked ? ' <span class="hint">(dispatched)</span>' : (saving ? ' <span class="hint">saving...</span>' : '')) + '</span>' +
+      (locked ? ' <span class="hint">(dispatched)</span>' : (saving ? ' <span class="hint">saving...</span>' : '')) +
+      productionWarningBadge(o) + '</span>' +
       '</div>';
   }
 
@@ -2227,7 +2251,7 @@
       var badgeClass = o.status === 'Complete' ? 'badge-complete' : (o.status === 'In Progress' ? 'badge-progress' : 'badge-pending');
       return '<div class="tile" onclick="openOrder(\'' + o.orderId + '\')">' +
         '<div><div class="name">' + escapeHtml(o.orderNumber) + ' - ' + escapeHtml(o.customer) + '</div>' +
-        '<div class="meta">' + o.itemCount + ' item(s)</div></div>' +
+        '<div class="meta">' + o.itemCount + ' item(s)</div>' + productionWarningLineHtml(o) + '</div>' +
         '<div style="display:flex; align-items:center; gap:10px;">' +
           '<span class="badge ' + badgeClass + '">' + escapeHtml(o.status) + '</span>' +
           '<button class="tile-remove-btn" onclick="event.stopPropagation(); removeOrderFromTruckUi(\'' + o.orderId + '\', ' + jsStrAttr_(o.orderNumber) + ')">Remove</button>' +
@@ -2351,7 +2375,7 @@
       var warn = o.checkedOnOtherTruck ? '<div class="meta" style="color:var(--red);">Allocated to truck: ' + escapeHtml(o.checkedOnOtherTruck) + '</div>' : '';
       return '<div class="tile" onclick="openOrder(\'' + o.orderId + '\')">' +
         '<div><div class="name">' + escapeHtml(o.orderNumber) + ' - ' + escapeHtml(o.customer) + '</div>' +
-        '<div class="meta">' + o.itemCount + ' item(s)</div>' + warn + '</div>' +
+        '<div class="meta">' + o.itemCount + ' item(s)</div>' + warn + productionWarningLineHtml(o) + '</div>' +
         '<div><span class="badge ' + badgeClass + '">' + badgeText + '</span></div></div>';
     }).join('');
   }
@@ -2391,6 +2415,20 @@
     });
   }
 
+  // Shared by every branch of renderOrderDetail below - shows/hides and
+  // fills in the #od-production-block banner from whichever object on this
+  // screen's result currently carries productionDone/productionStatus/
+  // productionNote (orderSummary in the not-yet-checkable branches, the
+  // result object itself once items are shown). See productionWarningBadge's
+  // own comment for why this never blocks Done/Dispatch.
+  function renderProductionBlockFromFields_(fields) {
+    var block = document.getElementById('od-production-block');
+    if (!fields || fields.productionDone !== false) { block.style.display = 'none'; block.innerHTML = ''; return; }
+    block.style.display = 'block';
+    block.innerHTML = '&#8987; <strong>Production not yet complete</strong>' +
+      (fields.productionNote ? ' - ' + escapeHtml(fields.productionNote) : '');
+  }
+
   function renderOrderDetail() {
     var result = state.currentOrder;
     document.getElementById('od-warning').textContent = result.warning || '';
@@ -2405,6 +2443,7 @@
       var es = result.orderSummary;
       document.getElementById('od-order-number').textContent = es.orderNumber;
       document.getElementById('od-customer').textContent = es.customer;
+      renderProductionBlockFromFields_(es);
       el.innerHTML = '<div class="hint" style="margin-bottom:14px;">Order already allocated - it\'s currently on truck "' +
         escapeHtml(result.truckName) + '". Unallocate it from that truck first if it needs to move to this one.</div>' +
         '<button class="btn btn-danger btn-block" id="unallocate-order-btn" onclick="unallocateCurrentOrderUi()">Unallocate from ' + escapeHtml(result.truckName) + '</button>';
@@ -2422,6 +2461,7 @@
       var s = result.orderSummary;
       document.getElementById('od-order-number').textContent = s.orderNumber;
       document.getElementById('od-customer').textContent = s.customer;
+      renderProductionBlockFromFields_(s);
       el.innerHTML = '<div class="hint" style="margin-bottom:14px;">' + s.itemCount + ' item(s). This order isn\'t allocated to a truck right now.</div>' +
         '<button class="btn btn-primary btn-block" id="allocate-order-btn" onclick="allocateOrderUi()">Allocate to This Truck</button>';
       doneBtn.style.display = 'none';
@@ -2432,6 +2472,7 @@
     var oc = result.orderCheck;
     document.getElementById('od-order-number').textContent = oc.OrderNumber;
     document.getElementById('od-customer').textContent = oc.Customer;
+    renderProductionBlockFromFields_(result);
 
     el.innerHTML = result.items.map(function (item) {
       // A blank/missing PackedQty means "packed the full ordered Qty" - the
@@ -3332,6 +3373,35 @@
     return String(str == null ? '' : str).replace(/[&<>"']/g, function (c) {
       return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
     });
+  }
+
+  // Shane's 2026-09-16 request: "show the pack and production status of an
+  // order in the dispatch system so if an order is in dispatch for today
+  // but production hasn't completed the work yet that it shows that on the
+  // order". o.productionDone/productionStatus/productionNote come straight
+  // off the backend (deriveProductionStatus_ in Code.gs) wherever an order
+  // object reaches the frontend - getTruckAssignmentBoard, searchOrders,
+  // getOrdersForSession, getOrderForChecking. productionDone === false is
+  // the only case that ever renders anything here; an order with no
+  // Production lines at all (pure Packing) or with Production already done
+  // renders nothing, same as it always did before this existed.
+  //
+  // Purely informational - unlike RequiresCoa/CoaConfirmed, this never
+  // blocks Done or Dispatch. Production status can lag a few seconds behind
+  // real life (see PACKING_ORDERS_CACHE_TTL_SECONDS in Code.gs) and Shane
+  // only asked to SEE it, not to be blocked by it.
+  function productionWarningBadge(o) {
+    if (o.productionDone !== false) return '';
+    var title = o.productionNote ? ('Production: ' + o.productionNote) : 'Production not yet complete';
+    return '<span class="prod-warn-badge" title="' + escapeHtml(title) + '">&#8987; Production</span>';
+  }
+
+  // Same signal as productionWarningBadge, but as its own full line - for
+  // tile-style rows (Orders pane, Add Order search) that have room to show
+  // the actual note ("Potato - CUT KG: 200/400 kg"), not just a hover tooltip.
+  function productionWarningLineHtml(o) {
+    if (o.productionDone !== false) return '';
+    return '<div class="prod-warn-line">&#8987; ' + escapeHtml(o.productionNote || 'Production not yet complete') + '</div>';
   }
 
   // Safely embeds a value as a single-quoted JS string literal inside an

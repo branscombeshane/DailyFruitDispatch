@@ -242,6 +242,7 @@
     .status-line.packed { color: var(--green-dark); }
     .status-line.nostock { color: var(--red); }
     .status-line.qty-adjusted { color: var(--amber); }
+    .status-line.flagged { color: var(--amber); }
 
     .modal-backdrop {
       position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: none;
@@ -380,7 +381,7 @@
     .board-drag-ghost { position: fixed; z-index: 9999; box-shadow: 0 6px 16px rgba(0,0,0,0.28); pointer-events: none; opacity: 0.92; margin: 0 !important; }
     /* Shane's 2026-09-16 request: flag an order right here in Dispatch when
        Production hasn't actually finished the work for it yet (see
-       productionWarningBadge/productionMetaLineHtml + deriveProductionStatus_
+       productionWarningBadge/productionWarningLineHtml + deriveProductionStatus_
        in Code.gs). Amber, not red - this is informational, not a hard block
        the way an incomplete item check is. */
     .prod-warn-badge {
@@ -640,6 +641,28 @@
     </div>
   </div>
 
+  <!-- Mandatory "any truck issues?" prompt - shown once at the start of a
+       BRAND-NEW trip only (see TruckSessions.TruckIssuesPrompted /
+       reportTruckIssues in Code.gs), never again for a resumed in-progress
+       trip - Shane's request (2026-09-16): "when clicking on a truck to
+       start loading orders a window first comes up to report any truck
+       issues". Deliberately has no Cancel/close button - either "No Truck
+       Issues" or at least one issue must be submitted, since the whole
+       point is a genuine answer once per trip. Non-blocking: whatever's
+       submitted here never stops the truck from dispatching, it only adds
+       to the Dashboard's "Truck Issues" checklist for a Dispatch Manager to
+       resolve. -->
+  <div class="modal-backdrop" id="truck-issues-modal">
+    <div class="modal">
+      <h3 style="margin-top:0;">Any truck issues?</h3>
+      <div class="hint" style="margin-bottom:12px;">Mechanical problems, cleanliness, anything else worth flagging before this trip starts - one per line if there's more than one. This won't stop you from loading orders; it just lets a Dispatch Manager follow up.</div>
+      <textarea id="truck-issues-input" rows="4" placeholder="Describe the issue(s), one per line" autocomplete="off"></textarea>
+      <div class="error" id="truck-issues-modal-error"></div>
+      <button class="btn btn-danger btn-block" style="margin-bottom:10px;" onclick="submitTruckIssues()">Submit Issue(s)</button>
+      <button class="btn btn-secondary btn-block" onclick="submitNoTruckIssues()">No Truck Issues</button>
+    </div>
+  </div>
+
   <!-- Driver & route entry -->
   <div class="modal-backdrop" id="trip-modal">
     <div class="modal">
@@ -679,6 +702,25 @@
       <div class="error" id="qty-modal-error"></div>
       <button class="btn btn-primary btn-block" style="margin-bottom:10px;" onclick="saveQtyModal()">Save &amp; Mark Packed</button>
       <button class="btn btn-secondary btn-block" onclick="closeQtyModal()">Cancel</button>
+    </div>
+  </div>
+
+  <!-- Flag a packing-quality issue on one item - poor quality, wrong
+       weight, etc. Non-blocking: flagging does NOT change the item's own
+       Packed/No Stock/Pending status, it just adds a note to the Admin
+       Dashboard's "Flagged Packing Issues" checklist for follow-up
+       (Shane's request, 2026-09-16). Can be raised on an item in any
+       status - a packer's mistake is often only noticed after it's
+       already been marked Packed. -->
+  <div class="modal-backdrop" id="flag-item-modal">
+    <div class="modal">
+      <h3 style="margin-top:0;">Flag packing issue</h3>
+      <div class="hint" id="flag-item-modal-desc" style="margin-bottom:10px;"></div>
+      <label for="flag-item-note-input">What's wrong? (poor quality, wrong weight, etc.)</label>
+      <textarea id="flag-item-note-input" rows="3" placeholder="Short explanation" autocomplete="off"></textarea>
+      <div class="error" id="flag-item-modal-error"></div>
+      <button class="btn btn-primary btn-block" style="margin-bottom:10px;" onclick="saveFlagItem()">Flag Issue</button>
+      <button class="btn btn-secondary btn-block" onclick="closeFlagItemModal()">Cancel</button>
     </div>
   </div>
 
@@ -791,6 +833,8 @@
           <div id="fulfillment-outstanding"></div>
         </div>
         <div id="jobs-today"></div>
+        <div id="packing-issues-today"></div>
+        <div id="truck-issues-today"></div>
         <div id="overdue-warnings"></div>
         <div id="dashboard-trucks"></div>
       </div>
@@ -819,6 +863,8 @@
           <div id="fulfillment-outstanding-history"></div>
         </div>
         <div id="jobs-today-history"></div>
+        <div id="packing-issues-today-history"></div>
+        <div id="truck-issues-today-history"></div>
         <div id="overdue-warnings-history"></div>
         <div id="dashboard-trucks-history"></div>
       </div>
@@ -901,7 +947,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-09-16-04';
+  var BUILD_VERSION = 'build-2026-09-16-07';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -1059,7 +1105,17 @@
     markTruckDispatched: true, updateSessionTrip: true, updateTrayCounts: true,
     updateChecker: true, updateTruck: true, updateDriver: true, deleteChecker: true,
     deleteTruck: true, deleteDriver: true, saveDataSourceConfig: true,
-    markOrderCollected: true, unmarkOrderCollected: true
+    markOrderCollected: true, unmarkOrderCollected: true,
+    // listPackingIssuesForDate/listTruckIssuesForDate are plain reads, and
+    // setPackingIssueStatus/setTruckIssueStatus overwrite-by-ID (or no-op if
+    // repeated) exactly like setJobStatus above - all four are safe to
+    // retry. flagPackingIssue and reportTruckIssues are deliberately NOT
+    // included here, for the same "appends a brand-new row with no
+    // does-this-already-exist guard" reason addJobToTruck is excluded above -
+    // retrying either after a lost response risks a silent duplicate flag/
+    // issue row.
+    listPackingIssuesForDate: true, setPackingIssueStatus: true,
+    listTruckIssuesForDate: true, setTruckIssueStatus: true
   };
   // Delays before each automatic retry (~0.8s, then ~2s later) - short
   // enough that a genuinely transient hiccup (see callApiAttempt_'s comment
@@ -1170,6 +1226,7 @@
     orderChecks: [],
     currentOrder: null,   // { orderCheck, items }
     pendingQtyItemId: null,
+    pendingFlagItemId: null,
     adminRole: null,      // null | 'admin' | 'dispatchManager' - which role got them into screen-admin
     role: null            // the signed-in user's actual role: 'Admin' | 'Dispatch Manager' | 'Checker'
   };
@@ -1953,7 +2010,56 @@
     showScreen('screen-workspace');
     showWsTab('trays');
     refreshMyOrders();
-    if (!state.session.Driver || !state.session.Route) openTripModal(); // prompt for it right away when loading the truck
+    // The truck-issues prompt takes priority over the driver/route prompt -
+    // "a window first comes up to report any truck issues" (Shane's
+    // request, 2026-09-16) - and only ever fires once per brand-new trip
+    // (TruckIssuesPrompted starts false only on a genuinely new session, see
+    // createTruckSession_ in Code.gs). Once it's been answered (either just
+    // now, via submitTruckIssues/submitNoTruckIssues below, or already on a
+    // resumed session), fall through to the pre-existing driver/route check.
+    if (!state.session.TruckIssuesPrompted) {
+      openTruckIssuesModal();
+    } else if (!state.session.Driver || !state.session.Route) {
+      openTripModal(); // prompt for it right away when loading the truck
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // TRUCK ISSUES - mandatory once-per-new-trip prompt (see the modal's own
+  // comment in the HTML above for the full rationale).
+  // ------------------------------------------------------------------
+  function openTruckIssuesModal() {
+    document.getElementById('truck-issues-input').value = '';
+    document.getElementById('truck-issues-modal-error').textContent = '';
+    document.getElementById('truck-issues-modal').classList.add('active');
+  }
+
+  // Shared by both submit paths below - closes the modal, records locally
+  // that this trip has now been asked (so re-opening this same session
+  // later in the session never shows it again without a fresh server
+  // round-trip), then falls through to the driver/route prompt exactly the
+  // way enterWorkspace itself would have if the truck-issues prompt had
+  // never been needed.
+  function closeTruckIssuesModalAndContinue_() {
+    document.getElementById('truck-issues-modal').classList.remove('active');
+    state.session.TruckIssuesPrompted = true;
+    if (!state.session.Driver || !state.session.Route) openTripModal();
+  }
+
+  function submitNoTruckIssues() {
+    callApi('reportTruckIssues', [state.session.ID, [], state.checker.id, state.checker.name])
+      .then(closeTruckIssuesModalAndContinue_).catch(showFatalError);
+  }
+
+  function submitTruckIssues() {
+    var issues = document.getElementById('truck-issues-input').value.split('\n')
+      .map(function (s) { return s.trim(); }).filter(Boolean);
+    if (issues.length === 0) {
+      document.getElementById('truck-issues-modal-error').textContent = 'Describe at least one issue, or tap "No Truck Issues" instead.';
+      return;
+    }
+    callApi('reportTruckIssues', [state.session.ID, issues, state.checker.id, state.checker.name])
+      .then(closeTruckIssuesModalAndContinue_).catch(showFatalError);
   }
 
   // Driver and DriverContacts are two parallel comma-separated fields
@@ -2491,20 +2597,35 @@
         }
       }
       if (item.Status === 'No Stock') statusLine = '<div class="status-line nostock">No stock</div>';
+      // flaggedJustNow is a purely client-side echo of a successful
+      // flagPackingIssue call THIS session (see saveFlagItem below) - it's
+      // not read back from the server, so re-fetching this order (e.g.
+      // leaving and reopening it) won't show it again. It exists only to
+      // confirm the tap actually went through; the real, persistent record
+      // lives in PackingIssues and shows up on the Admin Dashboard.
+      if (item.flaggedJustNow) {
+        statusLine += '<div class="status-line flagged">Flagged: ' + escapeHtml(item.flaggedJustNow) + '</div>';
+      }
 
       var editBtn = '<button class="btn btn-secondary" onclick="openQtyModal(\'' + item.ID + '\')">Edit Qty</button>';
+      // Flag Issue is offered regardless of the item's current status - a
+      // packer's mistake (poor quality, wrong weight) is very often only
+      // spotted after the item's already been marked Packed, so this is
+      // deliberately not limited to the Pending branch below.
+      var flagBtn = '<button class="btn btn-secondary" onclick="openFlagItemModal(\'' + item.ID + '\')">Flag Issue</button>';
       var actions;
       if (item.Status === 'Pending') {
         actions = '<div class="item-actions">' +
           '<button class="btn btn-primary" onclick="markItem(\'' + item.ID + '\', \'Packed\')">Packed</button>' +
           editBtn +
-          '<button class="btn btn-danger" onclick="markItem(\'' + item.ID + '\', \'No Stock\')">No Stock</button></div>';
+          '<button class="btn btn-danger" onclick="markItem(\'' + item.ID + '\', \'No Stock\')">No Stock</button>' +
+          flagBtn + '</div>';
       } else if (item.Status === 'Packed') {
         actions = '<div class="item-actions">' +
           '<button class="btn btn-secondary" onclick="markItem(\'' + item.ID + '\', \'Pending\')">Undo</button>' +
-          editBtn + '</div>';
+          editBtn + flagBtn + '</div>';
       } else {
-        actions = '<div class="item-actions"><button class="btn btn-secondary" onclick="markItem(\'' + item.ID + '\', \'Pending\')">Undo</button></div>';
+        actions = '<div class="item-actions"><button class="btn btn-secondary" onclick="markItem(\'' + item.ID + '\', \'Pending\')">Undo</button>' + flagBtn + '</div>';
       }
 
       return '<div class="item-row">' +
@@ -2672,6 +2793,41 @@
   function closeQtyModal() {
     document.getElementById('qty-modal').classList.remove('active');
     state.pendingQtyItemId = null;
+  }
+
+  // Flags a packer-quality problem on one item (poor quality, wrong weight,
+  // etc.) with a short note - Shane's request (2026-09-16). Deliberately
+  // does NOT touch the item's own Status/markItem at all: this is purely a
+  // side note for the Admin Dashboard's "Flagged Packing Issues" checklist,
+  // not a change to what's been packed or checked.
+  function openFlagItemModal(itemId) {
+    var item = state.currentOrder.items.filter(function (i) { return i.ID === itemId; })[0];
+    if (!item) return;
+    state.pendingFlagItemId = itemId;
+    document.getElementById('flag-item-modal-desc').textContent = item.ProductDescription;
+    document.getElementById('flag-item-note-input').value = '';
+    document.getElementById('flag-item-modal-error').textContent = '';
+    document.getElementById('flag-item-modal').classList.add('active');
+  }
+
+  function closeFlagItemModal() {
+    document.getElementById('flag-item-modal').classList.remove('active');
+    state.pendingFlagItemId = null;
+  }
+
+  function saveFlagItem() {
+    var itemId = state.pendingFlagItemId;
+    var note = document.getElementById('flag-item-note-input').value.trim();
+    if (!note) {
+      document.getElementById('flag-item-modal-error').textContent = 'Enter a short explanation of the issue.';
+      return;
+    }
+    closeFlagItemModal();
+    callApi('flagPackingIssue', [itemId, note, state.checker.id, state.checker.name]).then(function () {
+      var item = state.currentOrder.items.filter(function (i) { return i.ID === itemId; })[0];
+      if (item) item.flaggedJustNow = note; // see renderOrderDetail's comment on this field
+      renderOrderDetail();
+    }).catch(showFatalError);
   }
 
   // ------------------------------------------------------------------
@@ -3070,6 +3226,8 @@
     callApi('getDashboardForDate', [todayStr]).then(function (data) { renderDashboard(data, ''); }).catch(showFatalError);
     callApi('getOrderFulfillmentOverview', [todayStr]).then(function (data) { renderFulfillmentOverview(data, ''); }).catch(showFatalError);
     callApi('listJobsForDate', [todayStr]).then(function (list) { renderJobsToday(list, ''); }).catch(showFatalError);
+    callApi('listPackingIssuesForDate', [todayStr]).then(function (list) { renderPackingIssuesToday(list, ''); }).catch(showFatalError);
+    callApi('listTruckIssuesForDate', [todayStr]).then(function (list) { renderTruckIssuesToday(list, ''); }).catch(showFatalError);
   }
 
   // History mirrors loadDashboard exactly (same three calls, same render
@@ -3092,6 +3250,8 @@
     callApi('getDashboardForDate', [dateInput.value]).then(function (data) { renderDashboard(data, '-history'); }).catch(showFatalError);
     callApi('getOrderFulfillmentOverview', [dateInput.value]).then(function (data) { renderFulfillmentOverview(data, '-history'); }).catch(showFatalError);
     callApi('listJobsForDate', [dateInput.value]).then(function (list) { renderJobsToday(list, '-history'); }).catch(showFatalError);
+    callApi('listPackingIssuesForDate', [dateInput.value]).then(function (list) { renderPackingIssuesToday(list, '-history'); }).catch(showFatalError);
+    callApi('listTruckIssuesForDate', [dateInput.value]).then(function (list) { renderTruckIssuesToday(list, '-history'); }).catch(showFatalError);
   }
 
   // Jobs (see openAddJobModal in the truck workspace) are non-order tasks
@@ -3117,6 +3277,76 @@
           '</div><div><span class="badge ' + badgeClass + '">' + escapeHtml(j.status) + '</span></div></div>';
       }).join('') +
       '</div>';
+  }
+
+  // Flagged packing-quality issues (see openFlagItemModal/flagPackingIssue) -
+  // a checklist of packer mistakes (poor quality, wrong weight, etc.)
+  // reported while checking stock, across all trucks, for someone to follow
+  // up on. Non-blocking - these never affected dispatch - so, unlike Jobs,
+  // resolving one here is purely bookkeeping for whoever's working through
+  // the list (Shane's request, 2026-09-16).
+  function renderPackingIssuesToday(list, idSuffix) {
+    var el = document.getElementById('packing-issues-today' + idSuffix);
+    if (list.length === 0) { el.innerHTML = ''; return; }
+    el.innerHTML = '<div class="card">' +
+      '<h3 style="margin-top:0;">Flagged Packing Issues (' + list.length + ')</h3>' +
+      list.map(function (p) {
+        var badgeClass = p.Status === 'Resolved' ? 'badge-complete' : 'badge-pending';
+        var resolvedLine = p.Status === 'Resolved'
+          ? '<div class="hint">Resolved ' + formatTime(p.ResolvedAt) + (p.ResolvedByName ? ' by ' + escapeHtml(p.ResolvedByName) : '') + '</div>'
+          : '';
+        return '<div class="dash-order-row"><div><div>' +
+          escapeHtml(p.ProductDescription) + ' <span class="hint">(' + escapeHtml(p.TruckName) +
+          (p.OrderNumber ? ' - ' + escapeHtml(p.OrderNumber) + ' ' + escapeHtml(p.Customer) : '') + ')</span>' +
+          '</div><div class="hint">' + escapeHtml(p.Note) + '</div>' +
+          '<div class="hint">Flagged ' + formatTime(p.FlaggedAt) + (p.FlaggedByName ? ' by ' + escapeHtml(p.FlaggedByName) : '') + '</div>' +
+          resolvedLine +
+          '</div><div style="display:flex; align-items:center; gap:10px;"><span class="badge ' + badgeClass + '">' + escapeHtml(p.Status) + '</span>' +
+          '<button class="btn btn-secondary" style="padding:6px 10px; font-size:13px;" onclick="togglePackingIssueResolved(\'' + p.ID + '\', \'' + p.Status + '\', \'' + idSuffix + '\')">' +
+          (p.Status === 'Resolved' ? 'Undo' : 'Resolve') + '</button></div></div>';
+      }).join('') +
+      '</div>';
+  }
+
+  function togglePackingIssueResolved(issueId, currentStatus, idSuffix) {
+    var newStatus = currentStatus === 'Resolved' ? 'Open' : 'Resolved';
+    callApi('setPackingIssueStatus', [issueId, newStatus, state.checker.name])
+      .then(function () { idSuffix === '-history' ? loadHistory() : loadDashboard(); })
+      .catch(showFatalError);
+  }
+
+  // Reported truck issues (see the mandatory truck-issues-modal prompt) -
+  // mechanical problems, cleanliness, and so on, reported once per trip,
+  // shown here specifically for Dispatch Managers to work through and
+  // resolve. Same non-blocking, resolve-as-bookkeeping model as
+  // renderPackingIssuesToday above.
+  function renderTruckIssuesToday(list, idSuffix) {
+    var el = document.getElementById('truck-issues-today' + idSuffix);
+    if (list.length === 0) { el.innerHTML = ''; return; }
+    el.innerHTML = '<div class="card">' +
+      '<h3 style="margin-top:0;">Truck Issues (' + list.length + ')</h3>' +
+      list.map(function (t) {
+        var badgeClass = t.Status === 'Resolved' ? 'badge-complete' : 'badge-pending';
+        var resolvedLine = t.Status === 'Resolved'
+          ? '<div class="hint">Resolved ' + formatTime(t.ResolvedAt) + (t.ResolvedByName ? ' by ' + escapeHtml(t.ResolvedByName) : '') + '</div>'
+          : '';
+        return '<div class="dash-order-row"><div><div>' +
+          escapeHtml(t.TruckName) +
+          '</div><div class="hint">' + escapeHtml(t.Note) + '</div>' +
+          '<div class="hint">Reported ' + formatTime(t.ReportedAt) + (t.ReportedByName ? ' by ' + escapeHtml(t.ReportedByName) : '') + '</div>' +
+          resolvedLine +
+          '</div><div style="display:flex; align-items:center; gap:10px;"><span class="badge ' + badgeClass + '">' + escapeHtml(t.Status) + '</span>' +
+          '<button class="btn btn-secondary" style="padding:6px 10px; font-size:13px;" onclick="toggleTruckIssueResolved(\'' + t.ID + '\', \'' + t.Status + '\', \'' + idSuffix + '\')">' +
+          (t.Status === 'Resolved' ? 'Undo' : 'Resolve') + '</button></div></div>';
+      }).join('') +
+      '</div>';
+  }
+
+  function toggleTruckIssueResolved(issueId, currentStatus, idSuffix) {
+    var newStatus = currentStatus === 'Resolved' ? 'Open' : 'Resolved';
+    callApi('setTruckIssueStatus', [issueId, newStatus, state.checker.name])
+      .then(function () { idSuffix === '-history' ? loadHistory() : loadDashboard(); })
+      .catch(showFatalError);
   }
 
   // Populated by renderFulfillmentOverview, keyed by idSuffix then orderId,

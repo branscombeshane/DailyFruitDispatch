@@ -91,12 +91,23 @@
           on a few items in a row) protects each one on its own rather than
           only the last thing tapped.
        2. A centered, dimmed overlay (#global-loading-overlay) shows for the
-          whole time ANY call is in flight, as a catch-all for actions that
-          don't go through a recognized tap target (search-as-you-type) and
-          for cases where the tapped element gets removed by a screen change
-          before its own request finishes. It never blocks input itself
-          (pointer-events: none throughout), so it's purely a visual cue -
-          the actual double-tap protection is layer 1 above. */
+          whole time any NON-SILENT call is in flight, as a catch-all for
+          actions that don't go through a recognized tap target
+          (search-as-you-type) and for cases where the tapped element gets
+          removed by a screen change before its own request finishes. It
+          never blocks input itself (pointer-events: none throughout), so
+          it's purely a visual cue - the actual double-tap protection is
+          layer 1 above.
+          A background refresh nobody actually asked for right now - the
+          Trucks Board's own auto-poll (see pollTruckBoard) - passes
+          { silent: true } as callApi's 3rd argument specifically to skip
+          this layer: popping this overlay every 15s regardless of whether
+          anything on screen even changed reads as "something is loading"
+          when nothing meaningfully is, which is exactly the kind of
+          distraction a quiet background sync shouldn't cause (Shane's
+          report, 2026-09-16). The refresh itself, and layer 1 above, are
+          both unaffected either way - silent only ever concerns this one
+          overlay. */
     @keyframes btn-spinner-spin { to { transform: rotate(360deg); } }
     .btn-spinner {
       display: inline-block; width: 14px; height: 14px; margin-right: 8px;
@@ -867,7 +878,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-09-16-03';
+  var BUILD_VERSION = 'build-2026-09-16-04';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -951,9 +962,15 @@
     }
   }
 
-  function apiCallStarted(tapEl) {
-    pendingApiCalls++;
-    if (pendingApiCalls === 1) document.getElementById('global-loading-overlay').classList.add('active');
+  // silent skips ONLY the global overlay (pendingApiCalls is otherwise
+  // unused for anything else) - a silent call is always for a background
+  // refresh with no real tapEl behind it anyway (see callApi below), so
+  // there's nothing for layer 1's tap-target blocking to do here either.
+  function apiCallStarted(tapEl, silent) {
+    if (!silent) {
+      pendingApiCalls++;
+      if (pendingApiCalls === 1) document.getElementById('global-loading-overlay').classList.add('active');
+    }
     // tapEl may already be gone from the page by now (e.g. a handler like
     // markItem() re-renders its whole row before the save even starts) -
     // classList/dataset access on a detached element is harmless, it just
@@ -964,9 +981,11 @@
     }
   }
 
-  function apiCallFinished(tapEl) {
-    pendingApiCalls = Math.max(0, pendingApiCalls - 1);
-    if (pendingApiCalls === 0) document.getElementById('global-loading-overlay').classList.remove('active');
+  function apiCallFinished(tapEl, silent) {
+    if (!silent) {
+      pendingApiCalls = Math.max(0, pendingApiCalls - 1);
+      if (pendingApiCalls === 0) document.getElementById('global-loading-overlay').classList.remove('active');
+    }
     if (tapEl) {
       var remaining = (tapTargetPendingCounts.get(tapEl) || 1) - 1;
       if (remaining <= 0) {
@@ -1033,7 +1052,19 @@
   var EXTENDED_TIMEOUT_ACTIONS = { setItemStatus: 35000, allocateOrderToTruck: 35000, updateSessionTrip: 35000 };
   var DEFAULT_TIMEOUT_MS = 20000;
 
-  function callApi(action, params) {
+  // opts.silent (default false): skip the global loading overlay entirely
+  // for this call - for a background refresh that's already quietly doing
+  // its job (the Trucks Board's own poll, see pollTruckBoard) rather than
+  // something the user is actively waiting on. Retries/timeouts below are
+  // completely unaffected - silent only ever concerns the overlay.
+  function callApi(action, params, opts) {
+    var silent = !!(opts && opts.silent);
+    // A silent call is a background refresh with no real "thing the user
+    // tapped" behind it - forcing tapEl to null here (rather than reading
+    // currentTapTarget, which could still be whatever was last actually
+    // tapped, possibly minutes ago) also sidesteps blocking/spinning some
+    // unrelated stale element for the duration of this call.
+    //
     // Captured ONCE here, rather than re-reading currentTapTarget again in
     // apiCallFinished - that way this call's own start/finish always agree
     // on which element they're for, even if the user has already tapped
@@ -1041,9 +1072,9 @@
     // every automatic retry below, not just the first attempt, so the
     // tapped element (and the global loading indicator) stays blocked for
     // the whole sequence rather than flickering unblocked between retries.
-    var tapEl = currentTapTarget;
-    apiCallStarted(tapEl);
-    return callApiAttempt_(action, params, 0).finally(function () { apiCallFinished(tapEl); });
+    var tapEl = silent ? null : currentTapTarget;
+    apiCallStarted(tapEl, silent);
+    return callApiAttempt_(action, params, 0).finally(function () { apiCallFinished(tapEl, silent); });
   }
 
   function callApiAttempt_(action, params, retryCount) {
@@ -1437,7 +1468,14 @@
   // whatever the person is doing.
   function pollTruckBoard() {
     if (boardDrag || Object.keys(savingOrderIds).length > 0) return;
-    callApi('getTruckAssignmentBoard', []).then(function (data) {
+    // silent: this refresh happens on its own, every 15s, whether or not
+    // anything actually changed - popping the global loading overlay for
+    // it regardless reads as "something is loading" when usually nothing
+    // meaningfully is, which is exactly the distraction Shane reported
+    // (2026-09-16). loadTruckBoard's own initial/explicit load (opening
+    // the screen) is NOT silent - that one really is a "loading" moment
+    // worth showing.
+    callApi('getTruckAssignmentBoard', [], { silent: true }).then(function (data) {
       if (boardDrag || Object.keys(savingOrderIds).length > 0) return;
       boardData = data;
       renderTruckBoard();

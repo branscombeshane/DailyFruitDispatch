@@ -827,15 +827,13 @@
         </div>
         <div class="card">
           <h3 style="margin-top:0;" id="fulfillment-title">Today's orders - dispatched vs outstanding</h3>
-          <p class="hint" id="fulfillment-hint">Everything due for delivery today, so you can confirm at the end of the day that it's all accounted for.</p>
+          <p class="hint" id="fulfillment-hint">Everything due for delivery today, so you can confirm at the end of the day that it's all accounted for. Tap a tile below (including Overdue) to see and act on that list - nothing stays open on its own.</p>
           <div id="fulfillment-summary" style="display:flex; flex-wrap:wrap; gap:12px; margin-bottom:14px;"></div>
           <div id="fulfillment-drilldown"></div>
-          <div id="fulfillment-outstanding"></div>
         </div>
         <div id="jobs-today"></div>
         <div id="packing-issues-today"></div>
         <div id="truck-issues-today"></div>
-        <div id="overdue-warnings"></div>
         <div id="dashboard-trucks"></div>
       </div>
 
@@ -860,12 +858,10 @@
           <p class="hint" id="fulfillment-hint-history"></p>
           <div id="fulfillment-summary-history" style="display:flex; flex-wrap:wrap; gap:12px; margin-bottom:14px;"></div>
           <div id="fulfillment-drilldown-history"></div>
-          <div id="fulfillment-outstanding-history"></div>
         </div>
         <div id="jobs-today-history"></div>
         <div id="packing-issues-today-history"></div>
         <div id="truck-issues-today-history"></div>
-        <div id="overdue-warnings-history"></div>
         <div id="dashboard-trucks-history"></div>
       </div>
 
@@ -947,7 +943,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-09-16-07';
+  var BUILD_VERSION = 'build-2026-09-19-01';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -3387,22 +3383,15 @@
       statTile(t.total, 'Orders due ' + dayLabel, false, { onclick: "selectFulfillmentTile('" + idSuffix + "', 'total')", selected: sel === 'total' }) +
       statTile(t.dispatchedCount, 'Dispatched', false, { onclick: "selectFulfillmentTile('" + idSuffix + "', 'dispatched')", selected: sel === 'dispatched' }) +
       statTile(t.collectedCount, 'Collected', false, { onclick: "selectFulfillmentTile('" + idSuffix + "', 'collected')", selected: sel === 'collected' }) +
-      statTile(t.outstandingCount, 'Outstanding', t.outstandingCount > 0, { onclick: "selectFulfillmentTile('" + idSuffix + "', 'outstanding')", selected: sel === 'outstanding' });
+      statTile(t.outstandingCount, 'Outstanding', t.outstandingCount > 0, { onclick: "selectFulfillmentTile('" + idSuffix + "', 'outstanding')", selected: sel === 'outstanding' }) +
+      // Overdue (2026-09-19, per Shane's decluttering request): folded into
+      // this same tile row instead of its own always-visible red card below -
+      // see renderFulfillmentDrilldown_'s own comment for why tapping it
+      // shows the SAME actionable Mark-Collected rows the old card did, not
+      // just a read-only list.
+      statTile(data.overdueWarnings.length, 'Overdue', data.overdueWarnings.length > 0, { onclick: "selectFulfillmentTile('" + idSuffix + "', 'overdue')", selected: sel === 'overdue' });
 
     renderFulfillmentDrilldown_(idSuffix);
-
-    var outstandingEl = document.getElementById('fulfillment-outstanding' + idSuffix);
-    outstandingEl.innerHTML = t.outstanding.length === 0
-      ? '<div class="empty">All orders due ' + dayLabel + ' are dispatched or collected.</div>'
-      : t.outstanding.map(function (o) { return fulfillmentOrderRow(o, false, idSuffix); }).join('');
-
-    var overdueEl = document.getElementById('overdue-warnings' + idSuffix);
-    var overdueTitle = 'Overdue as of ' + dayLabel + ' - not dispatched or collected (' + data.overdueWarnings.length + ')';
-    overdueEl.innerHTML = data.overdueWarnings.length === 0 ? '' :
-      '<div class="card dash-truck-card dash-alert">' +
-      '<h3 style="margin-top:0; color:var(--red);">' + escapeHtml(overdueTitle) + '</h3>' +
-      data.overdueWarnings.map(function (o) { return fulfillmentOrderRow(o, true, idSuffix); }).join('') +
-      '</div>';
   }
 
   // Toggles which of the 4 "Orders due/Dispatched/Collected/Outstanding"
@@ -3414,28 +3403,48 @@
     renderFulfillmentOverview(fulfillmentDataByIdSuffix[idSuffix], idSuffix);
   }
 
-  var FULFILLMENT_TILE_LABELS = { total: 'Orders due', dispatched: 'Dispatched', collected: 'Collected', outstanding: 'Outstanding' };
+  var FULFILLMENT_TILE_LABELS = { total: 'Orders due', dispatched: 'Dispatched', collected: 'Collected', outstanding: 'Outstanding', overdue: 'Overdue' };
+
+  // Outstanding/Overdue are the two "needs action" tiles - their drilldown
+  // shows the same actionable Mark-Collected row (fulfillmentOrderRow) the
+  // old always-visible Outstanding list and Overdue card used to show below
+  // the tiles, rather than the plain read-only badge row Total/Dispatched/
+  // Collected get. Folded in here (2026-09-19, Shane: the Dashboard was too
+  // cluttered with those two sections always sitting on the page) so
+  // nothing shows until a tile is tapped, and there's only ever ONE place
+  // outstanding orders are listed (previously the always-visible Outstanding
+  // list and the Outstanding tile's own drilldown showed the same orders
+  // twice).
+  var FULFILLMENT_ACTIONABLE_KEYS = { outstanding: true, overdue: true };
 
   function renderFulfillmentDrilldown_(idSuffix) {
     var el = document.getElementById('fulfillment-drilldown' + idSuffix);
     var key = fulfillmentSelectedTile[idSuffix];
     if (!key) { el.innerHTML = ''; return; }
 
-    var t = fulfillmentDataByIdSuffix[idSuffix].today;
-    var list = t[key]; // 'total' tile reads t.all - handled just below
-    if (key === 'total') list = t.all;
+    var data = fulfillmentDataByIdSuffix[idSuffix];
+    var t = data.today;
+    var list;
+    if (key === 'overdue') list = data.overdueWarnings;
+    else if (key === 'total') list = t.all;
+    else list = t[key];
+
+    var actionable = !!FULFILLMENT_ACTIONABLE_KEYS[key];
+    var headingStyle = (key === 'overdue' && list.length > 0) ? ' style="color:var(--red);"' : '';
 
     el.innerHTML = '<div class="card" style="background:#f7f9f8;">' +
-      '<div class="dash-filter-bar"><strong>' + FULFILLMENT_TILE_LABELS[key] + ' (' + list.length + ')</strong>' +
+      '<div class="dash-filter-bar"><strong' + headingStyle + '>' + FULFILLMENT_TILE_LABELS[key] + ' (' + list.length + ')</strong>' +
       '<button class="btn btn-secondary" onclick="selectFulfillmentTile(\'' + idSuffix + '\', \'' + key + '\')">Close</button></div>' +
       (list.length === 0
         ? '<div class="empty">Nothing in this category.</div>'
-        : '<div class="dash-drilldown-list">' + list.map(function (o) {
-            var badge = o.dispatched ? '<span class="badge badge-dispatched">Dispatched</span>' :
-              o.collected ? '<span class="badge badge-complete">Collected</span>' :
-              '<span class="badge badge-pending">Outstanding</span>';
-            return '<div class="dash-order-row"><div>' + escapeHtml(o.orderNumber) + ' - ' + escapeHtml(o.customer) + '</div><div>' + badge + '</div></div>';
-          }).join('') + '</div>') +
+        : (actionable
+          ? list.map(function (o) { return fulfillmentOrderRow(o, key === 'overdue', idSuffix); }).join('')
+          : '<div class="dash-drilldown-list">' + list.map(function (o) {
+              var badge = o.dispatched ? '<span class="badge badge-dispatched">Dispatched</span>' :
+                o.collected ? '<span class="badge badge-complete">Collected</span>' :
+                '<span class="badge badge-pending">Outstanding</span>';
+              return '<div class="dash-order-row"><div>' + escapeHtml(o.orderNumber) + ' - ' + escapeHtml(o.customer) + '</div><div>' + badge + '</div></div>';
+            }).join('') + '</div>')) +
       '</div>';
   }
 

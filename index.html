@@ -943,7 +943,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-09-19-01';
+  var BUILD_VERSION = 'build-2026-09-22-01';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -1102,16 +1102,17 @@
     updateChecker: true, updateTruck: true, updateDriver: true, deleteChecker: true,
     deleteTruck: true, deleteDriver: true, saveDataSourceConfig: true,
     markOrderCollected: true, unmarkOrderCollected: true,
-    // listPackingIssuesForDate/listTruckIssuesForDate are plain reads, and
-    // setPackingIssueStatus/setTruckIssueStatus overwrite-by-ID (or no-op if
-    // repeated) exactly like setJobStatus above - all four are safe to
-    // retry. flagPackingIssue and reportTruckIssues are deliberately NOT
+    // listPackingIssuesForDate/listTruckIssuesForDate and their Dashboard
+    // equivalents listOpenPackingIssues/listOpenTruckIssues are plain reads,
+    // and setPackingIssueStatus/setTruckIssueStatus overwrite-by-ID (or
+    // no-op if repeated) exactly like setJobStatus above - all six are safe
+    // to retry. flagPackingIssue and reportTruckIssues are deliberately NOT
     // included here, for the same "appends a brand-new row with no
     // does-this-already-exist guard" reason addJobToTruck is excluded above -
     // retrying either after a lost response risks a silent duplicate flag/
     // issue row.
-    listPackingIssuesForDate: true, setPackingIssueStatus: true,
-    listTruckIssuesForDate: true, setTruckIssueStatus: true
+    listPackingIssuesForDate: true, listOpenPackingIssues: true, setPackingIssueStatus: true,
+    listTruckIssuesForDate: true, listOpenTruckIssues: true, setTruckIssueStatus: true
   };
   // Delays before each automatic retry (~0.8s, then ~2s later) - short
   // enough that a genuinely transient hiccup (see callApiAttempt_'s comment
@@ -3222,17 +3223,28 @@
     callApi('getDashboardForDate', [todayStr]).then(function (data) { renderDashboard(data, ''); }).catch(showFatalError);
     callApi('getOrderFulfillmentOverview', [todayStr]).then(function (data) { renderFulfillmentOverview(data, ''); }).catch(showFatalError);
     callApi('listJobsForDate', [todayStr]).then(function (list) { renderJobsToday(list, ''); }).catch(showFatalError);
-    callApi('listPackingIssuesForDate', [todayStr]).then(function (list) { renderPackingIssuesToday(list, ''); }).catch(showFatalError);
-    callApi('listTruckIssuesForDate', [todayStr]).then(function (list) { renderTruckIssuesToday(list, ''); }).catch(showFatalError);
+    // Packing/Truck Issues on the Dashboard show every still-OPEN one
+    // regardless of which day it was raised (Shane's 2026-09-22 request -
+    // unlike Jobs, these should stay visible until resolved, not just on
+    // the day they were flagged/reported). History keeps its own
+    // per-picked-day view below via listPackingIssuesForDate/
+    // listTruckIssuesForDate instead.
+    callApi('listOpenPackingIssues', []).then(function (list) { renderPackingIssuesToday(list, ''); }).catch(showFatalError);
+    callApi('listOpenTruckIssues', []).then(function (list) { renderTruckIssuesToday(list, ''); }).catch(showFatalError);
   }
 
-  // History mirrors loadDashboard exactly (same three calls, same render
-  // functions) but for whichever day is picked, using the '-history'
-  // idSuffix to target its own separate set of element ids so it never
-  // clobbers whatever Dashboard is currently showing. Defaults to
+  // History mirrors loadDashboard's shape (same render functions, same
+  // idSuffix-isolation pattern) but for whichever day is picked, using the
+  // '-history' idSuffix to target its own separate set of element ids so
+  // it never clobbers whatever Dashboard is currently showing. Defaults to
   // yesterday on first open, since today's own view already lives on
   // Dashboard - but any past date (or today, for comparison) can still be
-  // picked here.
+  // picked here. Packing/Truck Issues are the one place History genuinely
+  // differs from Dashboard (2026-09-22): History deliberately keeps calling
+  // listPackingIssuesForDate/listTruckIssuesForDate for a historical record
+  // of exactly what happened on the picked day (resolved or not), rather
+  // than Dashboard's listOpenPackingIssues/listOpenTruckIssues, which show
+  // every still-open one regardless of day.
   function loadHistory() {
     var dateInput = document.getElementById('history-date-picker');
     var todayStr = todayDateInputValue();
@@ -3280,7 +3292,12 @@
   // reported while checking stock, across all trucks, for someone to follow
   // up on. Non-blocking - these never affected dispatch - so, unlike Jobs,
   // resolving one here is purely bookkeeping for whoever's working through
-  // the list (Shane's request, 2026-09-16).
+  // the list (Shane's request, 2026-09-16). On the Dashboard (idSuffix ''),
+  // `list` is every still-OPEN flag regardless of day (listOpenPackingIssues,
+  // 2026-09-22) - it can genuinely span multiple days now, so the Flagged
+  // line always includes the date, not just the time, to make that clear;
+  // on History it's one specific day's own record (listPackingIssuesForDate,
+  // resolved or not), where the date is redundant but harmless to show.
   function renderPackingIssuesToday(list, idSuffix) {
     var el = document.getElementById('packing-issues-today' + idSuffix);
     if (list.length === 0) { el.innerHTML = ''; return; }
@@ -3289,13 +3306,13 @@
       list.map(function (p) {
         var badgeClass = p.Status === 'Resolved' ? 'badge-complete' : 'badge-pending';
         var resolvedLine = p.Status === 'Resolved'
-          ? '<div class="hint">Resolved ' + formatTime(p.ResolvedAt) + (p.ResolvedByName ? ' by ' + escapeHtml(p.ResolvedByName) : '') + '</div>'
+          ? '<div class="hint">Resolved ' + formatDateForDisplay(String(p.ResolvedAt).slice(0, 10)) + ' ' + formatTime(p.ResolvedAt) + (p.ResolvedByName ? ' by ' + escapeHtml(p.ResolvedByName) : '') + '</div>'
           : '';
         return '<div class="dash-order-row"><div><div>' +
           escapeHtml(p.ProductDescription) + ' <span class="hint">(' + escapeHtml(p.TruckName) +
           (p.OrderNumber ? ' - ' + escapeHtml(p.OrderNumber) + ' ' + escapeHtml(p.Customer) : '') + ')</span>' +
           '</div><div class="hint">' + escapeHtml(p.Note) + '</div>' +
-          '<div class="hint">Flagged ' + formatTime(p.FlaggedAt) + (p.FlaggedByName ? ' by ' + escapeHtml(p.FlaggedByName) : '') + '</div>' +
+          '<div class="hint">Flagged ' + formatDateForDisplay(p.Date) + ' ' + formatTime(p.FlaggedAt) + (p.FlaggedByName ? ' by ' + escapeHtml(p.FlaggedByName) : '') + '</div>' +
           resolvedLine +
           '</div><div style="display:flex; align-items:center; gap:10px;"><span class="badge ' + badgeClass + '">' + escapeHtml(p.Status) + '</span>' +
           '<button class="btn btn-secondary" style="padding:6px 10px; font-size:13px;" onclick="togglePackingIssueResolved(\'' + p.ID + '\', \'' + p.Status + '\', \'' + idSuffix + '\')">' +
@@ -3315,7 +3332,9 @@
   // mechanical problems, cleanliness, and so on, reported once per trip,
   // shown here specifically for Dispatch Managers to work through and
   // resolve. Same non-blocking, resolve-as-bookkeeping model as
-  // renderPackingIssuesToday above.
+  // renderPackingIssuesToday above, including the same Dashboard-shows-
+  // every-open-one-regardless-of-day-with-dates-shown vs.
+  // History-shows-one-picked-day split (2026-09-22).
   function renderTruckIssuesToday(list, idSuffix) {
     var el = document.getElementById('truck-issues-today' + idSuffix);
     if (list.length === 0) { el.innerHTML = ''; return; }
@@ -3324,12 +3343,12 @@
       list.map(function (t) {
         var badgeClass = t.Status === 'Resolved' ? 'badge-complete' : 'badge-pending';
         var resolvedLine = t.Status === 'Resolved'
-          ? '<div class="hint">Resolved ' + formatTime(t.ResolvedAt) + (t.ResolvedByName ? ' by ' + escapeHtml(t.ResolvedByName) : '') + '</div>'
+          ? '<div class="hint">Resolved ' + formatDateForDisplay(String(t.ResolvedAt).slice(0, 10)) + ' ' + formatTime(t.ResolvedAt) + (t.ResolvedByName ? ' by ' + escapeHtml(t.ResolvedByName) : '') + '</div>'
           : '';
         return '<div class="dash-order-row"><div><div>' +
           escapeHtml(t.TruckName) +
           '</div><div class="hint">' + escapeHtml(t.Note) + '</div>' +
-          '<div class="hint">Reported ' + formatTime(t.ReportedAt) + (t.ReportedByName ? ' by ' + escapeHtml(t.ReportedByName) : '') + '</div>' +
+          '<div class="hint">Reported ' + formatDateForDisplay(t.Date) + ' ' + formatTime(t.ReportedAt) + (t.ReportedByName ? ' by ' + escapeHtml(t.ReportedByName) : '') + '</div>' +
           resolvedLine +
           '</div><div style="display:flex; align-items:center; gap:10px;"><span class="badge ' + badgeClass + '">' + escapeHtml(t.Status) + '</span>' +
           '<button class="btn btn-secondary" style="padding:6px 10px; font-size:13px;" onclick="toggleTruckIssueResolved(\'' + t.ID + '\', \'' + t.Status + '\', \'' + idSuffix + '\')">' +

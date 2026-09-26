@@ -5,7 +5,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
   <title>Daily Fruit - Dispatch</title>
-  <meta name="theme-color" content="#3F6C4B">
+  <meta name="theme-color" content="#BA561C">
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%233F6C4B'/%3E%3Crect x='16' y='34' width='44' height='28' rx='3' fill='white'/%3E%3Crect x='60' y='44' width='22' height='18' rx='2' fill='white'/%3E%3Crect x='65' y='48' width='9' height='8' rx='1' fill='%233F6C4B'/%3E%3Ccircle cx='32' cy='65' r='8' fill='white'/%3E%3Ccircle cx='32' cy='65' r='3' fill='%233F6C4B'/%3E%3Ccircle cx='70' cy='65' r='8' fill='white'/%3E%3Ccircle cx='70' cy='65' r='3' fill='%233F6C4B'/%3E%3C/svg%3E">
 
   <!-- Installable-app support: manifest + icons for Android/Chrome's "Add
@@ -22,8 +22,11 @@
 
   <style>
     :root {
-      --green: #3F6C4B;
-      --green-dark: #2c4c35;
+      /* Brand accent — the real Daily Fruit logo orange (same pair used in
+         Packing & Production, since both hardcode white text on these two
+         colours directly rather than through a text-colour variable). */
+      --green: #BA561C;
+      --green-dark: #8A3D12;
       --red: #c62828;
       --amber: #e6a400;
       --grey: #6b7280;
@@ -957,7 +960,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-09-22-02';
+  var BUILD_VERSION = 'build-2026-09-26-01';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's

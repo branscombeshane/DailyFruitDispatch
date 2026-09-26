@@ -6,7 +6,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
   <title>Daily Fruit - Dispatch</title>
   <meta name="theme-color" content="#BA561C">
-  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%233F6C4B'/%3E%3Crect x='16' y='34' width='44' height='28' rx='3' fill='white'/%3E%3Crect x='60' y='44' width='22' height='18' rx='2' fill='white'/%3E%3Crect x='65' y='48' width='9' height='8' rx='1' fill='%233F6C4B'/%3E%3Ccircle cx='32' cy='65' r='8' fill='white'/%3E%3Ccircle cx='32' cy='65' r='3' fill='%233F6C4B'/%3E%3Ccircle cx='70' cy='65' r='8' fill='white'/%3E%3Ccircle cx='70' cy='65' r='3' fill='%233F6C4B'/%3E%3C/svg%3E">
+  <link rel="icon" href="icons/favicon.ico?v=2026-09-26.1" sizes="any">
+  <link rel="icon" href="icons/favicon-16.png?v=2026-09-26.1" sizes="16x16" type="image/png">
+  <link rel="icon" href="icons/favicon-32.png?v=2026-09-26.1" sizes="32x32" type="image/png">
+  <link rel="icon" href="icons/icon-192.png?v=2026-09-26.1" sizes="192x192" type="image/png">
 
   <!-- Installable-app support: manifest + icons for Android/Chrome's "Add
        to Home Screen" and iOS Safari's "Add to Home Screen" (which reads
@@ -14,7 +17,7 @@
        manifest). See sw.js for the service worker that Android/Chrome also
        requires before it will offer the install prompt. -->
   <link rel="manifest" href="manifest.json">
-  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png?v=2026-09-26.1">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="Dispatch">
@@ -960,7 +963,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-09-26-01';
+  var BUILD_VERSION = 'build-2026-09-26-02';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's

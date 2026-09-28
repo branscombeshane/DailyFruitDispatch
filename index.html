@@ -637,10 +637,14 @@
     <div class="content">
       <div class="card">
         <h3 style="margin-top:0;">Find an order</h3>
-        <p class="hint" style="margin-top:0;">Search by order number or customer name to see which truck it's on, whether it's gone out yet, and who's driving.</p>
+        <p class="hint" style="margin-top:0;">Search by order number or customer name to see which truck it's on, whether it's gone out yet, and who's driving - or pick a day below to browse everything delivered that day, if a customer has a query but no order number handy.</p>
         <div class="row-inline">
           <input type="text" id="cc-order-search-input" placeholder="Order number or customer" oninput="debouncedCcOrderSearch()">
-          <button class="btn btn-secondary" onclick="document.getElementById('cc-order-search-input').value=''; runCcOrderSearch();">Clear</button>
+          <button class="btn btn-secondary" onclick="clearCcOrderSearch()">Clear</button>
+        </div>
+        <div class="date-viewing-row" style="margin-top:8px; margin-bottom:0;">
+          <label style="margin:0;">Or browse a day</label>
+          <input type="date" id="cc-order-search-date" onchange="runCcOrderSearch()">
         </div>
         <div id="cc-order-search-results" style="margin-top:10px;"></div>
       </div>
@@ -963,7 +967,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-09-26-03';
+  var BUILD_VERSION = 'build-2026-09-28-02';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -1317,6 +1321,9 @@
   function showCustomerCare() {
     document.getElementById('cc-user-name').textContent = state.checker.name;
     document.getElementById('cc-order-search-input').value = '';
+    var ccDateInput = document.getElementById('cc-order-search-date');
+    ccDateInput.value = '';
+    ccDateInput.max = todayDateInputValue(); // no picking a future date - there's nothing there yet
     document.getElementById('cc-order-search-results').innerHTML = '';
     showScreen('screen-customercare');
   }
@@ -1327,18 +1334,32 @@
     ccOrderSearchTimer = setTimeout(runCcOrderSearch, 300);
   }
 
+  // A date on its own (no text typed) browses that whole day's deliveries -
+  // Shane's request (2026-09-28): a customer calling in with a query but no
+  // order number handy still needs to be findable, by checking a PREVIOUS
+  // day's list rather than only ever searching by exact order/customer text
+  // across all history. Text and date combine (both narrow together) when
+  // both are set - handy for disambiguating a customer with several
+  // branches/orders once the day it went out is already known.
   function runCcOrderSearch() {
     var q = document.getElementById('cc-order-search-input').value.trim();
+    var dateStr = document.getElementById('cc-order-search-date').value;
     var el = document.getElementById('cc-order-search-results');
-    if (!q) { el.innerHTML = ''; return; }
+    if (!q && !dateStr) { el.innerHTML = ''; return; }
     el.innerHTML = '<div class="hint">Searching...</div>';
-    callApi('findOrderAcrossTrucks', [q]).then(renderCcOrderSearchResults).catch(showFatalError);
+    callApi('findOrderAcrossTrucks', [q, dateStr]).then(function (results) { renderCcOrderSearchResults(results, dateStr); }).catch(showFatalError);
   }
 
-  function renderCcOrderSearchResults(results) {
+  function clearCcOrderSearch() {
+    document.getElementById('cc-order-search-input').value = '';
+    document.getElementById('cc-order-search-date').value = '';
+    runCcOrderSearch();
+  }
+
+  function renderCcOrderSearchResults(results, dateStr) {
     var el = document.getElementById('cc-order-search-results');
     if (results.length === 0) {
-      el.innerHTML = '<div class="empty">No matching orders found.</div>';
+      el.innerHTML = '<div class="empty">' + (dateStr ? 'No deliveries found for that day.' : 'No matching orders found.') + '</div>';
       return;
     }
     el.innerHTML = results.map(function (r) {

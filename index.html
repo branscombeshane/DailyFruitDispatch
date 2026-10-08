@@ -967,7 +967,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-10-01-01';
+  var BUILD_VERSION = 'build-2026-10-08-01';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -1537,8 +1537,9 @@
     document.getElementById('board-order-search').value = '';
     // Settings (Users/Trucks/Drivers/Data Source) is Admin-only, same
     // restriction as the Settings tab inside the Admin area itself - a
-    // Dispatch Manager only ever gets Dashboard there, so no point
-    // surfacing a shortcut to a section they can't open.
+    // Dispatch Manager can't open that section (Dashboard and History both
+    // are theirs, just not Settings), so no point surfacing a shortcut to
+    // it here.
     document.getElementById('board-settings-btn').style.display = (state.role === 'Admin') ? '' : 'none';
     showScreen('screen-truck-board');
     loadTruckBoard();
@@ -2977,14 +2978,14 @@
   // There's no separate Admin/Dispatch Manager PIN gate any more - doLogin()
   // calls this directly once authenticateUser reports the signed-in user's
   // role. A Dispatch Manager gets the exact same screen as Admin, just with
-  // the Settings top-level button (and everything under it) hidden - only
-  // Dashboard is theirs.
+  // the Settings top-level button (and everything under it) hidden -
+  // Dashboard and History are both theirs, same data either role sees.
   function enterAdminArea(role) {
     state.adminRole = role;
     var restricted = role === 'dispatchManager';
     document.getElementById('admin-area-title').textContent = restricted ? 'Dispatch Manager' : 'Admin';
     document.querySelectorAll('.admin-section-btn').forEach(function (b) {
-      b.style.display = (restricted && b.getAttribute('data-section') !== 'overview') ? 'none' : '';
+      b.style.display = (restricted && b.getAttribute('data-section') === 'settings') ? 'none' : '';
     });
     // Both Admin and Dispatch Manager now have a truck-checking identity to
     // switch over to (state.checker is set for every login - see doLogin) -

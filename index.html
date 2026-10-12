@@ -967,7 +967,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-10-08-01';
+  var BUILD_VERSION = 'build-2026-10-12-01';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -2449,13 +2449,23 @@
     // Harmless no-op if it's not open - lets a tap from either the main
     // Orders list or the Add Order search share this same function.
     closeAddOrderModal();
+    // Fresh save queue only when this is actually a DIFFERENT order than
+    // whatever was open before - see markItem's orderSaveChain comment
+    // above. Reopening the SAME order (e.g. backing out, then tapping
+    // straight back in moments later, before the previous taps had
+    // actually finished saving) used to reset this unconditionally, which
+    // silently threw away the serialization guarantee for whatever was
+    // still in flight: a still-pending setItemStatus call from before could
+    // then end up running on the server at the same time as a brand new
+    // tap's call for the SAME order, racing the order-status recompute
+    // (see setItemStatus's comment in Code.gs). Confirmed as the real-world
+    // cause of an order (INV0139035, reported by Shane 2026-10-12) stuck
+    // showing "In Progress" with every one of its items already Packed -
+    // Code.gs now also self-heals that specific drift wherever it's found
+    // (reconcileOrderCheckStatus_), but removing the actual cause here
+    // means it should now happen far less often in the first place.
+    if (state.currentOrderId !== orderId) orderSaveChain = Promise.resolve();
     state.currentOrderId = orderId;
-    // Fresh save queue for whichever order this turns out to be - see
-    // markItem's orderSaveChain comment above. Leftover saves from a
-    // PREVIOUS order have almost certainly already finished by the time you
-    // navigate to a new one, but this guarantees the new order's first tap
-    // is never made to wait on them regardless.
-    orderSaveChain = Promise.resolve();
     // Selecting an order IS the decision to put it on this truck, so
     // allocate it automatically instead of making that a separate
     // confirmation tap. allocateOrderToTruck is a safe no-op if the order

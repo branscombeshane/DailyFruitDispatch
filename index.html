@@ -967,7 +967,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-10-12-01';
+  var BUILD_VERSION = 'build-2026-10-21-01';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -1636,15 +1636,45 @@
     var truckQuery = truckQueryRaw.toLowerCase();
     var orderQuery = orderQueryRaw.toLowerCase();
 
-    var trucksToShow = !truckQuery ? boardData.trucks : boardData.trucks.filter(function (t) {
-      return [t.name, t.registration, t.type].some(function (f) { return (f || '').toLowerCase().indexOf(truckQuery) !== -1; });
+    // Matches the "Search orders" box against an order's number/customer -
+    // shared by the Unassigned list filter below AND the truck list filter
+    // right here, so typing an order number finds it wherever it actually
+    // is, not just while it's sitting unassigned. Shane's request
+    // (2026-10-21): the search used to only ever look at
+    // boardData.unassignedOrders, so an order already dropped onto a truck
+    // was invisible to it the moment it was assigned - exactly backwards
+    // from the one time you'd most want to find it fast (confirming it
+    // landed on the right truck, or tracking down which truck it's on).
+    var orderMatchesBoardQuery_ = function (o) {
+      return [o.orderNumber, o.customer].some(function (f) { return (f || '').toLowerCase().indexOf(orderQuery) !== -1; });
+    };
+
+    // A truck shows when it matches the truck-search box (as before) AND -
+    // new - when there's no order search OR this truck actually has a
+    // matching order on it somewhere (any trip). The two boxes compose
+    // like Dashboard/History's own stat-tile + search filters elsewhere in
+    // this app: independent narrowing dimensions, both have to pass. This
+    // deliberately does NOT trim a matched truck down to just its matching
+    // order(s) the way History's search does - the Trucks board is a drag-
+    // and-drop management screen, not a read-only report, so hiding a
+    // truck's OTHER orders while its card is still open would make them
+    // impossible to drag off while the search box has text in it. Showing
+    // the whole truck (now one of only a few, instead of buried in all of
+    // them) is enough to spot the match at a glance.
+    var trucksToShow = boardData.trucks.filter(function (t) {
+      var matchesTruckQuery = !truckQuery || [t.name, t.registration, t.type].some(function (f) { return (f || '').toLowerCase().indexOf(truckQuery) !== -1; });
+      var matchesOrderQuery = !orderQuery || (t.orders || []).some(orderMatchesBoardQuery_);
+      return matchesTruckQuery && matchesOrderQuery;
     });
 
     var trucksEl = document.getElementById('board-trucks-list');
     if (boardData.trucks.length === 0) {
       trucksEl.innerHTML = '<div class="empty">No trucks set up yet. Ask an admin to add one.</div>';
     } else if (trucksToShow.length === 0) {
-      trucksEl.innerHTML = '<div class="empty">No truck matches "' + escapeHtml(truckQueryRaw) + '".</div>';
+      var noTruckReasons = [];
+      if (truckQueryRaw) noTruckReasons.push('matches "' + escapeHtml(truckQueryRaw) + '"');
+      if (orderQueryRaw) noTruckReasons.push('has an order matching "' + escapeHtml(orderQueryRaw) + '"');
+      trucksEl.innerHTML = '<div class="empty">No truck ' + noTruckReasons.join(' and ') + '.</div>';
     } else {
       trucksEl.innerHTML = trucksToShow.map(function (t) {
         var statusBadge = t.allDispatchedToday
@@ -1740,9 +1770,7 @@
     // regardless of the search box - it's "how much work is left", not
     // "how many rows are visible right now".
     document.getElementById('board-unassigned-count').textContent = boardData.unassignedOrders.length;
-    var unassignedToShow = !orderQuery ? boardData.unassignedOrders : boardData.unassignedOrders.filter(function (o) {
-      return [o.orderNumber, o.customer].some(function (f) { return (f || '').toLowerCase().indexOf(orderQuery) !== -1; });
-    });
+    var unassignedToShow = !orderQuery ? boardData.unassignedOrders : boardData.unassignedOrders.filter(orderMatchesBoardQuery_);
     var unassignedEl = document.getElementById('board-unassigned-list');
     if (unassignedToShow.length > 0) {
       unassignedEl.innerHTML = unassignedToShow.map(renderBoardOrderChip).join('');

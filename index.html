@@ -974,7 +974,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-10-22-02';
+  var BUILD_VERSION = 'build-2026-10-22-03';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -1810,7 +1810,17 @@
     var unassignedToShow = !orderQuery ? boardData.unassignedOrders : boardData.unassignedOrders.filter(orderMatchesBoardQuery_);
     var unassignedEl = document.getElementById('board-unassigned-list');
     if (unassignedToShow.length > 0) {
-      unassignedEl.innerHTML = unassignedToShow.map(renderBoardOrderChip).join('');
+      // NOT unassignedToShow.map(renderBoardOrderChip) directly - Array.map
+      // calls its callback with (element, index, array), and
+      // renderBoardOrderChip's 2nd param is now isSearchMatch (chip-match
+      // highlighting, added 2026-10-22). Passed bare, every chip past index
+      // 0 got the array INDEX as isSearchMatch - any non-zero number is
+      // truthy in JS, so every Unassigned order except the very first one
+      // lit up as "matched" even with an empty search box (Shane reported
+      // this exact symptom - all but the first order highlighted). This
+      // wrapper is what the 2 truck-chip call sites above already do
+      // correctly; this one was missed.
+      unassignedEl.innerHTML = unassignedToShow.map(function (o) { return renderBoardOrderChip(o); }).join('');
     } else if (boardData.unassignedOrders.length === 0) {
       unassignedEl.innerHTML = '<div class="empty">Nothing left to assign.</div>';
     } else {

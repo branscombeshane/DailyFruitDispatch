@@ -384,6 +384,13 @@
        chip stops a second drag firing on the same order before the first
        one has settled. */
     .board-order-chip.saving { opacity: 0.55; cursor: default; color: #666; }
+    /* The order search box on the Trucks board matching a chip already
+       sitting on a truck (2026-10-22) - the chip itself is highlighted
+       rather than the search narrowing the truck list down to just the
+       matching truck(s), so it stays easy to spot without ever hiding a
+       truck you still need to see (e.g. to drag a different, unassigned
+       order onto). */
+    .board-order-chip.chip-match { border-color: var(--green); background: #eef5ef; box-shadow: 0 0 0 2px var(--green) inset; }
     .board-drag-ghost { position: fixed; z-index: 9999; box-shadow: 0 6px 16px rgba(0,0,0,0.28); pointer-events: none; opacity: 0.92; margin: 0 !important; }
     /* Shane's 2026-09-16 request: flag an order right here in Dispatch when
        Production hasn't actually finished the work for it yet (see
@@ -967,7 +974,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-10-21-01';
+  var BUILD_VERSION = 'build-2026-10-22-02';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -1601,7 +1608,7 @@
     }).catch(function () { /* quietly try again on the next tick */ });
   }
 
-  function renderBoardOrderChip(o) {
+  function renderBoardOrderChip(o, isSearchMatch) {
     var locked = !!o.truckDispatched;
     var saving = !!savingOrderIds[o.orderId];
     var draggable = !locked && !saving;
@@ -1611,7 +1618,7 @@
       : (o.status
         ? '<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:' + (dotColor[o.status] || '#9aa0a6') + ';margin-right:8px;flex-shrink:0;"></span>'
         : '');
-    return '<div class="board-order-chip' + (locked ? ' locked' : '') + (saving ? ' saving' : '') + '" data-order-id="' + o.orderId + '"' + (draggable ? ' data-draggable="1"' : '') + '>' +
+    return '<div class="board-order-chip' + (locked ? ' locked' : '') + (saving ? ' saving' : '') + (isSearchMatch ? ' chip-match' : '') + '" data-order-id="' + o.orderId + '"' + (draggable ? ' data-draggable="1"' : '') + '>' +
       dot + '<span>' + escapeHtml(o.orderNumber) + ' - ' + escapeHtml(o.customer) +
       (locked ? ' <span class="hint">(dispatched)</span>' : (saving ? ' <span class="hint">saving...</span>' : '')) +
       productionWarningBadge(o) + '</span>' +
@@ -1637,10 +1644,10 @@
     var orderQuery = orderQueryRaw.toLowerCase();
 
     // Matches the "Search orders" box against an order's number/customer -
-    // shared by the Unassigned list filter below AND the truck list filter
-    // right here, so typing an order number finds it wherever it actually
-    // is, not just while it's sitting unassigned. Shane's request
-    // (2026-10-21): the search used to only ever look at
+    // shared by the Unassigned list filter below AND the truck-chip
+    // highlighting right here, so typing an order number finds it wherever
+    // it actually is, not just while it's sitting unassigned. Shane's
+    // request (2026-10-21): the search used to only ever look at
     // boardData.unassignedOrders, so an order already dropped onto a truck
     // was invisible to it the moment it was assigned - exactly backwards
     // from the one time you'd most want to find it fast (confirming it
@@ -1649,22 +1656,48 @@
       return [o.orderNumber, o.customer].some(function (f) { return (f || '').toLowerCase().indexOf(orderQuery) !== -1; });
     };
 
-    // A truck shows when it matches the truck-search box (as before) AND -
-    // new - when there's no order search OR this truck actually has a
-    // matching order on it somewhere (any trip). The two boxes compose
-    // like Dashboard/History's own stat-tile + search filters elsewhere in
-    // this app: independent narrowing dimensions, both have to pass. This
-    // deliberately does NOT trim a matched truck down to just its matching
-    // order(s) the way History's search does - the Trucks board is a drag-
-    // and-drop management screen, not a read-only report, so hiding a
-    // truck's OTHER orders while its card is still open would make them
-    // impossible to drag off while the search box has text in it. Showing
-    // the whole truck (now one of only a few, instead of buried in all of
-    // them) is enough to spot the match at a glance.
+    // Which trucks (by ID) actually hold an order matching the order search
+    // box right now, anywhere on them (any trip) - computed once up front
+    // since both the truck-list filter and the chip highlighting below need
+    // it.
+    var truckIdsWithMatchingOrder = {};
+    var anyTruckHasMatchingOrder = false;
+    if (orderQuery) {
+      boardData.trucks.forEach(function (t) {
+        if ((t.orders || []).some(orderMatchesBoardQuery_)) {
+          truckIdsWithMatchingOrder[t.truckId] = true;
+          anyTruckHasMatchingOrder = true;
+        }
+      });
+    }
+
+    // A truck always shows when it matches the truck-search box, same as
+    // before this feature existed - the order search box is never allowed
+    // to shrink the Trucks panel below that. 2026-10-22 fix: the first cut
+    // of "find an order already on a truck" (2026-10-21) ANDed the order
+    // search into this filter, which backfired on the much more common
+    // case of searching for an order that ISN'T on a truck yet (you're
+    // trying to find it so you can drag it onto one) - every truck would
+    // vanish, since none of them had a matching order, leaving nowhere to
+    // drop it (Shane reported this 2026-10-22: searching "airche" hid every
+    // truck even though all 3 AIRCHEFS orders were sitt ing right there,
+    // unassigned, in the list next to it).
+    //
+    // Now: if the order search actually matches an order sitting on at
+    // least one truck, narrow down to just those truck(s) - the "find it"
+    // behavior Shane actually asked for, and the matching chip itself gets
+    // highlighted (see chip-match CSS / renderBoardOrderChip's
+    // isSearchMatch param) so it's not just "the right truck" but "the
+    // right ORDER on it" that's obvious at a glance. If it matches nothing
+    // currently on any truck (the normal "still unassigned" case), the
+    // order search has nothing useful to narrow by here, so every truck
+    // matching the truck-search box stays visible, same as if the order box
+    // were empty.
     var trucksToShow = boardData.trucks.filter(function (t) {
       var matchesTruckQuery = !truckQuery || [t.name, t.registration, t.type].some(function (f) { return (f || '').toLowerCase().indexOf(truckQuery) !== -1; });
-      var matchesOrderQuery = !orderQuery || (t.orders || []).some(orderMatchesBoardQuery_);
-      return matchesTruckQuery && matchesOrderQuery;
+      if (!matchesTruckQuery) return false;
+      if (orderQuery && anyTruckHasMatchingOrder) return !!truckIdsWithMatchingOrder[t.truckId];
+      return true;
     });
 
     var trucksEl = document.getElementById('board-trucks-list');
@@ -1673,8 +1706,12 @@
     } else if (trucksToShow.length === 0) {
       var noTruckReasons = [];
       if (truckQueryRaw) noTruckReasons.push('matches "' + escapeHtml(truckQueryRaw) + '"');
-      if (orderQueryRaw) noTruckReasons.push('has an order matching "' + escapeHtml(orderQueryRaw) + '"');
-      trucksEl.innerHTML = '<div class="empty">No truck ' + noTruckReasons.join(' and ') + '.</div>';
+      // Only a real reason when there WAS a truck-side order match to narrow
+      // by in the first place (see trucksToShow above) - otherwise the order
+      // search box never had any say in why this list is empty (it'll be
+      // because truckQuery excluded everything), so don't blame it.
+      if (orderQueryRaw && anyTruckHasMatchingOrder) noTruckReasons.push('has an order matching "' + escapeHtml(orderQueryRaw) + '"');
+      trucksEl.innerHTML = '<div class="empty">No truck ' + (noTruckReasons.length > 0 ? noTruckReasons.join(' and ') : 'matches') + '.</div>';
     } else {
       trucksEl.innerHTML = trucksToShow.map(function (t) {
         var statusBadge = t.allDispatchedToday
@@ -1721,7 +1758,7 @@
             }
             var tripOrders = ordersByTrip[trip.tripNumber] || [];
             var tripOrdersHtml = tripOrders.length > 0
-              ? tripOrders.map(renderBoardOrderChip).join('')
+              ? tripOrders.map(function (o) { return renderBoardOrderChip(o, orderQuery && orderMatchesBoardQuery_(o)); }).join('')
               : '<div class="hint" style="padding:4px 2px; font-style:italic;">No orders on this trip</div>';
             var tripStatusClass = trip.status === 'Dispatched' ? 'trip-dispatched' : 'trip-in-progress';
             return '<div class="trip-block ' + tripStatusClass + '">' +
@@ -1752,7 +1789,7 @@
           var soloLine = [soloDriverText, soloDispatchText].filter(Boolean).join(' &middot; ');
           dispatchDetail = soloLine ? '<div class="dispatch-meta">' + soloLine + '</div>' : '';
           ordersHtml = t.orders.length > 0
-            ? t.orders.map(renderBoardOrderChip).join('')
+            ? t.orders.map(function (o) { return renderBoardOrderChip(o, orderQuery && orderMatchesBoardQuery_(o)); }).join('')
             : '<div class="hint" style="padding:8px 4px; font-style:italic;">Drop an order here</div>';
         }
         return '<div class="board-truck-card drop-zone" data-zone="truck" data-truck-id="' + t.truckId + '">' +

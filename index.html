@@ -529,7 +529,7 @@
         </div>
         <div class="board-col">
           <div class="board-col-title">Today's Scorecard</div>
-          <div class="hint" style="margin-bottom:10px;">Ranked by average time from a truck being ready to it actually leaving - fastest first.</div>
+          <div class="hint" style="margin-bottom:10px;">Ranked by average time from a truck's first order being loaded to it actually leaving - fastest first.</div>
           <div id="board-scorecard"></div>
         </div>
       </div>
@@ -1010,7 +1010,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-10-26-01';
+  var BUILD_VERSION = 'build-2026-10-26-02';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -1912,14 +1912,14 @@
       timelineEl.innerHTML = '<div class="empty">No trucks dispatched yet today.</div>';
     } else {
       timelineEl.innerHTML = timeline.map(function (entry) {
-        var gapText = entry.readyToDispatchedSeconds !== null ? formatDurationSeconds(entry.readyToDispatchedSeconds) : '-';
+        var gapText = entry.packToDispatchSeconds !== null ? formatDurationSeconds(entry.packToDispatchSeconds) : '-';
         var tripSuffix = entry.tripNumber > 1 ? ' (Trip ' + entry.tripNumber + ')' : '';
         return '<div class="timeline-entry">' +
           '<div class="timeline-main">' +
             '<div class="timeline-truck">' + escapeHtml(entry.truckName) + tripSuffix + '</div>' +
             '<div class="timeline-who">' + formatTime(entry.dispatchedAt) + (entry.dispatchedBy ? ' by ' + escapeHtml(entry.dispatchedBy) : '') + '</div>' +
           '</div>' +
-          '<span class="gap-badge ' + gapBadgeClass(entry.readyToDispatchedSeconds) + '">' + gapText + '</span>' +
+          '<span class="gap-badge ' + gapBadgeClass(entry.packToDispatchSeconds) + '">' + gapText + '</span>' +
         '</div>';
       }).join('');
     }
@@ -1931,7 +1931,7 @@
     } else {
       scorecardEl.innerHTML = scorecard.map(function (row, i) {
         var rank = i + 1;
-        var avgText = row.avgReadyToDispatchedSeconds !== null ? formatDurationSeconds(row.avgReadyToDispatchedSeconds) + ' avg' : 'no timed trucks';
+        var avgText = row.avgPackToDispatchSeconds !== null ? formatDurationSeconds(row.avgPackToDispatchSeconds) + ' avg' : 'no timed trucks';
         var truckWord = row.trucksDispatched === 1 ? 'truck' : 'trucks';
         return '<div class="scorecard-row' + (rank === 1 ? ' rank-1' : '') + '">' +
           '<div class="scorecard-rank">' + rank + '</div>' +

@@ -178,6 +178,13 @@
     .badge-progress { background: #fff3cd; color: #8a6100; }
     .badge-complete { background: #e2f2e4; color: var(--green-dark); }
     .badge-dispatched { background: #dcedc8; color: var(--green-dark); }
+    /* Live 30-min pack-time warning (Shane, 2026-10-26) - a truck still
+       being packed (not yet dispatched) whose first order was dropped on
+       more than packWarningThresholdMinutes ago. Deliberately the same
+       red as badge-pack-overdue/truck-pack-overdue below: one unmissable
+       color for "this truck needs attention," constant from the moment it
+       crosses the threshold, no further escalation. */
+    .badge-pack-overdue { background: #fbdede; color: var(--red); }
 
     /* Select-a-truck tile: when a truck has run more than one trip today,
        each trip used to be separated by just a thin top border - easy to
@@ -349,10 +356,9 @@
       .board-col { width: 100%; }
     }
     .board-col-title { font-size: 15px; font-weight: 700; margin-bottom: 10px; }
-    /* Dispatch timeline + scorecard (2026-10-26) - sits below the drag-and-
-       drop columns, same 2-up/stack-on-mobile layout (reuses .board-columns
-       itself) so it doesn't need its own responsive rules. */
-    .board-timeline-scorecard { margin-top: 28px; padding-top: 22px; border-top: 1px solid var(--border); }
+    /* Dispatch timeline (Dashboard) + scorecard (Trucks board banner) -
+       both build-2026-10-26, relocated to their current screens build -04. */
+    .board-scorecard-top { margin-bottom: 18px; }
     .timeline-entry { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; padding: 9px 2px; border-bottom: 1px solid var(--border); font-size: 13.5px; }
     .timeline-entry:last-child { border-bottom: none; }
     .timeline-entry .timeline-main { min-width: 0; }
@@ -375,6 +381,7 @@
     .scorecard-stats { flex-shrink: 0; text-align: right; font-size: 12px; color: var(--grey); }
     .scorecard-stats .scorecard-avg { font-weight: 700; color: var(--text); font-size: 13.5px; }
     .board-truck-card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 14px; margin-bottom: 12px; }
+    .board-truck-card.truck-pack-overdue { border-color: var(--red); background: #fff6f6; }
     .board-truck-header { cursor: pointer; padding-bottom: 8px; margin-bottom: 8px; border-bottom: 1px solid var(--border); }
     .board-truck-orders { min-height: 44px; border-radius: 8px; }
     /* Truck name/registration/meta had no styling of their own here (only
@@ -507,6 +514,17 @@
       </div>
     </div>
     <div class="content">
+      <!-- Today's Scorecard - moved here (2026-10-26, build -04) per
+           Shane, from a column at the bottom of this same screen, so it's
+           the first thing dispatchers see rather than something they have
+           to scroll past the Trucks/Unassigned columns to find. The
+           Dispatch Timeline that used to sit next to it moved to the
+           Dashboard instead - see that screen's own card. -->
+      <div class="card board-scorecard-top">
+        <div class="board-col-title">Today's Scorecard</div>
+        <div class="hint" style="margin-bottom:10px;">Ranked by average time from a truck's first order being loaded to it actually leaving - fastest first.</div>
+        <div id="board-scorecard"></div>
+      </div>
       <div class="hint" style="margin-bottom:14px;">Drag an order onto a truck to assign it. Drag it back to Unassigned to remove it, or onto a different truck to move it. Tap a truck's name to open it and start checking.</div>
       <div class="board-columns">
         <div class="board-col">
@@ -520,17 +538,6 @@
           <input type="text" id="board-order-search" placeholder="Search orders (number or customer)..." oninput="renderTruckBoard()"
             style="width:100%; box-sizing:border-box; padding:10px 12px; border:1px solid var(--border); border-radius:8px; font-size:14px; margin-bottom:10px;">
           <div id="board-unassigned-list" class="drop-zone" data-zone="unassigned"></div>
-        </div>
-      </div>
-      <div class="board-timeline-scorecard board-columns">
-        <div class="board-col">
-          <div class="board-col-title">Dispatch Timeline (Today)</div>
-          <div id="board-dispatch-timeline"></div>
-        </div>
-        <div class="board-col">
-          <div class="board-col-title">Today's Scorecard</div>
-          <div class="hint" style="margin-bottom:10px;">Ranked by average time from a truck's first order being loaded to it actually leaving - fastest first.</div>
-          <div id="board-scorecard"></div>
         </div>
       </div>
     </div>
@@ -878,6 +885,16 @@
           <p class="hint" style="margin-top:0;">Always shows today - for a past day, use History above.</p>
           <div id="dashboard-summary" style="display:flex; flex-wrap:wrap; gap:12px;"></div>
         </div>
+        <!-- Dispatch Timeline (build-2026-10-26, moved here from the Trucks
+             board on 2026-10-26 per Shane) - every truck actually dispatched
+             today, newest first, with how long it took from its first
+             order/trip start to actually leaving. Today only, same as the
+             rest of this pane - see History's own card for a past day. -->
+        <div class="card">
+          <h3 style="margin-top:0;">Dispatch Timeline (Today)</h3>
+          <p class="hint" style="margin-top:0;">How long each truck took from its first order (or trip start, for a trays/jobs-only run) to actually leaving - newest dispatch first.</p>
+          <div id="dashboard-dispatch-timeline"></div>
+        </div>
         <div class="card">
           <h3 style="margin-top:0;" id="fulfillment-title">Today's orders - dispatched vs outstanding</h3>
           <p class="hint" id="fulfillment-hint">Everything due for delivery today, so you can confirm at the end of the day that it's all accounted for. Tap a tile below (including Overdue) to see and act on that list - nothing stays open on its own.</p>
@@ -1010,7 +1027,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-10-26-02';
+  var BUILD_VERSION = 'build-2026-10-26-04';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -1567,7 +1584,7 @@
   // "+ Add Order"/Unallocate buttons use - this is a different way to
   // reach the same underlying allocation, not a separate system.
   // ------------------------------------------------------------------
-  var boardData = { trucks: [], unassignedOrders: [], dispatchTimeline: [], scorecard: [] };
+  var boardData = { trucks: [], unassignedOrders: [], scorecard: [], packWarningThresholdMinutes: 30 };
   // Order IDs with an assignOrderToTruck/unallocateOrder call currently in
   // flight - see renderBoardOrderChip and onBoardDragEnd. Keyed by orderId
   // rather than a single flag because nothing stops the manager dragging a
@@ -1736,6 +1753,17 @@
       return true;
     });
 
+    // 30-minute pack-time warning (Shane, 2026-10-26): openTripPackStartAt
+    // (set server-side from the open trip's earliest order StartedAt - see
+    // getTruckAssignmentBoardUncached_) plus the current time is all that's
+    // needed to tell whether a truck's been packing past target; no extra
+    // API call. Recomputed on every render, which happens at least once per
+    // 15s poll (see pollTruckBoard), so a truck crossing 30 minutes shows
+    // the warning within a poll cycle of actually crossing it. Per Shane's
+    // choice: a constant badge/highlight from the moment it crosses the
+    // threshold, nothing before, no further escalation after.
+    var packWarningThresholdMs = (boardData.packWarningThresholdMinutes || 30) * 60000;
+
     var trucksEl = document.getElementById('board-trucks-list');
     if (boardData.trucks.length === 0) {
       trucksEl.innerHTML = '<div class="empty">No trucks set up yet. Ask an admin to add one.</div>';
@@ -1753,6 +1781,17 @@
         var statusBadge = t.allDispatchedToday
           ? '<span class="badge badge-dispatched" style="margin-left:6px;">Dispatched</span>'
           : (t.hasOpenTrip ? '<span class="badge badge-progress" style="margin-left:6px;">In progress</span>' : '');
+        var packOverdue = false;
+        var overdueBadge = '';
+        if (t.openTripPackStartAt) {
+          var packElapsedMs = Date.now() - new Date(t.openTripPackStartAt).getTime();
+          if (packElapsedMs >= packWarningThresholdMs) {
+            packOverdue = true;
+            overdueBadge = '<span class="badge badge-pack-overdue" style="margin-left:6px;">' +
+              formatDurationSeconds(Math.round(packElapsedMs / 1000)) + ' packing - over ' +
+              (boardData.packWarningThresholdMinutes || 30) + 'min target</span>';
+          }
+        }
         var meta = [t.registration, t.type].filter(Boolean).join(' - ');
         // If this truck has more than one trip today, group its orders
         // under their own trip - each trip gets its own status/driver/time
@@ -1828,9 +1867,9 @@
             ? t.orders.map(function (o) { return renderBoardOrderChip(o, orderQuery && orderMatchesBoardQuery_(o)); }).join('')
             : '<div class="hint" style="padding:8px 4px; font-style:italic;">Drop an order here</div>';
         }
-        return '<div class="board-truck-card drop-zone" data-zone="truck" data-truck-id="' + t.truckId + '">' +
+        return '<div class="board-truck-card drop-zone' + (packOverdue ? ' truck-pack-overdue' : '') + '" data-zone="truck" data-truck-id="' + t.truckId + '">' +
           '<div class="board-truck-header" onclick="selectTruck(\'' + t.truckId + '\')">' +
-            '<div class="name">' + escapeHtml(t.name) + statusBadge + '</div>' +
+            '<div class="name">' + escapeHtml(t.name) + statusBadge + overdueBadge + '</div>' +
             (meta ? '<div class="meta">' + escapeHtml(meta) + '</div>' : '') +
             dispatchDetail +
           '</div>' +
@@ -1864,7 +1903,7 @@
     }
 
     attachBoardDragHandlers();
-    renderDispatchTimelineAndScorecard();
+    renderScorecard();
   }
 
   // Formats a duration given in SECONDS (not an ISO timestamp - see
@@ -1905,9 +1944,16 @@
    * of this screen - called from the end of renderTruckBoard so it's never
    * out of sync with the trucks/orders shown above it.
    */
-  function renderDispatchTimelineAndScorecard() {
-    var timelineEl = document.getElementById('board-dispatch-timeline');
-    var timeline = boardData.dispatchTimeline || [];
+  // Split 2026-10-26 (build -04) - the Dispatch Timeline and Scorecard used
+  // to render together from one Trucks-board payload, but Shane asked to
+  // relocate them to two different screens (Scorecard stays on the Trucks
+  // board, now in the top banner; Timeline moves to the Dashboard), each
+  // fed by its own API call now, so each needs its own render function and
+  // its own target element id.
+  function renderDispatchTimeline(timeline, containerId) {
+    var timelineEl = document.getElementById(containerId);
+    if (!timelineEl) return;
+    timeline = timeline || [];
     if (timeline.length === 0) {
       timelineEl.innerHTML = '<div class="empty">No trucks dispatched yet today.</div>';
     } else {
@@ -1923,8 +1969,11 @@
         '</div>';
       }).join('');
     }
+  }
 
+  function renderScorecard() {
     var scorecardEl = document.getElementById('board-scorecard');
+    if (!scorecardEl) return;
     var scorecard = boardData.scorecard || [];
     if (scorecard.length === 0) {
       scorecardEl.innerHTML = '<div class="empty">No trucks dispatched yet today.</div>';
@@ -3850,6 +3899,12 @@
       statTile(s.totalNoStockItems, 'No-stock items', s.totalNoStockItems > 0, { onclick: "selectDashboardTile('" + idSuffix + "', 'noStock')", selected: selectedKey === 'noStock' }) +
       statTile(s.totalShortPackedItems, 'Short-packed items', s.totalShortPackedItems > 0, { onclick: "selectDashboardTile('" + idSuffix + "', 'shortPacked')", selected: selectedKey === 'shortPacked' }) +
       statTile(s.forcedDispatchCount, 'Dispatched with warnings', s.forcedDispatchCount > 0, { onclick: "selectDashboardTile('" + idSuffix + "', 'warnings')", selected: selectedKey === 'warnings' });
+
+    // Dispatch Timeline card - Dashboard (today) only, not History; see the
+    // card's own comment in the HTML. Called before the early-return below
+    // (zero trucks today) since the timeline has its own independent empty
+    // state and shouldn't be skipped just because that check fires first.
+    if (idSuffix === '') renderDispatchTimeline(data.dispatchTimeline, 'dashboard-dispatch-timeline');
 
     var trucksEl = document.getElementById('dashboard-trucks' + idSuffix);
     if (data.trucks.length === 0) {

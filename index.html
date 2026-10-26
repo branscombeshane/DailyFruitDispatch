@@ -483,7 +483,14 @@
     </div>
   </div>
 
-  <!-- ============================= TRUCK SELECT ============================= -->
+  <!-- ============================= TRUCK SELECT (retired 2026-10-26) =============================
+       Was the plain click-to-open truck list every role landed on before
+       the Trucks Board existed for them. Checkers now land on the Trucks
+       Board below too (Shane asked for checkers to get the Scorecard and
+       a full drag-and-drop Unassigned Orders panel, same as Dispatch
+       Manager/Admin always had) - see goToTrucks()'s comment. Left in
+       place, unused, rather than deleted, in case a simpler list is ever
+       wanted back for some role. -->
   <div id="screen-trucks" class="screen">
     <div class="topbar">
       <div>
@@ -502,12 +509,15 @@
     </div>
   </div>
 
-  <!-- ============================= TRUCKS BOARD (Dispatch Manager/Admin) =============================
+  <!-- ============================= TRUCKS BOARD =============================
        Morning order assignment: drag an order from the Unassigned column
        onto a truck to assign it, drag it back to unassign, or onto a
-       different truck to move it. Checkers never see this screen - they
-       land on the plain click-to-open truck list above; tapping a truck's
-       name here opens the exact same workspace they use. -->
+       different truck to move it. Every role that reaches goToTrucks()
+       (Admin, Dispatch Manager, and - as of 2026-10-26 - Checker) lands
+       here; tapping a truck's name opens the exact same workspace
+       everyone uses. Dashboard/Settings stay hidden for Checkers (see
+       showTruckBoard()) since this screen is otherwise identical for
+       every role. -->
   <div id="screen-truck-board" class="screen">
     <div class="topbar">
       <div>
@@ -515,7 +525,7 @@
         <div class="sub" id="board-user-name"></div>
       </div>
       <div class="actions">
-        <button onclick="backToAdminArea()">Dashboard</button>
+        <button onclick="backToAdminArea()" id="board-dashboard-btn">Dashboard</button>
         <button onclick="goToSettings()" id="board-settings-btn" style="display:none;">Settings</button>
         <button onclick="logout()">Log out</button>
       </div>
@@ -1034,7 +1044,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-10-26-05';
+  var BUILD_VERSION = 'build-2026-10-26-06';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -1377,9 +1387,15 @@
   // Admin and Dispatch Manager get the drag-and-drop Trucks board (morning
   // order assignment); a Checker gets the plain click-to-open truck list,
   // same as always - see the "Board location" decision in SETUP.md.
+  // 2026-10-26: Checkers used to land on showTrucks() (the plain list)
+  // while Admin/Dispatch Manager got showTruckBoard() (Scorecard +
+  // drag-and-drop Unassigned Orders). Shane asked for checkers to see
+  // both of those too, with full drag-and-drop - not just a read-only
+  // view - so everyone who reaches this function now gets the same
+  // board. (Customer Care never calls goToTrucks() at all - see
+  // doLogin()'s early return for that role.)
   function goToTrucks() {
-    if (state.role === 'Admin' || state.role === 'Dispatch Manager') { showTruckBoard(); return; }
-    showTrucks();
+    showTruckBoard();
   }
 
   // ------------------------------------------------------------------
@@ -1608,6 +1624,10 @@
     // are theirs, just not Settings), so no point surfacing a shortcut to
     // it here.
     document.getElementById('board-settings-btn').style.display = (state.role === 'Admin') ? '' : 'none';
+    // A Checker has no Dashboard/History/Settings area to go "back" to -
+    // same restriction showTrucks() always applied to its own Dashboard
+    // button. Admin/Dispatch Manager still get the shortcut.
+    document.getElementById('board-dashboard-btn').style.display = (state.role === 'Checker') ? 'none' : '';
     showScreen('screen-truck-board');
     loadTruckBoard();
     startBoardPolling();

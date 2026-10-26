@@ -339,9 +339,16 @@
     .dash-drilldown-list { margin-top: 12px; }
     .dash-truck-card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin-bottom: 12px; }
     .dash-truck-card.dash-alert { border-color: var(--red); background: #fff6f6; }
-    .dash-truck-header { display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+    .dash-truck-header { display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; cursor: pointer; }
     .dash-truck-title { font-size: 16px; font-weight: 700; }
     .dash-truck-meta { font-size: 13px; color: var(--grey); margin-top: 2px; }
+    /* Collapsible truck cards (2026-10-26, build -05) - Shane: the full
+       order list on every truck, always expanded, took up too much space
+       scrolling the Dashboard. Collapsed by default (see
+       dashboardTruckExpanded_); this summary line stays visible either
+       way so no-stock/short-packed counts are never hidden behind a click. */
+    .dash-truck-summary { font-size: 13px; color: var(--grey); margin-top: 6px; }
+    .dash-truck-arrow { font-size: 11px; color: var(--grey); margin-left: 8px; }
     .dash-warning-line { color: var(--red); font-size: 13px; font-weight: 600; margin-top: 6px; }
     .dash-order-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-top: 1px solid var(--border); font-size: 14px; }
     .dash-nostock-detail { font-size: 12px; color: var(--red); margin-top: 2px; }
@@ -1027,7 +1034,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-10-26-04';
+  var BUILD_VERSION = 'build-2026-10-26-05';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -3840,6 +3847,37 @@
   // once (see renderDashboard).
   var truckOrderSearchQueryByIdSuffix = { '': '', '-history': '' };
 
+  // Which truck cards are manually expanded (2026-10-26, build -05) -
+  // keyed by idSuffix + sessionId so Dashboard and History track this
+  // independently and a choice survives a full re-render (tile click,
+  // search) rather than resetting every time trucksEl.innerHTML is
+  // rebuilt. Collapsed is the default (see dashboardTruckExpanded_) -
+  // nothing needs adding here just to start collapsed.
+  var dashboardExpandedTrucks = {};
+
+  function dashboardTruckKey_(idSuffix, sessionId) { return idSuffix + '__' + sessionId; }
+
+  // A truck auto-expands (regardless of dashboardExpandedTrucks) when a
+  // tile/search filter is actively narrowing ITS orders specifically -
+  // trucksMatchingTile_ already guaranteed at least one of this truck's
+  // orders matches for the two order-level tiles, and a text search is
+  // exactly "show me this", so collapsing either away would hide the very
+  // thing the filter was asked to surface.
+  function dashboardTruckExpanded_(idSuffix, sessionId, filterForcesExpand) {
+    if (filterForcesExpand) return true;
+    return !!dashboardExpandedTrucks[dashboardTruckKey_(idSuffix, sessionId)];
+  }
+
+  function toggleDashboardTruck(idSuffix, sessionId) {
+    var key = dashboardTruckKey_(idSuffix, sessionId);
+    var nowExpanded = !dashboardExpandedTrucks[key];
+    dashboardExpandedTrucks[key] = nowExpanded;
+    var ordersEl = document.getElementById('dash-orders-' + key);
+    var arrowEl = document.getElementById('dash-arrow-' + key);
+    if (ordersEl) ordersEl.style.display = nowExpanded ? '' : 'none';
+    if (arrowEl) arrowEl.textContent = nowExpanded ? '▲ Hide orders' : '▼ Show orders';
+  }
+
   function orderMatchesQuery_(o, query) {
     return (o.orderNumber || '').toLowerCase().indexOf(query) !== -1 ||
       (o.customer || '').toLowerCase().indexOf(query) !== -1;
@@ -3996,11 +4034,30 @@
               (o.shortPackedCount ? ', ' + o.shortPackedCount + ' short-packed' : '') + '</span></div></div>';
           }).join('');
 
+      // Collapsible (2026-10-26, build -05) - see dashboardTruckExpanded_'s
+      // own comment. The order-count/no-stock/short-packed summary stays
+      // visible whichever state the card is in, so an alert is never
+      // hidden behind a click; ordersForDisplay.length (not t.orderCount)
+      // so it reflects whatever this filter pass actually narrowed down to.
+      var truckKey = dashboardTruckKey_(idSuffix, t.sessionId);
+      var filterForcesExpand = selectedKey === 'noStock' || selectedKey === 'shortPacked' || !!searchQuery;
+      var expanded = dashboardTruckExpanded_(idSuffix, t.sessionId, filterForcesExpand);
+      var summaryParts = [ordersForDisplay.length + (ordersForDisplay.length === 1 ? ' order' : ' orders')];
+      if (t.noStockTotal > 0) summaryParts.push(t.noStockTotal + ' no-stock');
+      if (t.shortPackedTotal > 0) summaryParts.push(t.shortPackedTotal + ' short-packed');
+
       return '<div class="dash-truck-card' + (t.dispatchedWithWarnings ? ' dash-alert' : '') + '">' +
-        '<div class="dash-truck-header"><div><div class="dash-truck-title">' + escapeHtml(t.truckName) + '</div>' +
-        '<div class="dash-truck-meta">' + metaParts.map(escapeHtml).join(' &middot; ') + '</div></div>' +
-        '<span class="badge ' + statusBadgeClass + '">' + escapeHtml(t.status) + '</span></div>' +
-        warningLine + ordersHtml + '</div>';
+        '<div class="dash-truck-header" onclick="toggleDashboardTruck(' + jsStrAttr_(idSuffix) + ', ' + jsStrAttr_(t.sessionId) + ')">' +
+          '<div><div class="dash-truck-title">' + escapeHtml(t.truckName) + '</div>' +
+          '<div class="dash-truck-meta">' + metaParts.map(escapeHtml).join(' &middot; ') + '</div>' +
+          '<div class="dash-truck-summary">' + escapeHtml(summaryParts.join(' · ')) +
+            ' <span class="dash-truck-arrow" id="dash-arrow-' + truckKey + '">' + (expanded ? '▲ Hide orders' : '▼ Show orders') + '</span>' +
+          '</div></div>' +
+          '<span class="badge ' + statusBadgeClass + '">' + escapeHtml(t.status) + '</span>' +
+        '</div>' +
+        warningLine +
+        '<div id="dash-orders-' + truckKey + '"' + (expanded ? '' : ' style="display:none;"') + '>' + ordersHtml + '</div>' +
+      '</div>';
     }).join('');
   }
 

@@ -349,6 +349,31 @@
       .board-col { width: 100%; }
     }
     .board-col-title { font-size: 15px; font-weight: 700; margin-bottom: 10px; }
+    /* Dispatch timeline + scorecard (2026-10-26) - sits below the drag-and-
+       drop columns, same 2-up/stack-on-mobile layout (reuses .board-columns
+       itself) so it doesn't need its own responsive rules. */
+    .board-timeline-scorecard { margin-top: 28px; padding-top: 22px; border-top: 1px solid var(--border); }
+    .timeline-entry { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; padding: 9px 2px; border-bottom: 1px solid var(--border); font-size: 13.5px; }
+    .timeline-entry:last-child { border-bottom: none; }
+    .timeline-entry .timeline-main { min-width: 0; }
+    .timeline-entry .timeline-truck { font-weight: 700; }
+    .timeline-entry .timeline-who { color: var(--grey); font-size: 12px; margin-top: 1px; }
+    .gap-badge { flex-shrink: 0; font-size: 11.5px; font-weight: 700; padding: 3px 9px; border-radius: 999px; white-space: nowrap; }
+    /* Thresholds are a starting point, not a tuned number - easy to change
+       if Shane wants faster/slower bands once there's a few days of real
+       data to judge "fast" against. */
+    .gap-badge.gap-fast { background: #fdeee4; color: var(--green-dark); }
+    .gap-badge.gap-medium { background: #fdf3da; color: #8a6100; }
+    .gap-badge.gap-slow { background: #fbe4e4; color: var(--red); }
+    .gap-badge.gap-unknown { background: var(--bg); color: var(--grey); }
+    .scorecard-row { display: flex; align-items: center; gap: 12px; padding: 10px 2px; border-bottom: 1px solid var(--border); }
+    .scorecard-row:last-child { border-bottom: none; }
+    .scorecard-rank { flex-shrink: 0; width: 24px; text-align: center; font-weight: 700; color: var(--grey); font-size: 13px; }
+    .scorecard-row.rank-1 .scorecard-rank { color: var(--green-dark); }
+    .scorecard-row.rank-1 { background: #fdf6f0; border-radius: 8px; padding-left: 8px; padding-right: 8px; margin: 0 -8px 0 -8px; }
+    .scorecard-name { flex: 1; min-width: 0; font-weight: 600; font-size: 14px; }
+    .scorecard-stats { flex-shrink: 0; text-align: right; font-size: 12px; color: var(--grey); }
+    .scorecard-stats .scorecard-avg { font-weight: 700; color: var(--text); font-size: 13.5px; }
     .board-truck-card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 14px; margin-bottom: 12px; }
     .board-truck-header { cursor: pointer; padding-bottom: 8px; margin-bottom: 8px; border-bottom: 1px solid var(--border); }
     .board-truck-orders { min-height: 44px; border-radius: 8px; }
@@ -495,6 +520,17 @@
           <input type="text" id="board-order-search" placeholder="Search orders (number or customer)..." oninput="renderTruckBoard()"
             style="width:100%; box-sizing:border-box; padding:10px 12px; border:1px solid var(--border); border-radius:8px; font-size:14px; margin-bottom:10px;">
           <div id="board-unassigned-list" class="drop-zone" data-zone="unassigned"></div>
+        </div>
+      </div>
+      <div class="board-timeline-scorecard board-columns">
+        <div class="board-col">
+          <div class="board-col-title">Dispatch Timeline (Today)</div>
+          <div id="board-dispatch-timeline"></div>
+        </div>
+        <div class="board-col">
+          <div class="board-col-title">Today's Scorecard</div>
+          <div class="hint" style="margin-bottom:10px;">Ranked by average time from a truck being ready to it actually leaving - fastest first.</div>
+          <div id="board-scorecard"></div>
         </div>
       </div>
     </div>
@@ -974,7 +1010,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-10-22-03';
+  var BUILD_VERSION = 'build-2026-10-26-01';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -1531,7 +1567,7 @@
   // "+ Add Order"/Unallocate buttons use - this is a different way to
   // reach the same underlying allocation, not a separate system.
   // ------------------------------------------------------------------
-  var boardData = { trucks: [], unassignedOrders: [] };
+  var boardData = { trucks: [], unassignedOrders: [], dispatchTimeline: [], scorecard: [] };
   // Order IDs with an assignOrderToTruck/unallocateOrder call currently in
   // flight - see renderBoardOrderChip and onBoardDragEnd. Keyed by orderId
   // rather than a single flag because nothing stops the manager dragging a
@@ -1828,6 +1864,85 @@
     }
 
     attachBoardDragHandlers();
+    renderDispatchTimelineAndScorecard();
+  }
+
+  // Formats a duration given in SECONDS (not an ISO timestamp - see
+  // formatTime for that) as a short human string: "45s", "3m 12s", "1h 8m".
+  // Used only by the dispatch timeline/scorecard below.
+  function formatDurationSeconds(totalSeconds) {
+    if (totalSeconds === null || totalSeconds === undefined) return '';
+    var s = Math.max(0, Math.round(totalSeconds));
+    var h = Math.floor(s / 3600);
+    var m = Math.floor((s % 3600) / 60);
+    var sec = s % 60;
+    if (h > 0) return h + 'h ' + m + 'm';
+    if (m > 0) return m + 'm ' + sec + 's';
+    return sec + 's';
+  }
+
+  // Which gap-badge color band a ready-to-dispatched gap falls into -
+  // shared by both the timeline (per-truck) and could be reused for the
+  // scorecard's own average if that's ever wanted too. Thresholds are a
+  // starting point (see the matching CSS comment) - under 5 minutes reads
+  // as fast, 5-15 as middling, over 15 as slow.
+  function gapBadgeClass(totalSeconds) {
+    if (totalSeconds === null || totalSeconds === undefined) return 'gap-unknown';
+    if (totalSeconds <= 5 * 60) return 'gap-fast';
+    if (totalSeconds <= 15 * 60) return 'gap-medium';
+    return 'gap-slow';
+  }
+
+  /**
+   * Renders the "Dispatch Timeline (Today)" and "Today's Scorecard" panels
+   * below the drag-and-drop board - Shane's 2026-10-26 request, meant to
+   * encourage dispatchers to get a ready truck out quickly rather than
+   * letting it sit. Both come straight off boardData.dispatchTimeline/
+   * boardData.scorecard (see buildDispatchTimelineAndScorecard_ in
+   * Code.gs - already sorted newest-first / fastest-first respectively, so
+   * this function does no sorting of its own), refreshed by the same
+   * getTruckAssignmentBoard call (and its 15s poll) that drives the rest
+   * of this screen - called from the end of renderTruckBoard so it's never
+   * out of sync with the trucks/orders shown above it.
+   */
+  function renderDispatchTimelineAndScorecard() {
+    var timelineEl = document.getElementById('board-dispatch-timeline');
+    var timeline = boardData.dispatchTimeline || [];
+    if (timeline.length === 0) {
+      timelineEl.innerHTML = '<div class="empty">No trucks dispatched yet today.</div>';
+    } else {
+      timelineEl.innerHTML = timeline.map(function (entry) {
+        var gapText = entry.readyToDispatchedSeconds !== null ? formatDurationSeconds(entry.readyToDispatchedSeconds) : '-';
+        var tripSuffix = entry.tripNumber > 1 ? ' (Trip ' + entry.tripNumber + ')' : '';
+        return '<div class="timeline-entry">' +
+          '<div class="timeline-main">' +
+            '<div class="timeline-truck">' + escapeHtml(entry.truckName) + tripSuffix + '</div>' +
+            '<div class="timeline-who">' + formatTime(entry.dispatchedAt) + (entry.dispatchedBy ? ' by ' + escapeHtml(entry.dispatchedBy) : '') + '</div>' +
+          '</div>' +
+          '<span class="gap-badge ' + gapBadgeClass(entry.readyToDispatchedSeconds) + '">' + gapText + '</span>' +
+        '</div>';
+      }).join('');
+    }
+
+    var scorecardEl = document.getElementById('board-scorecard');
+    var scorecard = boardData.scorecard || [];
+    if (scorecard.length === 0) {
+      scorecardEl.innerHTML = '<div class="empty">No trucks dispatched yet today.</div>';
+    } else {
+      scorecardEl.innerHTML = scorecard.map(function (row, i) {
+        var rank = i + 1;
+        var avgText = row.avgReadyToDispatchedSeconds !== null ? formatDurationSeconds(row.avgReadyToDispatchedSeconds) + ' avg' : 'no timed trucks';
+        var truckWord = row.trucksDispatched === 1 ? 'truck' : 'trucks';
+        return '<div class="scorecard-row' + (rank === 1 ? ' rank-1' : '') + '">' +
+          '<div class="scorecard-rank">' + rank + '</div>' +
+          '<div class="scorecard-name">' + escapeHtml(row.dispatcherName) + '</div>' +
+          '<div class="scorecard-stats">' +
+            '<div class="scorecard-avg">' + avgText + '</div>' +
+            '<div>' + row.trucksDispatched + ' ' + truckWord + '</div>' +
+          '</div>' +
+        '</div>';
+      }).join('');
+    }
   }
 
   // Custom drag-and-drop built on Pointer Events (not the HTML5 Drag and

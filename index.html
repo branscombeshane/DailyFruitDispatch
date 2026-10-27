@@ -379,6 +379,21 @@
     .gap-badge.gap-medium { background: #fdf3da; color: #8a6100; }
     .gap-badge.gap-slow { background: #fbe4e4; color: var(--red); }
     .gap-badge.gap-unknown { background: var(--bg); color: var(--grey); }
+    /* On-time clock-time badge (build-2026-10-27-05, Shane) - a SECOND,
+       separate badge on each Dispatch Timeline entry, next to the existing
+       gap-badge. The gap-badge measures how long PACKING took; this one
+       measures whether the truck actually left the yard by target -
+       before 06:15 green, 06:16-07:00 amber, after 07:00 red. A truck's
+       2nd+ trip has no fixed leave-by target, so it gets no badge at all
+       (see onTimeBadge_ in script - returns null for tripNumber > 1).
+       Deliberately NOT reusing --green/--green-dark here - despite the
+       name, those are the brand's orange primary color, not an actual
+       green, which would be confusing for a traffic-light indicator. */
+    .timeline-badges { display: flex; flex-direction: column; align-items: flex-end; gap: 5px; flex-shrink: 0; }
+    .ontime-badge { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 999px; white-space: nowrap; }
+    .ontime-badge.ontime-green { background: #e3f3e6; color: #1e7a34; }
+    .ontime-badge.ontime-amber { background: #fdf3da; color: #8a6100; }
+    .ontime-badge.ontime-red { background: #fbe4e4; color: var(--red); }
     .scorecard-row { display: flex; align-items: center; gap: 12px; padding: 10px 2px; border-bottom: 1px solid var(--border); }
     .scorecard-row:last-child { border-bottom: none; }
     .scorecard-rank { flex-shrink: 0; width: 24px; text-align: center; font-weight: 700; color: var(--grey); font-size: 13px; }
@@ -929,12 +944,25 @@
         <!-- Dispatch Timeline (build-2026-10-26, moved here from the Trucks
              board on 2026-10-26 per Shane) - every truck actually dispatched
              today, newest first, with how long it took from its first
-             order/trip start to actually leaving. Today only, same as the
-             rest of this pane - see History's own card for a past day. -->
+             order/trip start to actually leaving. History has its own
+             matching card below for a past day (build-2026-10-27). -->
         <div class="card">
           <h3 style="margin-top:0;">Dispatch Timeline (Today)</h3>
           <p class="hint" style="margin-top:0;">How long each truck took from its first order (or trip start, for a trays/jobs-only run) to actually leaving - newest dispatch first.</p>
           <div id="dashboard-dispatch-timeline"></div>
+        </div>
+        <!-- Trucks Leaving Late (build-2026-10-27-05, Shane) - a different
+             question from the Dispatch Timeline above: not "was today
+             slow", but "which trucks keep missing the leave-by target,
+             trip after trip". Dashboard-only (his choice when asked) - a
+             rolling 30-day window ending today, so it wouldn't mean the
+             same thing pinned to an arbitrary past History day. Fed by its
+             own getLateTruckLeaderboard call, loaded alongside the rest of
+             the Dashboard - see loadDashboard(). -->
+        <div class="card">
+          <h3 style="margin-top:0;">Trucks Leaving Late</h3>
+          <p class="hint" style="margin-top:0;">Trucks whose first trip of the day has left after 07:00 three or more times in the last 30 days. A truck's 2nd+ trip isn't held to a leave-by target, so only each day's first trip counts.</p>
+          <div id="dashboard-late-trucks"></div>
         </div>
         <div class="card">
           <h3 style="margin-top:0;" id="fulfillment-title">Today's orders - dispatched vs outstanding</h3>
@@ -963,6 +991,17 @@
           </div>
           <p class="hint" style="margin-top:0;">Pick a past day to see that day's trucks, orders due, and overdue warnings - for today, use Dashboard.</p>
           <div id="dashboard-summary-history" style="display:flex; flex-wrap:wrap; gap:12px;"></div>
+        </div>
+        <!-- Dispatch Timeline for this picked day (build-2026-10-27) - same
+             card as Dashboard's own (see that card's comment above), just
+             scoped to whichever day is currently picked instead of always
+             today. getDashboardForDate already computes dispatchTimeline
+             for any date, so this is purely a render-side addition - see
+             renderDashboard's own comment for the shared call. -->
+        <div class="card">
+          <h3 style="margin-top:0;">Dispatch Timeline</h3>
+          <p class="hint" style="margin-top:0;">How long each truck took from its first order (or trip start, for a trays/jobs-only run) to actually leaving - newest dispatch first.</p>
+          <div id="dashboard-dispatch-timeline-history"></div>
         </div>
         <div class="card">
           <h3 style="margin-top:0;" id="fulfillment-title-history">Orders due</h3>
@@ -1068,7 +1107,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-10-27-03';
+  var BUILD_VERSION = 'build-2026-10-27-05';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -1220,7 +1259,7 @@
     listDrivers: true, getAdminSettings: true, probeSpreadsheet: true, searchOrders: true,
     findOrderAcrossTrucks: true, getOrdersForSession: true, getTruckSessionsForTruckToday: true,
     getTruckSessionState: true, getTruckAssignmentBoard: true, getTruckPackTimerInfo: true, getOrderForChecking: true,
-    getTodaysTruckOverview: true, getDashboardForDate: true, getOrderFulfillmentOverview: true,
+    getTodaysTruckOverview: true, getDashboardForDate: true, getLateTruckLeaderboard: true, getOrderFulfillmentOverview: true,
     getJobsForSession: true, listJobsForDate: true, setJobStatus: true, removeJob: true,
     setItemStatus: true, setOrderCoaConfirmed: true, allocateOrderToTruck: true, unallocateOrder: true,
     markTruckDispatched: true, updateSessionTrip: true, updateTrayCounts: true,
@@ -2051,6 +2090,28 @@
     return 'gap-slow';
   }
 
+  // On-time clock-time badge for the Dispatch Timeline (build-2026-10-27-05,
+  // Shane): "make all orders dispatched before 06h15 green ... 06h16 to
+  // 07h00 amber ... after 07h00 red", separate from (shown alongside) the
+  // existing gap-badge above, which measures packing SPEED rather than
+  // actual leave time. "the orders with trip 2 excluded from this rule" -
+  // a truck's 2nd+ trip of the day has no fixed leave-by target, so this
+  // returns null (no badge at all, not even a neutral one) for those.
+  // Reads dispatchedAt in the BROWSER's local time, same convention
+  // formatTime already uses elsewhere on this screen (this app runs on
+  // devices at the depot, so that's always effectively SAST).
+  var ON_TIME_GREEN_CUTOFF_MINUTES = 6 * 60 + 15; // 06:15
+  var ON_TIME_AMBER_CUTOFF_MINUTES = 7 * 60; // 07:00
+  function onTimeBadge_(dispatchedAt, tripNumber) {
+    if (tripNumber && tripNumber > 1) return null;
+    if (!dispatchedAt) return null;
+    var d = new Date(dispatchedAt);
+    var minutesOfDay = d.getHours() * 60 + d.getMinutes();
+    if (minutesOfDay <= ON_TIME_GREEN_CUTOFF_MINUTES) return { cls: 'ontime-green', label: 'On time' };
+    if (minutesOfDay <= ON_TIME_AMBER_CUTOFF_MINUTES) return { cls: 'ontime-amber', label: 'Cutting it close' };
+    return { cls: 'ontime-red', label: 'Late leaving' };
+  }
+
   /**
    * Renders the "Dispatch Timeline (Today)" and "Today's Scorecard" panels
    * below the drag-and-drop board - Shane's 2026-10-26 request, meant to
@@ -2069,25 +2130,59 @@
   // board, now in the top banner; Timeline moves to the Dashboard), each
   // fed by its own API call now, so each needs its own render function and
   // its own target element id.
-  function renderDispatchTimeline(timeline, containerId) {
+  function renderDispatchTimeline(timeline, containerId, emptyMessage) {
     var timelineEl = document.getElementById(containerId);
     if (!timelineEl) return;
     timeline = timeline || [];
     if (timeline.length === 0) {
-      timelineEl.innerHTML = '<div class="empty">No trucks dispatched yet today.</div>';
+      timelineEl.innerHTML = '<div class="empty">' + (emptyMessage || 'No trucks dispatched yet today.') + '</div>';
     } else {
       timelineEl.innerHTML = timeline.map(function (entry) {
         var gapText = entry.packToDispatchSeconds !== null ? formatDurationSeconds(entry.packToDispatchSeconds) : '-';
         var tripSuffix = entry.tripNumber > 1 ? ' (Trip ' + entry.tripNumber + ')' : '';
+        var onTime = onTimeBadge_(entry.dispatchedAt, entry.tripNumber);
+        var onTimeBadgeHtml = onTime ? '<span class="ontime-badge ' + onTime.cls + '" title="Based on actual leave time - trip 2+ isn\'t held to a leave-by target">' + onTime.label + '</span>' : '';
         return '<div class="timeline-entry">' +
           '<div class="timeline-main">' +
             '<div class="timeline-truck">' + escapeHtml(entry.truckName) + tripSuffix + '</div>' +
             '<div class="timeline-who">' + formatTime(entry.dispatchedAt) + (entry.dispatchedBy ? ' by ' + escapeHtml(entry.dispatchedBy) : '') + '</div>' +
           '</div>' +
-          '<span class="gap-badge ' + gapBadgeClass(entry.packToDispatchSeconds) + '">' + gapText + '</span>' +
+          '<div class="timeline-badges">' +
+            '<span class="gap-badge ' + gapBadgeClass(entry.packToDispatchSeconds) + '">' + gapText + '</span>' +
+            onTimeBadgeHtml +
+          '</div>' +
         '</div>';
       }).join('');
     }
+  }
+
+  /**
+   * Trucks Leaving Late (build-2026-10-27-05) - renders
+   * getLateTruckLeaderboard's payload into the Dashboard-only
+   * #dashboard-late-trucks card (see loadDashboard()). A different shape
+   * from renderDispatchTimeline above (truck-level tallies over a rolling
+   * window, not individual dispatch entries), so it gets its own render
+   * function, reusing the same .timeline-entry/.ontime-badge markup/CSS
+   * rather than inventing new styling for what's visually the same kind
+   * of row.
+   */
+  function renderLateTruckLeaderboard(data) {
+    var el = document.getElementById('dashboard-late-trucks');
+    if (!el) return;
+    var trucks = (data && data.trucks) || [];
+    if (trucks.length === 0) {
+      el.innerHTML = '<div class="empty">No truck has left late 3+ times in the last 30 days.</div>';
+      return;
+    }
+    el.innerHTML = trucks.map(function (row) {
+      return '<div class="timeline-entry">' +
+        '<div class="timeline-main">' +
+          '<div class="timeline-truck">' + escapeHtml(row.truckName) + '</div>' +
+          '<div class="timeline-who">' + row.lateCount + ' of ' + row.trip1Count + ' first trips left after 07:00, last 30 days</div>' +
+        '</div>' +
+        '<span class="ontime-badge ontime-red">' + row.lateCount + 'x late</span>' +
+      '</div>';
+    }).join('');
   }
 
   function renderScorecard() {
@@ -3693,6 +3788,11 @@
   function loadDashboard() {
     var todayStr = todayDateInputValue();
     callApi('getDashboardForDate', [todayStr]).then(function (data) { renderDashboard(data, ''); }).catch(showFatalError);
+    // Trucks Leaving Late (build-2026-10-27-05) - Dashboard-only, its own
+    // call (not folded into getDashboardForDate) since it's a rolling
+    // 30-day window, not something scoped to todayStr the way everything
+    // else on this pane is.
+    callApi('getLateTruckLeaderboard', []).then(function (data) { renderLateTruckLeaderboard(data); }).catch(showFatalError);
     callApi('getOrderFulfillmentOverview', [todayStr]).then(function (data) { renderFulfillmentOverview(data, ''); }).catch(showFatalError);
     callApi('listJobsForDate', [todayStr]).then(function (list) { renderJobsToday(list, ''); }).catch(showFatalError);
     // Packing/Truck Issues on the Dashboard show every still-OPEN one
@@ -4085,11 +4185,21 @@
       statTile(s.totalShortPackedItems, 'Short-packed items', s.totalShortPackedItems > 0, { onclick: "selectDashboardTile('" + idSuffix + "', 'shortPacked')", selected: selectedKey === 'shortPacked' }) +
       statTile(s.forcedDispatchCount, 'Dispatched with warnings', s.forcedDispatchCount > 0, { onclick: "selectDashboardTile('" + idSuffix + "', 'warnings')", selected: selectedKey === 'warnings' });
 
-    // Dispatch Timeline card - Dashboard (today) only, not History; see the
-    // card's own comment in the HTML. Called before the early-return below
-    // (zero trucks today) since the timeline has its own independent empty
-    // state and shouldn't be skipped just because that check fires first.
-    if (idSuffix === '') renderDispatchTimeline(data.dispatchTimeline, 'dashboard-dispatch-timeline');
+    // Dispatch Timeline card - Dashboard AND History both get it (build-
+    // 2026-10-27: Shane asked for History to have it too, after it had
+    // been Dashboard-only since the move off the Trucks board on 10-26).
+    // getDashboardForDate already computes dispatchTimeline for any date,
+    // so this is just rendering it into whichever container matches the
+    // current idSuffix - 'dashboard-dispatch-timeline' for Dashboard,
+    // 'dashboard-dispatch-timeline-history' for History, same naming
+    // pattern every other id on this pane already follows. The empty-state
+    // text says "today" only when it actually is today - a past day with
+    // nothing dispatched says so instead of the misleading default.
+    // Called before the early-return below (zero trucks) since the
+    // timeline has its own independent empty state and shouldn't be
+    // skipped just because that check fires first.
+    renderDispatchTimeline(data.dispatchTimeline, 'dashboard-dispatch-timeline' + idSuffix,
+      isToday ? undefined : 'No trucks dispatched on ' + escapeHtml(data.date) + '.');
 
     var trucksEl = document.getElementById('dashboard-trucks' + idSuffix);
     if (data.trucks.length === 0) {

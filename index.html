@@ -583,6 +583,14 @@
     <div class="topbar">
       <div>
         <div class="title" id="ws-truck-name"></div>
+        <!-- 30-min pack-overdue warning (2026-10-27) - Shane asked whether
+             a checker already inside a truck's workspace sees the same
+             warning the Trucks board shows; they didn't, so this mirrors
+             it here too. Hidden/shown and filled in by
+             renderWorkspacePackBadge, polled independently of the board
+             (see startWorkspacePackPolling) since the board's own polling
+             stops the moment a checker navigates off it. -->
+        <span class="badge badge-pack-overdue" id="ws-pack-badge" style="display:none; margin:2px 0 2px;"></span>
         <div class="sub" id="ws-checker-name"></div>
       </div>
       <div class="actions">
@@ -1060,7 +1068,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-10-27-02';
+  var BUILD_VERSION = 'build-2026-10-27-03';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -1211,7 +1219,7 @@
     authenticateUser: true, listCheckers: true, listTrucks: true, getTrucksForSelection: true,
     listDrivers: true, getAdminSettings: true, probeSpreadsheet: true, searchOrders: true,
     findOrderAcrossTrucks: true, getOrdersForSession: true, getTruckSessionsForTruckToday: true,
-    getTruckSessionState: true, getTruckAssignmentBoard: true, getOrderForChecking: true,
+    getTruckSessionState: true, getTruckAssignmentBoard: true, getTruckPackTimerInfo: true, getOrderForChecking: true,
     getTodaysTruckOverview: true, getDashboardForDate: true, getOrderFulfillmentOverview: true,
     getJobsForSession: true, listJobsForDate: true, setJobStatus: true, removeJob: true,
     setItemStatus: true, setOrderCoaConfirmed: true, allocateOrderToTruck: true, unallocateOrder: true,
@@ -1357,6 +1365,12 @@
     // through, so stopping it here (rather than at each individual place
     // that navigates away from the board) can't miss an exit path.
     if (id !== 'screen-truck-board') stopBoardPolling();
+    // Same reasoning for the workspace's own pack-overdue badge poll (see
+    // startWorkspacePackPolling/stopWorkspacePackPolling below) - stops the
+    // instant a checker leaves the workspace (e.g. opening one order's
+    // detail, or switching truck entirely), restarted by showWsTab()
+    // whenever they're actually back on the workspace screen.
+    if (id !== 'screen-workspace') stopWorkspacePackPolling();
   }
 
   function showLogin() {
@@ -1704,6 +1718,68 @@
     }).catch(function () { /* quietly try again on the next tick */ });
   }
 
+  // Shared by the Trucks board (above) and the workspace's own pack-overdue
+  // badge (below) - exactly the same "is this trip over its pack target,
+  // and what should the badge say" logic in one place, so the two screens
+  // can never show different wording for the same truck. Returns '' when
+  // not overdue (or nothing to time against yet).
+  function packOverdueBadgeText_(openTripPackStartAt, packWarningThresholdMinutes) {
+    if (!openTripPackStartAt) return '';
+    var thresholdMs = (packWarningThresholdMinutes || 30) * 60000;
+    var elapsedMs = Date.now() - new Date(openTripPackStartAt).getTime();
+    if (elapsedMs < thresholdMs) return '';
+    return formatDurationSeconds(Math.round(elapsedMs / 1000)) + ' packing - over ' + (packWarningThresholdMinutes || 30) + 'min target';
+  }
+
+  // The workspace screen's own pack-overdue badge (2026-10-27) - Shane
+  // asked whether a checker already inside a truck's workspace (tapped in,
+  // checking orders) sees the same 30-min warning the Trucks board shows.
+  // It didn't: the board's own polling (startBoardPolling above) stops the
+  // instant showScreen() navigates anywhere else, so a checker who's been
+  // sitting in one truck's workspace the whole time never saw it update.
+  // This polls just THIS session's own timer (getTruckPackTimerInfo - a
+  // lean single-session read, not the full board) on the same 15s cadence,
+  // independently of the board, only while screen-workspace is the active
+  // screen (see showScreen's own stop-on-navigate-away call).
+  var wsPackPollTimer = null;
+  var wsPackPollSessionId = null;
+
+  function startWorkspacePackPolling(sessionId) {
+    stopWorkspacePackPolling(); // guards against a stray double interval if this is ever called twice in a row
+    wsPackPollSessionId = sessionId;
+    pollWorkspacePackTimer(); // first check right away, not after waiting a full 15s
+    wsPackPollTimer = setInterval(pollWorkspacePackTimer, BOARD_POLL_INTERVAL_MS);
+  }
+
+  function stopWorkspacePackPolling() {
+    if (wsPackPollTimer) { clearInterval(wsPackPollTimer); wsPackPollTimer = null; }
+    wsPackPollSessionId = null;
+  }
+
+  function pollWorkspacePackTimer() {
+    var sessionId = wsPackPollSessionId;
+    if (!sessionId) return;
+    callApi('getTruckPackTimerInfo', [sessionId], { silent: true }).then(function (info) {
+      // The checker may have switched trucks (or the poll been stopped)
+      // while this call was in flight - only apply a response that still
+      // matches what's actually being polled right now.
+      if (wsPackPollSessionId !== sessionId) return;
+      renderWorkspacePackBadge(info);
+    }).catch(function () { /* quietly try again on the next tick */ });
+  }
+
+  function renderWorkspacePackBadge(info) {
+    var badgeEl = document.getElementById('ws-pack-badge');
+    if (!badgeEl) return;
+    var text = packOverdueBadgeText_(info && info.openTripPackStartAt, info && info.packWarningThresholdMinutes);
+    if (text) {
+      badgeEl.textContent = text;
+      badgeEl.style.display = '';
+    } else {
+      badgeEl.style.display = 'none';
+    }
+  }
+
   function renderBoardOrderChip(o, isSearchMatch) {
     var locked = !!o.truckDispatched;
     var saving = !!savingOrderIds[o.orderId];
@@ -1824,17 +1900,9 @@
         var statusBadge = t.allDispatchedToday
           ? '<span class="badge badge-dispatched" style="margin-left:6px;">Dispatched</span>'
           : (t.hasOpenTrip ? '<span class="badge badge-progress" style="margin-left:6px;">In progress</span>' : '');
-        var packOverdue = false;
-        var overdueBadge = '';
-        if (t.openTripPackStartAt) {
-          var packElapsedMs = Date.now() - new Date(t.openTripPackStartAt).getTime();
-          if (packElapsedMs >= packWarningThresholdMs) {
-            packOverdue = true;
-            overdueBadge = '<span class="badge badge-pack-overdue" style="margin-left:6px;">' +
-              formatDurationSeconds(Math.round(packElapsedMs / 1000)) + ' packing - over ' +
-              (boardData.packWarningThresholdMinutes || 30) + 'min target</span>';
-          }
-        }
+        var packOverdueText = packOverdueBadgeText_(t.openTripPackStartAt, boardData.packWarningThresholdMinutes);
+        var packOverdue = !!packOverdueText;
+        var overdueBadge = packOverdue ? '<span class="badge badge-pack-overdue" style="margin-left:6px;">' + packOverdueText + '</span>' : '';
         var meta = [t.registration, t.type].filter(Boolean).join(' - ');
         // If this truck has more than one trip today, group its orders
         // under their own trip - each trip gets its own status/driver/time
@@ -2384,6 +2452,7 @@
     renderTrayUpdated();
     renderTrip();
     showScreen('screen-workspace');
+    startWorkspacePackPolling(state.session.ID);
     showWsTab('trays');
     refreshMyOrders();
     // The truck-issues prompt takes priority over the driver/route prompt -

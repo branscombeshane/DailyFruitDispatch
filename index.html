@@ -385,6 +385,8 @@
     .scorecard-row.rank-1 .scorecard-rank { color: var(--green-dark); }
     .scorecard-row.rank-1 { background: #fdf6f0; border-radius: 8px; padding-left: 8px; padding-right: 8px; margin: 0 -8px 0 -8px; }
     .scorecard-name { flex: 1; min-width: 0; font-weight: 600; font-size: 14px; }
+    .scorecard-name-clickable { cursor: pointer; -webkit-tap-highlight-color: transparent; text-decoration: underline; text-decoration-color: transparent; transition: text-decoration-color 0.15s; }
+    .scorecard-name-clickable:hover { text-decoration-color: currentColor; }
     .scorecard-stats { flex-shrink: 0; text-align: right; font-size: 12px; color: var(--grey); }
     .scorecard-stats .scorecard-avg { font-weight: 700; color: var(--text); font-size: 13.5px; }
     .board-truck-card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 14px; margin-bottom: 12px; }
@@ -837,6 +839,20 @@
     </div>
   </div>
 
+  <!-- Today's Scorecard drilldown (2026-10-27) - Shane asked for a
+       dispatcher's name on the Scorecard to be clickable and show the
+       detail behind their average, same "a number is a drilldown into its
+       own records" rule as every other stat tile in his systems. Lists
+       exactly the trucks that make up that one average. -->
+  <div class="modal-backdrop" id="scorecard-detail-modal">
+    <div class="modal">
+      <h3 style="margin-top:0;" id="scorecard-detail-title"></h3>
+      <div class="hint" style="margin-bottom:12px;">Every truck counted in this average today, newest first.</div>
+      <div id="scorecard-detail-list"></div>
+      <button class="btn btn-secondary btn-block" style="margin-top:14px;" onclick="closeScorecardDetailModal()">Close</button>
+    </div>
+  </div>
+
   <!-- Add Job: a non-order instruction on THIS truck's current trip -
        "collect crates from ABC Farms", "drop pallets at the depot", and so
        on. Any checker on the truck, right alongside "+ Add Order" in the
@@ -1044,7 +1060,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-10-26-06';
+  var BUILD_VERSION = 'build-2026-10-27-01';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -2011,7 +2027,7 @@
         var truckWord = row.trucksDispatched === 1 ? 'truck' : 'trucks';
         return '<div class="scorecard-row' + (rank === 1 ? ' rank-1' : '') + '">' +
           '<div class="scorecard-rank">' + rank + '</div>' +
-          '<div class="scorecard-name">' + escapeHtml(row.dispatcherName) + '</div>' +
+          '<div class="scorecard-name scorecard-name-clickable" onclick="openScorecardDetail(' + i + ')">' + escapeHtml(row.dispatcherName) + '</div>' +
           '<div class="scorecard-stats">' +
             '<div class="scorecard-avg">' + avgText + '</div>' +
             '<div>' + row.trucksDispatched + ' ' + truckWord + '</div>' +
@@ -2019,6 +2035,40 @@
         '</div>';
       }).join('');
     }
+  }
+
+  // Scorecard name -> detail modal. Reads straight off boardData.scorecard
+  // (already on the page, no extra API call) - row.trucks is exactly the
+  // set of dispatchTimeline-shaped entries that fed that row's average, so
+  // this reuses the same gap formatting/badge logic as the Dashboard's own
+  // Dispatch Timeline card (see renderDispatchTimeline above) rather than
+  // re-deriving anything.
+  function openScorecardDetail(scorecardIndex) {
+    var row = (boardData.scorecard || [])[scorecardIndex];
+    if (!row) return;
+    document.getElementById('scorecard-detail-title').textContent = row.dispatcherName;
+    var listEl = document.getElementById('scorecard-detail-list');
+    var trucks = row.trucks || [];
+    if (trucks.length === 0) {
+      listEl.innerHTML = '<div class="empty">No trucks dispatched yet today.</div>';
+    } else {
+      listEl.innerHTML = trucks.map(function (entry) {
+        var gapText = entry.packToDispatchSeconds !== null ? formatDurationSeconds(entry.packToDispatchSeconds) : '-';
+        var tripSuffix = entry.tripNumber > 1 ? ' (Trip ' + entry.tripNumber + ')' : '';
+        return '<div class="timeline-entry">' +
+          '<div class="timeline-main">' +
+            '<div class="timeline-truck">' + escapeHtml(entry.truckName) + tripSuffix + '</div>' +
+            '<div class="timeline-who">' + formatTime(entry.dispatchedAt) + '</div>' +
+          '</div>' +
+          '<span class="gap-badge ' + gapBadgeClass(entry.packToDispatchSeconds) + '">' + gapText + '</span>' +
+        '</div>';
+      }).join('');
+    }
+    document.getElementById('scorecard-detail-modal').classList.add('active');
+  }
+
+  function closeScorecardDetailModal() {
+    document.getElementById('scorecard-detail-modal').classList.remove('active');
   }
 
   // Custom drag-and-drop built on Pointer Events (not the HTML5 Drag and

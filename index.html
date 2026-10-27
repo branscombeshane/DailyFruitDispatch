@@ -1060,7 +1060,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-10-27-01';
+  var BUILD_VERSION = 'build-2026-10-27-02';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -1865,14 +1865,19 @@
             // matching how the checker's own truck list (renderTrucks) has
             // always shown driver independent of status.
             var driverText = trip.driver ? 'Driver: ' + escapeHtml(formatDriversWithContacts(trip.driver, trip.driverContacts)) : 'Driver not set';
+            // Who's actually checking this trip (TruckSessions.CheckerName,
+            // set when they started it) - shown alongside the driver so
+            // it's obvious who to follow up with on an in-progress or
+            // overdue trip, not just who's behind the wheel.
+            var checkerText = trip.checkerName ? 'Checker: ' + escapeHtml(trip.checkerName) : '';
             var line;
             if (trip.status === 'Dispatched') {
               var dispatchText = trip.dispatchedAt
                 ? 'Dispatched ' + formatTime(trip.dispatchedAt) + (trip.dispatchedBy ? ' by ' + escapeHtml(trip.dispatchedBy) : '')
                 : 'Dispatched';
-              line = driverText + ' &middot; ' + dispatchText;
+              line = [driverText, checkerText, dispatchText].filter(Boolean).join(' &middot; ');
             } else {
-              line = driverText;
+              line = [driverText, checkerText].filter(Boolean).join(' &middot; ');
             }
             var tripOrders = ordersByTrip[trip.tripNumber] || [];
             var tripOrdersHtml = tripOrders.length > 0
@@ -1901,10 +1906,13 @@
           var soloDriverText = soloTrip
             ? 'Driver: ' + (soloTrip.driver ? escapeHtml(formatDriversWithContacts(soloTrip.driver, soloTrip.driverContacts)) : 'not set')
             : '';
+          // Same checker/dispatcher name as the multi-trip branch above -
+          // see that comment for why this is separate from driver.
+          var soloCheckerText = (soloTrip && soloTrip.checkerName) ? 'Checker: ' + escapeHtml(soloTrip.checkerName) : '';
           var soloDispatchText = (t.allDispatchedToday && t.dispatchedAt)
             ? 'Dispatched ' + formatTime(t.dispatchedAt) + (t.dispatchedBy ? ' by ' + escapeHtml(t.dispatchedBy) : '')
             : '';
-          var soloLine = [soloDriverText, soloDispatchText].filter(Boolean).join(' &middot; ');
+          var soloLine = [soloDriverText, soloCheckerText, soloDispatchText].filter(Boolean).join(' &middot; ');
           dispatchDetail = soloLine ? '<div class="dispatch-meta">' + soloLine + '</div>' : '';
           ordersHtml = t.orders.length > 0
             ? t.orders.map(function (o) { return renderBoardOrderChip(o, orderQuery && orderMatchesBoardQuery_(o)); }).join('')

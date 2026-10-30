@@ -1107,7 +1107,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-10-30-01';
+  var BUILD_VERSION = 'build-2026-10-30-02';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -1297,7 +1297,17 @@
   // now rescoped per order/session in Code.gs, so a long wait here should
   // only ever come from two people genuinely working the SAME order or
   // SAME truck's trip details at once.
-  var EXTENDED_TIMEOUT_ACTIONS = { setItemStatus: 35000, allocateOrderToTruck: 35000, updateSessionTrip: 35000 };
+  //
+  // markTruckDispatched's FIRST call for a given dispatch (force=false)
+  // deliberately pays for a full, uncached Packing & Production read every
+  // time (see its own comment in Code.gs - this is the one thing that
+  // actually stops a truck leaving without an item Packing says belongs on
+  // it), which is the same "big external sheet read" cost class as the
+  // other three above - it gets the same longer allowance for the same
+  // reason. Its follow-up force=true confirm call reuses a warmed cache
+  // instead of repeating that read (also build-2026-10-30), so in practice
+  // only the first call should ever actually need this margin.
+  var EXTENDED_TIMEOUT_ACTIONS = { setItemStatus: 35000, allocateOrderToTruck: 35000, updateSessionTrip: 35000, markTruckDispatched: 35000 };
   var DEFAULT_TIMEOUT_MS = 20000;
 
   // opts.silent (default false): skip the global loading overlay entirely

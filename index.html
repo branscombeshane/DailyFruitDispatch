@@ -1107,7 +1107,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-10-27-05';
+  var BUILD_VERSION = 'build-2026-10-30-01';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -1284,11 +1284,19 @@
   // real failure take much longer to finally surface.
   var TRANSIENT_RETRY_DELAYS_MS = [800, 2000];
   // setItemStatus/allocateOrderToTruck/updateSessionTrip may legitimately
-  // wait on a lock for several seconds under contention (Code.gs's
-  // per-order cache lock, or its script-wide LockService.waitLock(10000))
-  // before they even start their own work - see markItem's orderSaveChain
-  // comment above for why that contention should now be rare, but a longer
-  // allowance here is worth keeping as a margin regardless.
+  // wait on a lock for a few seconds under contention before they even
+  // start their own work (Code.gs's per-order/per-session CacheService
+  // locks - see allocateOrderToTruck's and updateSessionTrip's own
+  // comments) - see markItem's orderSaveChain comment above for why that
+  // contention should now be rare, but a longer allowance here is worth
+  // keeping as a margin regardless. Until build-2026-10-30, allocateOrderToTruck
+  // and updateSessionTrip shared ONE script-wide LockService lock with
+  // every OTHER truck/order's own call too, not just same-order/same-session
+  // contention - that's what actually made "stuck loading for a long time"
+  // during a busy morning possible, and is why this comment used to say so;
+  // now rescoped per order/session in Code.gs, so a long wait here should
+  // only ever come from two people genuinely working the SAME order or
+  // SAME truck's trip details at once.
   var EXTENDED_TIMEOUT_ACTIONS = { setItemStatus: 35000, allocateOrderToTruck: 35000, updateSessionTrip: 35000 };
   var DEFAULT_TIMEOUT_MS = 20000;
 

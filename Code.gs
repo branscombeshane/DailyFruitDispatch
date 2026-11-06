@@ -17,28 +17,46 @@
 var SHEET_NAMES = {
   CHECKERS: 'Checkers',
   TRUCKS: 'Trucks',
-  REASONS: 'NoStockReasons',
+  DRIVERS: 'Drivers',
   SESSIONS: 'TruckSessions',
   ORDER_CHECKS: 'OrderChecks',
   ITEM_CHECKS: 'ItemChecks',
-  SETTINGS: 'Settings'
+  SETTINGS: 'Settings',
+  COLLECTED_ORDERS: 'CollectedOrders',
+  JOBS: 'Jobs',
+  PACKING_ISSUES: 'PackingIssues',
+  TRUCK_ISSUES: 'TruckIssues'
 };
 
 var SESSION_STATUS = { IN_PROGRESS: 'In Progress', DISPATCHED: 'Dispatched' };
 var ORDER_STATUS = { PENDING: 'Pending', IN_PROGRESS: 'In Progress', COMPLETE: 'Complete' };
+// Jobs are deliberately simpler than orders - no item-by-item packing, just
+// one instruction to carry out - so they only need two states, not three.
+var JOB_STATUS = { PENDING: 'Pending', DONE: 'Done' };
 var ITEM_STATUS = { PENDING: 'Pending', PACKED: 'Packed', NO_STOCK: 'No Stock' };
+// Shared by PackingIssues and TruckIssues (see those sections further down) -
+// both are non-blocking checklist entries (Shane's explicit call, 2026-09-16:
+// unlike Jobs, neither of these should stop a truck dispatching), so all
+// either one needs is "still needs following up" vs "sorted", not the
+// richer per-item status ItemChecks uses.
+var ISSUE_STATUS = { OPEN: 'Open', RESOLVED: 'Resolved' };
 
-var DEFAULT_NO_STOCK_REASONS = [
-  'Out of stock',
-  'Short-picked (partial quantity only)',
-  'Quality reject',
-  'Damaged in packing',
-  'Wrong item packed',
-  'Awaiting production/prep'
-];
+// Every login (Checkers sheet - see below) has exactly one of these roles,
+// which decides what they can access after signing in with name + PIN: a
+// Checker gets the truck-checking flow, a Dispatch Manager gets Admin's
+// Dashboard tab only (plus the truck-checking flow), an Admin gets the full
+// Admin area (plus the truck-checking flow), and Customer Care gets only
+// the order lookup (which truck an order is on, and its driver) - nothing
+// else. There's no longer a separate PIN-only Admin/Dispatch Manager gate -
+// one login, role decides access.
+var ROLES = { ADMIN: 'Admin', DISPATCH_MANAGER: 'Dispatch Manager', CHECKER: 'Checker', CUSTOMER_CARE: 'Customer Care' };
 
 var SHEET_HEADERS = {
-  Checkers: ['ID', 'Name', 'PIN', 'Active', 'CreatedAt'],
+  // Role is appended at the end (non-destructive migration, same as every
+  // other column added to an already-deployed sheet elsewhere in this
+  // file) - see setupSpreadsheet, which backfills any blank Role to
+  // 'Checker' and seeds a default Admin login if none exists yet.
+  Checkers: ['ID', 'Name', 'PIN', 'Active', 'CreatedAt', 'Role'],
   // Driver and Route used to live here, fixed per truck. In practice both
   // rotate day to day (drivers aren't tied to one truck, and a truck's
   // route can change trip to trip), so both are now captured per truck
@@ -48,17 +66,92 @@ var SHEET_HEADERS = {
   // code any more. Registration/Type are appended at the end (not
   // inserted) so existing rows in a live sheet don't shift columns.
   Trucks: ['ID', 'Name', 'Driver', 'Route', 'Active', 'CreatedAt', 'Registration', 'Type'],
-  NoStockReasons: ['ID', 'Reason', 'Active', 'SortOrder'],
+  // The pre-set driver list (Admin > Drivers) a trip's driver dropdowns are
+  // populated from - separate from the freeform Driver/DriverContacts
+  // columns on TruckSessions below, which still store whatever ended up
+  // selected/typed for that specific trip either way.
+  Drivers: ['ID', 'Name', 'Contact', 'Active', 'CreatedAt'],
   // Driver, DispatchedWithWarnings, DispatchWarningsText, Route and the
   // TraySmall/Medium/Large/Other columns are appended at the end for the
-  // same non-destructive-migration reason. Driver can hold up to 3 names,
-  // comma-separated ("Sipho, Thabo"), rather than needing separate columns.
+  // same non-destructive-migration reason. Driver can hold up to 4 names,
+  // comma-separated ("Sipho, Thabo"), rather than needing separate columns -
+  // 3 chosen from the Drivers list plus one freeform slot for someone not
+  // on it yet (see updateSessionTrip).
   // TrayCount (the old single tally) is kept as an unused legacy column,
   // superseded by the per-size TraySmall/TrayMedium/TrayLarge/TrayOther columns.
-  TruckSessions: ['ID', 'Date', 'TruckID', 'TruckName', 'CheckerID', 'CheckerName', 'StartedAt', 'TrayCount', 'TrayCountUpdatedAt', 'Status', 'DispatchedAt', 'DispatchedBy', 'Driver', 'DispatchedWithWarnings', 'DispatchWarningsText', 'Route', 'TraySmall', 'TrayMedium', 'TrayLarge', 'TrayOther'],
-  OrderChecks: ['ID', 'TruckSessionID', 'Date', 'OrderID', 'OrderNumber', 'Customer', 'DeliveryDate', 'Status', 'StartedAt', 'CompletedAt'],
-  ItemChecks: ['ID', 'OrderCheckID', 'TruckSessionID', 'OrderID', 'ItemKey', 'ProductDescription', 'Qty', 'Unit', 'Status', 'NoStockReasonID', 'NoStockReason', 'CheckedBy', 'CheckedAt'],
-  Settings: ['Key', 'Value']
+  // DriverContacts holds each driver's phone number, comma-separated in the
+  // SAME order as Driver ("082 123 4567, 083 234 5678") so index i in one
+  // lines up with index i in the other - also appended at the end.
+  // NoTraysOnTrip (appended at the end, same reason as above) is the
+  // checker's own explicit "this dispatch genuinely carries no fruit
+  // trays" flag - some trips (especially a truck's 2nd dispatch of the
+  // day) never carry trays at all, and until this existed there was no way
+  // to say so: the tray counts just stayed blank, which markTruckDispatched
+  // read as "not entered" and flagged as a dispatched-with-warnings issue
+  // indistinguishable from someone genuinely forgetting to count. See
+  // updateTrayCounts/markTruckDispatched below.
+  // TruckIssuesPrompted (appended at the end, same non-destructive-migration
+  // reason) tracks whether the mandatory "any truck issues?" prompt has
+  // already been shown for THIS trip - set false only when a brand-new
+  // session is created (createTruckSession_) and flipped true by
+  // reportTruckIssues once the checker answers it, so the prompt fires
+  // once per new trip, not every time the truck is opened/resumed (Shane's
+  // request, 2026-09-16 - see the TRUCK ISSUES section further down).
+  TruckSessions: ['ID', 'Date', 'TruckID', 'TruckName', 'CheckerID', 'CheckerName', 'StartedAt', 'TrayCount', 'TrayCountUpdatedAt', 'Status', 'DispatchedAt', 'DispatchedBy', 'Driver', 'DispatchedWithWarnings', 'DispatchWarningsText', 'Route', 'TraySmall', 'TrayMedium', 'TrayLarge', 'TrayOther', 'DriverContacts', 'NoTraysOnTrip', 'TruckIssuesPrompted'],
+  // RequiresCoa/CoaConfirmed(By/At) appended at the end (see the comment on
+  // TruckSessions above re: column order never shifting on a live sheet) -
+  // RequiresCoa is a snapshot of the order's Packing & Production flag at
+  // allocation time (same pattern as OrderNumber/Customer/DeliveryDate
+  // above, not read live thereafter); CoaConfirmed is the checker's own
+  // on-screen tick, separate from RequiresCoa so "does this order need one"
+  // and "has someone actually confirmed it's attached" can never be
+  // conflated.
+  OrderChecks: ['ID', 'TruckSessionID', 'Date', 'OrderID', 'OrderNumber', 'Customer', 'DeliveryDate', 'Status', 'StartedAt', 'CompletedAt', 'RequiresCoa', 'CoaConfirmed', 'CoaConfirmedBy', 'CoaConfirmedAt'],
+  // NoStockReasonID/NoStockReason are vestigial - the admin-managed
+  // No-Stock Reasons feature they served was removed (No Stock is now a
+  // single tap, no reason picker), but the columns are kept rather than
+  // removed so a live sheet's column order never shifts (see the
+  // non-destructive-migration comments elsewhere in this file - the same
+  // rule applies to removing a column as to inserting one out of order:
+  // updateRowById_ writes back positionally by this array's index, so it
+  // must always match the physical sheet's column layout). Nothing reads
+  // or writes them going forward. PackedQty is appended at the end for the
+  // same reason: blank means "packed the full ordered Qty", a value means
+  // the checker recorded packing less (or more) via the Edit Qty button.
+  ItemChecks: ['ID', 'OrderCheckID', 'TruckSessionID', 'OrderID', 'ItemKey', 'ProductDescription', 'Qty', 'Unit', 'Status', 'NoStockReasonID', 'NoStockReason', 'CheckedBy', 'CheckedAt', 'PackedQty'],
+  Settings: ['Key', 'Value'],
+  // Orders the customer collected directly instead of going out on a truck -
+  // tracked so the end-of-day dispatch overview doesn't flag them as
+  // outstanding/overdue just because no truck ever carried them.
+  CollectedOrders: ['OrderID', 'OrderNumber', 'Customer', 'CollectedAt', 'CollectedBy'],
+  // A non-order instruction added to a truck's CURRENT trip - "collect
+  // crates from ABC Farms", "drop off pallets at the depot", and so on -
+  // for something that isn't a real Packing & Production order but still
+  // needs doing on that run. Replaces the old standalone Non-Order Dispatch
+  // feature (Dispatch Manager/Admin only, logged separately from any real
+  // trip, per Shane's request 2026-09-16): a Job is added from INSIDE the
+  // truck's own workspace (any checker on that truck, right alongside
+  // "+ Add Order"), is tied to that specific TruckSessionID like a real
+  // order is, and - also per Shane's explicit call - blocks dispatch until
+  // marked Done, the same hard rule that already applies to orders. See
+  // addJobToTruck/setJobStatus/removeJob below.
+  Jobs: ['ID', 'TruckSessionID', 'Date', 'Subject', 'Instructions', 'Status', 'CreatedByID', 'CreatedByName', 'CreatedAt', 'DoneBy', 'DoneAt'],
+  // A checker flags a specific item on an order as a packer-quality problem
+  // (poor quality, wrong weight, etc.) while checking stock, with a short
+  // free-text note - Shane's request (2026-09-16). Deliberately NOT tied to
+  // the item's own Status and does NOT block dispatch (unlike Jobs) - it's
+  // purely a checklist for someone to follow up on afterward, so
+  // OrderNumber/Customer/ProductDescription/TruckName are all snapshotted
+  // here at flag time (same denormalization pattern as OrderChecks/Jobs
+  // elsewhere in this file) so the Admin Dashboard checklist never needs to
+  // join back across three sheets just to show what was flagged and where.
+  PackingIssues: ['ID', 'TruckSessionID', 'OrderCheckID', 'ItemCheckID', 'Date', 'TruckName', 'OrderNumber', 'Customer', 'ProductDescription', 'Note', 'Status', 'FlaggedByID', 'FlaggedByName', 'FlaggedAt', 'ResolvedByName', 'ResolvedAt'],
+  // A checker reports truck issues (mechanical problems, cleanliness, etc.)
+  // via the mandatory prompt shown once at the start of a brand-new trip
+  // (see TruckSessions.TruckIssuesPrompted above) - Shane's request
+  // (2026-09-16). Also non-blocking, same reasoning as PackingIssues above -
+  // just a checklist for Dispatch Managers to work through on the Dashboard.
+  TruckIssues: ['ID', 'TruckSessionID', 'TruckID', 'TruckName', 'Date', 'Note', 'Status', 'ReportedByID', 'ReportedByName', 'ReportedAt', 'ResolvedByName', 'ResolvedAt']
 };
 
 // ---------------------------------------------------------------------------
@@ -93,34 +186,60 @@ function safeJsonParse_(str) {
 
 // Whitelist of functions callable from the frontend, keyed by action name.
 var API_ACTIONS = {
-  authenticateChecker: authenticateChecker,
-  authenticateAdmin: authenticateAdmin,
+  authenticateUser: authenticateUser,
   listCheckers: listCheckers,
   addChecker: addChecker,
   updateChecker: updateChecker,
+  deleteChecker: deleteChecker,
   listTrucks: listTrucks,
+  getTrucksForSelection: getTrucksForSelection,
   addTruck: addTruck,
   updateTruck: updateTruck,
   deleteTruck: deleteTruck,
-  listReasons: listReasons,
-  addReason: addReason,
-  updateReason: updateReason,
+  listDrivers: listDrivers,
+  addDriver: addDriver,
+  updateDriver: updateDriver,
+  deleteDriver: deleteDriver,
   getAdminSettings: getAdminSettings,
-  setAdminPin: setAdminPin,
   probeSpreadsheet: probeSpreadsheet,
   saveDataSourceConfig: saveDataSourceConfig,
   searchOrders: searchOrders,
+  findOrderAcrossTrucks: findOrderAcrossTrucks,
+  getOrdersForSession: getOrdersForSession,
   startTruckSession: startTruckSession,
+  startNewTruckSession: startNewTruckSession,
+  getTruckSessionsForTruckToday: getTruckSessionsForTruckToday,
   getTruckSessionState: getTruckSessionState,
   updateTrayCounts: updateTrayCounts,
-  updateSessionDriver: updateSessionDriver,
-  updateSessionRoute: updateSessionRoute,
+  updateSessionTrip: updateSessionTrip,
   allocateOrderToTruck: allocateOrderToTruck,
+  assignOrderToTruck: assignOrderToTruck,
+  getTruckAssignmentBoard: getTruckAssignmentBoard,
+  getTruckPackTimerInfo: getTruckPackTimerInfo,
   getOrderForChecking: getOrderForChecking,
+  unallocateOrder: unallocateOrder,
   setItemStatus: setItemStatus,
+  setOrderCoaConfirmed: setOrderCoaConfirmed,
   markTruckDispatched: markTruckDispatched,
   getTodaysTruckOverview: getTodaysTruckOverview,
-  getTodaysDashboard: getTodaysDashboard
+  getDashboardForDate: getDashboardForDate,
+  getLateTruckLeaderboard: getLateTruckLeaderboard,
+  getOrderFulfillmentOverview: getOrderFulfillmentOverview,
+  markOrderCollected: markOrderCollected,
+  unmarkOrderCollected: unmarkOrderCollected,
+  getJobsForSession: getJobsForSession,
+  addJobToTruck: addJobToTruck,
+  setJobStatus: setJobStatus,
+  removeJob: removeJob,
+  listJobsForDate: listJobsForDate,
+  flagPackingIssue: flagPackingIssue,
+  listPackingIssuesForDate: listPackingIssuesForDate,
+  listOpenPackingIssues: listOpenPackingIssues,
+  setPackingIssueStatus: setPackingIssueStatus,
+  reportTruckIssues: reportTruckIssues,
+  listTruckIssuesForDate: listTruckIssuesForDate,
+  listOpenTruckIssues: listOpenTruckIssues,
+  setTruckIssueStatus: setTruckIssueStatus
 };
 
 function handleApiRequest_(action, params) {
@@ -161,20 +280,96 @@ function setupSpreadsheet() {
   var sheet1 = ss.getSheetByName('Sheet1');
   if (sheet1 && sheet1.getLastRow() === 0) ss.deleteSheet(sheet1);
 
-  // Seed default no-stock reasons if that sheet is empty
-  var reasonsSheet = ss.getSheetByName(SHEET_NAMES.REASONS);
-  if (reasonsSheet.getLastRow() < 2) {
-    DEFAULT_NO_STOCK_REASONS.forEach(function (reason, i) {
-      reasonsSheet.appendRow([Utilities.getUuid(), reason, true, i + 1]);
-    });
-  }
-
   // Seed default settings if missing
   var settings = readSettings_();
-  var defaults = { AdminPin: '1234', PackingSpreadsheetId: '' };
+  var defaults = { PackingSpreadsheetId: '' };
   Object.keys(defaults).forEach(function (key) {
     if (!(key in settings)) writeSetting_(key, defaults[key]);
   });
+
+  // Every login now carries its own Role (Admin/Dispatch Manager/Checker) on
+  // the Checkers sheet, instead of a separate PIN-only Admin/Dispatch
+  // Manager gate. Role was just appended as a new column above, so any row
+  // written before this change has a blank Role - backfill those to
+  // Checker (what they always were) rather than leaving them blank and
+  // unable to sign in at all.
+  var checkersSheet = getSheet_(SHEET_NAMES.CHECKERS);
+  var checkerData = checkersSheet.getDataRange().getValues();
+  var roleColIdx = SHEET_HEADERS.Checkers.indexOf('Role');
+  for (var i = 1; i < checkerData.length; i++) {
+    if (!checkerData[i][roleColIdx]) checkersSheet.getRange(i + 1, roleColIdx + 1).setValue(ROLES.CHECKER);
+  }
+
+  // Force the whole PIN column to Plain Text formatting, not just new/edited
+  // rows going forward (see appendObjectForcingText_/updateRowById_ above) -
+  // this also covers a PIN typed directly into the sheet by hand, and
+  // covers this column for any row appended after this runs. Safe/cheap to
+  // re-run. Note this can't recover a PIN that was ALREADY stripped of its
+  // leading zero before this fix existed - that data is already gone, so
+  // anyone whose PIN starts with 0 should just re-enter it once via Users.
+  var pinColIdx = SHEET_HEADERS.Checkers.indexOf('PIN') + 1;
+  checkersSheet.getRange(1, pinColIdx, checkersSheet.getMaxRows(), 1).setNumberFormat('@');
+
+  // Same leading-zero problem, same fix, for every column that holds
+  // nothing but a phone number: the Drivers list's Contact column, and
+  // TruckSessions' DriverContacts column (a trip's driver contact
+  // number(s), comma-joined). A number like "0821234567" is otherwise
+  // silently reinterpreted by Sheets as a Number and loses its leading 0 -
+  // already-affected rows can't be recovered by this (that data is already
+  // gone), so re-enter any driver's number that's already missing its 0
+  // once via Admin > Drivers or the trip modal.
+  var driversSheet = getSheet_(SHEET_NAMES.DRIVERS);
+  var driverContactColIdx = SHEET_HEADERS.Drivers.indexOf('Contact') + 1;
+  driversSheet.getRange(1, driverContactColIdx, driversSheet.getMaxRows(), 1).setNumberFormat('@');
+
+  var sessionsSheet = getSheet_(SHEET_NAMES.SESSIONS);
+  var driverContactsColIdx = SHEET_HEADERS.TruckSessions.indexOf('DriverContacts') + 1;
+  sessionsSheet.getRange(1, driverContactsColIdx, sessionsSheet.getMaxRows(), 1).setNumberFormat('@');
+
+  // Same leading-zero/numeric-coercion problem, same fix, for OrderID -
+  // traced 2026-10-30 (a dispatch manager reported an order that had
+  // genuinely dispatched on a truck still showing in the Dashboard's
+  // Outstanding section). Packing & Production's own internal OrderID
+  // (distinct from the human-readable SageRef - see
+  // fetchAllOrdersFromPackingUncached_'s comment) can be a purely numeric
+  // string; every write of it into Dispatch's own sheets (OrderChecks via
+  // allocateOrderToTruck, ItemChecks alongside it) goes through this
+  // column unformatted, so a leading-zero OrderID can silently become a
+  // Number on write, same as PIN/Contact/DriverContacts above - already
+  // flagged as exactly this risk in allocateOrderToTruck's own comment,
+  // but only worked around THERE (comparing String(...) on both sides for
+  // that function's own just-written-row check), never fixed at the
+  // source. getDispatchedOrderIds_ (Code.gs) cross-references OrderChecks.
+  // OrderID against Packing's own freshly-read OrderID string to decide
+  // whether an order counts as dispatched for the Fulfillment Overview - if
+  // the stored value silently lost a leading zero, that comparison
+  // silently stops matching FOREVER, even though the SAME order correctly
+  // shows up under its truck on the Dashboard's own "Today's trucks" card
+  // (which groups by TruckSessionID only, never by OrderID) - exactly the
+  // "dispatched on a truck, but still Outstanding" split Shane described.
+  // As with PIN above, this can't recover an OrderID that's already been
+  // silently converted before this fix ran - any order already stuck this
+  // way needs a one-off manual fix (re-entering the OrderChecks/ItemChecks
+  // OrderID cell as text, or just marking it Collected), not something
+  // this blanket formatting pass can undo after the fact.
+  var orderChecksSheet_ = getSheet_(SHEET_NAMES.ORDER_CHECKS);
+  var orderChecksOrderIdColIdx = SHEET_HEADERS.OrderChecks.indexOf('OrderID') + 1;
+  orderChecksSheet_.getRange(1, orderChecksOrderIdColIdx, orderChecksSheet_.getMaxRows(), 1).setNumberFormat('@');
+
+  var itemChecksSheet_ = getSheet_(SHEET_NAMES.ITEM_CHECKS);
+  var itemChecksOrderIdColIdx = SHEET_HEADERS.ItemChecks.indexOf('OrderID') + 1;
+  itemChecksSheet_.getRange(1, itemChecksOrderIdColIdx, itemChecksSheet_.getMaxRows(), 1).setNumberFormat('@');
+
+  // Guarantee there is always at least one Admin login, so re-running this
+  // (or running it fresh) never locks you out of Admin - matches the old
+  // default AdminPin of '1234', just as a named user now instead of an
+  // anonymous PIN.
+  var hasAdmin = sheetToObjects_(checkersSheet).some(function (c) { return c.Role === ROLES.ADMIN; });
+  if (!hasAdmin) {
+    appendObjectForcingText_(checkersSheet, SHEET_HEADERS.Checkers, {
+      ID: Utilities.getUuid(), Name: 'Admin', PIN: '1234', Active: true, CreatedAt: nowIso_(), Role: ROLES.ADMIN
+    }, ['PIN']);
+  }
 
   SpreadsheetApp.flush();
   return 'Setup complete.';
@@ -217,9 +412,75 @@ function appendObject_(sheet, headers, obj) {
   sheet.appendRow(row);
 }
 
-function updateRowById_(sheet, headers, id, patch) {
+/**
+ * Like appendObject_, but for writing several rows at once (e.g. every item
+ * on an order being allocated to a truck) - uses ONE getRange/setValues call
+ * for the whole batch instead of one sheet.appendRow() per row.
+ *
+ * This isn't just an efficiency nicety: calling appendRow() back-to-back in
+ * a tight loop, once per row, gives Sheets' backend N separate chances to
+ * drop a single row without the script ever seeing an error (each call is
+ * its own round trip that independently computes "the next empty row" -
+ * under load that occasionally loses a race and one write never lands,
+ * with nothing thrown for the loop to catch). This is the confirmed cause
+ * of products silently missing from individual orders in Dispatch (traced
+ * 2026-10-01: order INV0138094 was missing Spinach - Packing & Production's
+ * OrderItems had it, Dispatch's own ItemChecks simply never got that one
+ * row written when the order was allocated; the ItemKey sequence in
+ * ItemChecks jumped straight from _5 to _7, confirming the 7th
+ * appendRow() call in that loop silently no-opped while the 21 others
+ * succeeded). A single batched write has no such gap to fall into - it's
+ * one atomic call that either writes every row or throws.
+ *
+ * No-ops for an empty/undefined array (getRange rejects a 0-row range).
+ */
+function appendObjects_(sheet, headers, objs) {
+  if (!objs || objs.length === 0) return;
+  var rows = objs.map(function (obj) {
+    return headers.map(function (h) { return obj[h] !== undefined ? obj[h] : ''; });
+  });
+  var startRow = sheet.getLastRow() + 1;
+  sheet.getRange(startRow, 1, rows.length, headers.length).setValues(rows);
+}
+
+/**
+ * Like appendObject_, but forces specific columns (by header name) to
+ * Plain Text format on the new row BEFORE writing the value - otherwise
+ * Google Sheets silently reinterprets a numeric-looking value (e.g. a PIN
+ * of "0123") as the Number 123, dropping the leading zero. The format has
+ * to be set before the value is written; reformatting a cell afterward
+ * can't undo a conversion that's already happened. Uses an explicit row
+ * index (rather than sheet.appendRow, which picks its own) so the same row
+ * is guaranteed to be both the one formatted and the one written to.
+ */
+function appendObjectForcingText_(sheet, headers, obj, textColumnNames) {
+  var rowIndex = sheet.getLastRow() + 1;
+  textColumnNames.forEach(function (colName) {
+    var colIdx = headers.indexOf(colName);
+    if (colIdx !== -1) sheet.getRange(rowIndex, colIdx + 1, 1, 1).setNumberFormat('@');
+  });
+  var row = headers.map(function (h) { return obj[h] !== undefined ? obj[h] : ''; });
+  sheet.getRange(rowIndex, 1, 1, row.length).setValues([row]);
+}
+
+/**
+ * forceTextColumns (optional): header names that must be Plain Text
+ * formatted before this patch's value is written - same leading-zero
+ * problem as appendObjectForcingText_ above, but for an edit to an
+ * existing row rather than a new one. Only reformats a column that's
+ * actually part of this patch, so unrelated edits to the same row don't
+ * pay for it.
+ */
+function updateRowById_(sheet, headers, id, patch, forceTextColumns) {
   var rowIndex = findRowIndexById_(sheet, id);
   if (rowIndex === -1) throw new Error('Row with ID ' + id + ' not found in ' + sheet.getName());
+  if (forceTextColumns) {
+    forceTextColumns.forEach(function (colName) {
+      if (patch[colName] === undefined) return;
+      var colIdx = headers.indexOf(colName);
+      if (colIdx !== -1) sheet.getRange(rowIndex, colIdx + 1, 1, 1).setNumberFormat('@');
+    });
+  }
   var current = sheet.getRange(rowIndex, 1, 1, headers.length).getValues()[0];
   var updated = headers.map(function (h, i) { return patch[h] !== undefined ? patch[h] : current[i]; });
   sheet.getRange(rowIndex, 1, 1, headers.length).setValues([updated]);
@@ -231,6 +492,53 @@ function deleteRowById_(sheet, id) {
   if (rowIndex === -1) throw new Error('Row with ID ' + id + ' not found in ' + sheet.getName());
   sheet.deleteRow(rowIndex);
   return true;
+}
+
+/**
+ * Deletes every row (other than the header) for which matchFn(row, headers)
+ * is true - used where a single parent ID (e.g. an OrderCheck) can own
+ * several child rows (its ItemChecks) that all need to go together. Walks
+ * bottom-to-top so deleting a row doesn't shift the index of rows still to
+ * be checked.
+ */
+function deleteRowsWhere_(sheet, matchFn) {
+  var data = sheet.getDataRange().getValues();
+  var headers = data[0];
+  for (var i = data.length - 1; i >= 1; i--) {
+    if (matchFn(data[i], headers)) sheet.deleteRow(i + 1);
+  }
+}
+
+/**
+ * Canonical matching key for an OrderID (build-2026-10-30) - closes the
+ * same numeric-coercion risk setupSpreadsheet's OrderID Plain-Text fix
+ * above addresses at the formatting level, but for the COMPARISON itself:
+ * a leading-zero OrderID stored as text in Packing & Production
+ * ("007321") can silently become the Number 7321 once written into one of
+ * Dispatch's own sheets, so a bare String(...) === String(...) comparison
+ * between the two sides can stop matching even though both plainly mean
+ * the same order - this was traced back to a dispatch manager report of a
+ * genuinely-dispatched order still showing Outstanding on the Dashboard
+ * (getDispatchedOrderIds_ cross-references OrderChecks.OrderID against
+ * Packing's own OrderID string this exact way). For a value that's purely
+ * digits once trimmed, this normalizes through Number() and back (so
+ * "007321", 7321, and "7321" all key identically); anything else (a UUID,
+ * an alphanumeric ID, a value that isn't purely numeric) is returned as
+ * its trimmed string, unaffected - this assumes a real OrderID never
+ * relies on a leading zero to mean something different from the same
+ * digits without it, which holds for a plain auto-incrementing internal
+ * ID. Used everywhere an OrderID gets matched/looked-up across sheets
+ * (never for what gets WRITTEN or displayed - that's still the OrderID's
+ * own raw value, Plain-Text-formatted by setupSpreadsheet so it doesn't
+ * drift in storage either).
+ */
+function orderIdKey_(value) {
+  var s = String(value === null || value === undefined ? '' : value).trim();
+  if (s !== '' && /^-?\d+(\.\d+)?$/.test(s)) {
+    var n = Number(s);
+    if (isFinite(n)) return String(n);
+  }
+  return s;
 }
 
 function readSettings_() {
@@ -280,46 +588,235 @@ function nowIso_() {
   return new Date().toISOString();
 }
 
+/**
+ * Parses either a real Date object (what Google Sheets silently converts
+ * a date/timestamp-looking cell value to - see normalizeDateStr_ above for
+ * the same gotcha) or a date/timestamp string back into a JS Date, for
+ * comparing against a cutoff. Returns null for blank/unparseable values
+ * rather than throwing, so a stray blank cell can't crash a prune pass.
+ */
+function parseAnyDate_(value) {
+  if (value instanceof Date) return value;
+  var s = String(value || '').trim();
+  if (!s) return null;
+  var d = new Date(s);
+  return isNaN(d.getTime()) ? null : d;
+}
+
 // ---------------------------------------------------------------------------
-// AUTH - CHECKERS
+// DATA RETENTION
+//
+// Shane doesn't need Dispatch's own operational history kept longer than
+// RETENTION_DAYS - and letting TruckSessions/OrderChecks/ItemChecks grow
+// forever is exactly the "gradually slows down over many months" risk
+// flagged in SETUP.md's performance notes. pruneOldRecords() below deletes
+// anything older than that window. It does NOT touch Trucks, Checkers,
+// Drivers, or Settings - those are the app's persistent configuration, not
+// operational history, and were never meant to expire.
 // ---------------------------------------------------------------------------
 
-function authenticateChecker(name, pin) {
-  var checkers = sheetToObjects_(getSheet_(SHEET_NAMES.CHECKERS));
-  var match = checkers.filter(function (c) {
-    return String(c.Name).trim().toLowerCase() === String(name).trim().toLowerCase();
+var RETENTION_DAYS = 14;
+
+// Shane's 2026-10-26 target: a truck should be packed and dispatched within
+// this many minutes of its first order being dropped onto it. Used by
+// getTruckAssignmentBoardUncached_ to flag a truck's card once its OPEN
+// (not yet dispatched) trip has been packing longer than this - see
+// openTripPackStartAt below. One constant, read by both the "is this truck
+// overdue" calc and the number sent to the frontend, so changing the
+// target later only means editing this one line.
+var PACK_WARNING_THRESHOLD_MINUTES = 30;
+
+/**
+ * Deletes TruckSessions, OrderChecks, ItemChecks, and CollectedOrders rows
+ * older than RETENTION_DAYS. Meant to run automatically once a day via an
+ * installable time-driven trigger (Apps Script editor > Triggers (clock
+ * icon) > Add Trigger > choose this function, Time-driven, Day timer) -
+ * see SETUP.md for the one-time setup step, since a trigger can't be
+ * installed from code alone. Can also be run manually any time from the
+ * Apps Script editor's function dropdown, same as setupSpreadsheet.
+ *
+ * Order matters here: OrderChecks and TruckSessions are each pruned first,
+ * by their own Date column (both are stamped with the same day's date at
+ * creation time, so this can't leave one ahead of the other). ItemChecks
+ * has no Date column of its own - it's always a child of exactly one
+ * OrderChecks row, created together in allocateOrderToTruck - so it's
+ * pruned last, by checking which OrderCheckIDs are still alive AFTER
+ * OrderChecks has just been pruned. That's driven by referential
+ * integrity rather than re-deriving a second cutoff, so it can't drift out
+ * of sync with whatever OrderChecks actually kept.
+ */
+function pruneOldRecords() {
+  var cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - RETENTION_DAYS);
+  var isOld = function (dateValue) {
+    var d = parseAnyDate_(dateValue);
+    return d !== null && d < cutoff;
+  };
+
+  var sessionsSheet = getSheet_(SHEET_NAMES.SESSIONS);
+  var sessionsDateCol = SHEET_HEADERS.TruckSessions.indexOf('Date');
+  var sessionsDeleted = 0;
+  deleteRowsWhere_(sessionsSheet, function (row) {
+    var old = isOld(row[sessionsDateCol]);
+    if (old) sessionsDeleted++;
+    return old;
+  });
+
+  var orderChecksSheet = getSheet_(SHEET_NAMES.ORDER_CHECKS);
+  var orderChecksDateCol = SHEET_HEADERS.OrderChecks.indexOf('Date');
+  var orderChecksDeleted = 0;
+  deleteRowsWhere_(orderChecksSheet, function (row) {
+    var old = isOld(row[orderChecksDateCol]);
+    if (old) orderChecksDeleted++;
+    return old;
+  });
+
+  var survivingOrderCheckIds = {};
+  sheetToObjects_(orderChecksSheet).forEach(function (oc) { survivingOrderCheckIds[String(oc.ID)] = true; });
+  var itemChecksSheet = getSheet_(SHEET_NAMES.ITEM_CHECKS);
+  var itemChecksOrderCheckIdCol = SHEET_HEADERS.ItemChecks.indexOf('OrderCheckID');
+  var itemChecksDeleted = 0;
+  deleteRowsWhere_(itemChecksSheet, function (row) {
+    var orphaned = !survivingOrderCheckIds[String(row[itemChecksOrderCheckIdCol])];
+    if (orphaned) itemChecksDeleted++;
+    return orphaned;
+  });
+
+  var collectedSheet = getSheet_(SHEET_NAMES.COLLECTED_ORDERS);
+  var collectedAtCol = SHEET_HEADERS.CollectedOrders.indexOf('CollectedAt');
+  var collectedDeleted = 0;
+  deleteRowsWhere_(collectedSheet, function (row) {
+    var old = isOld(row[collectedAtCol]);
+    if (old) collectedDeleted++;
+    return old;
+  });
+
+  var jobsSheet = getSheet_(SHEET_NAMES.JOBS);
+  var jobsDateCol = SHEET_HEADERS.Jobs.indexOf('Date');
+  var jobsDeleted = 0;
+  deleteRowsWhere_(jobsSheet, function (row) {
+    var old = isOld(row[jobsDateCol]);
+    if (old) jobsDeleted++;
+    return old;
+  });
+
+  // Open PackingIssues/TruckIssues rows are exempt from age-based pruning
+  // entirely (Shane's 2026-09-22 request: these should stay on the
+  // Dashboard until someone actually resolves them, however long that
+  // takes) - only a RESOLVED row is ever pruned once it's past
+  // RETENTION_DAYS, same as every other sheet here.
+  var packingIssuesSheet = getSheet_(SHEET_NAMES.PACKING_ISSUES);
+  var packingIssuesDateCol = SHEET_HEADERS.PackingIssues.indexOf('Date');
+  var packingIssuesStatusCol = SHEET_HEADERS.PackingIssues.indexOf('Status');
+  var packingIssuesDeleted = 0;
+  deleteRowsWhere_(packingIssuesSheet, function (row) {
+    if (row[packingIssuesStatusCol] !== ISSUE_STATUS.RESOLVED) return false;
+    var old = isOld(row[packingIssuesDateCol]);
+    if (old) packingIssuesDeleted++;
+    return old;
+  });
+
+  var truckIssuesSheet = getSheet_(SHEET_NAMES.TRUCK_ISSUES);
+  var truckIssuesDateCol = SHEET_HEADERS.TruckIssues.indexOf('Date');
+  var truckIssuesStatusCol = SHEET_HEADERS.TruckIssues.indexOf('Status');
+  var truckIssuesDeleted = 0;
+  deleteRowsWhere_(truckIssuesSheet, function (row) {
+    if (row[truckIssuesStatusCol] !== ISSUE_STATUS.RESOLVED) return false;
+    var old = isOld(row[truckIssuesDateCol]);
+    if (old) truckIssuesDeleted++;
+    return old;
+  });
+
+  var summary = 'Pruned records older than ' + RETENTION_DAYS + ' days: ' +
+    sessionsDeleted + ' truck session(s), ' + orderChecksDeleted + ' order check(s), ' +
+    itemChecksDeleted + ' item check(s), ' + collectedDeleted + ' collected-order record(s), ' +
+    jobsDeleted + ' job(s), ' + packingIssuesDeleted + ' packing issue(s), ' + truckIssuesDeleted + ' truck issue(s).';
+  Logger.log(summary);
+  return summary;
+}
+
+// ---------------------------------------------------------------------------
+// AUTH - USERS (one login, role decides access)
+// ---------------------------------------------------------------------------
+
+/**
+ * Single login for everyone - name + PIN, looked up on the Checkers sheet
+ * (kept as the underlying sheet/tab name so an already-deployed sheet needs
+ * no manual rename; the Admin UI now calls it "Users"). Replaces the old
+ * separate authenticateChecker + PIN-only authenticateAdmin/
+ * authenticateDispatchManager gates - the frontend routes to the truck flow,
+ * the full Admin area, or the Dashboard-only Admin area purely based on the
+ * matched user's Role.
+ */
+function authenticateUser(name, pin) {
+  var users = sheetToObjects_(getSheet_(SHEET_NAMES.CHECKERS));
+  var match = users.filter(function (u) {
+    return String(u.Name).trim().toLowerCase() === String(name).trim().toLowerCase();
   })[0];
   if (!match) return { ok: false, error: 'Name not recognized.' };
-  if (match.Active === false) return { ok: false, error: 'This checker is inactive. See an admin.' };
+  if (match.Active === false) return { ok: false, error: 'This user is inactive. See an admin.' };
   if (String(match.PIN) !== String(pin).trim()) return { ok: false, error: 'Incorrect PIN.' };
-  return { ok: true, checker: { id: match.ID, name: match.Name } };
-}
-
-function authenticateAdmin(pin) {
-  var settings = readSettings_();
-  if (String(settings.AdminPin) === String(pin).trim()) return { ok: true };
-  return { ok: false, error: 'Incorrect admin PIN.' };
+  return { ok: true, user: { id: match.ID, name: match.Name, role: match.Role || ROLES.CHECKER } };
 }
 
 // ---------------------------------------------------------------------------
-// ADMIN - CHECKERS CRUD
+// ADMIN - USERS CRUD (Checkers sheet - Admin / Dispatch Manager / Checker)
 // ---------------------------------------------------------------------------
 
 function listCheckers() {
   return sheetToObjects_(getSheet_(SHEET_NAMES.CHECKERS));
 }
 
-function addChecker(name, pin) {
+function addChecker(name, pin, role) {
   var sheet = getSheet_(SHEET_NAMES.CHECKERS);
   var id = Utilities.getUuid();
-  appendObject_(sheet, SHEET_HEADERS.Checkers, {
-    ID: id, Name: name, PIN: pin, Active: true, CreatedAt: nowIso_()
-  });
+  // Force PIN to Plain Text - a PIN like "0123" would otherwise silently
+  // become the Number 123 the moment it's written (see
+  // appendObjectForcingText_), permanently dropping the leading zero.
+  appendObjectForcingText_(sheet, SHEET_HEADERS.Checkers, {
+    ID: id, Name: name, PIN: pin, Active: true, CreatedAt: nowIso_(), Role: role || ROLES.CHECKER
+  }, ['PIN']);
   return { id: id };
 }
 
+// How many OTHER active Admins exist besides the given ID - used to stop
+// the last Admin login from being demoted, deactivated, or deleted, which
+// would lock everyone out of Admin with no way back in except editing the
+// sheet directly. Takes the already-loaded Checkers rows rather than doing
+// its own sheetToObjects_ read - both call sites below already have the
+// full list in hand a moment before calling this, so having this helper
+// re-read the same sheet from scratch would just be a redundant full-sheet
+// read on every Admin update/delete.
+function countOtherActiveAdmins_(users, excludingId) {
+  return users.filter(function (u) {
+    return u.ID !== excludingId && (u.Role || ROLES.CHECKER) === ROLES.ADMIN && u.Active !== false;
+  }).length;
+}
+
 function updateChecker(id, patch) {
-  updateRowById_(getSheet_(SHEET_NAMES.CHECKERS), SHEET_HEADERS.Checkers, id, patch);
+  var users = sheetToObjects_(getSheet_(SHEET_NAMES.CHECKERS));
+  var current = users.filter(function (u) { return u.ID === id; })[0];
+  if (current) {
+    var isCurrentlyActiveAdmin = (current.Role || ROLES.CHECKER) === ROLES.ADMIN && current.Active !== false;
+    var wouldLoseAdmin = (patch.Role !== undefined && patch.Role !== ROLES.ADMIN) ||
+      (patch.Active !== undefined && patch.Active === false);
+    if (isCurrentlyActiveAdmin && wouldLoseAdmin && countOtherActiveAdmins_(users, id) === 0) {
+      throw new Error('Can\'t do that - ' + current.Name + ' is the only active Admin. Make someone else Admin first.');
+    }
+  }
+  // Force PIN to Plain Text before writing, same reason as addChecker above -
+  // otherwise editing a PIN to "0123" would silently save as 123.
+  updateRowById_(getSheet_(SHEET_NAMES.CHECKERS), SHEET_HEADERS.Checkers, id, patch, ['PIN']);
+  return { ok: true };
+}
+
+function deleteChecker(id) {
+  var users = sheetToObjects_(getSheet_(SHEET_NAMES.CHECKERS));
+  var current = users.filter(function (u) { return u.ID === id; })[0];
+  if (current && (current.Role || ROLES.CHECKER) === ROLES.ADMIN && current.Active !== false && countOtherActiveAdmins_(users, id) === 0) {
+    throw new Error('Can\'t delete ' + current.Name + ' - they\'re the only active Admin. Make someone else Admin first.');
+  }
+  deleteRowById_(getSheet_(SHEET_NAMES.CHECKERS), id);
   return { ok: true };
 }
 
@@ -327,10 +824,102 @@ function updateChecker(id, patch) {
 // ADMIN - TRUCKS CRUD
 // ---------------------------------------------------------------------------
 
+/**
+ * Natural/numeric-aware string comparator - so a list of names like "Truck
+ * 1", "Truck 2", ..., "Truck 12" sorts in the order a person would expect
+ * (2 before 12) instead of plain lexicographic order (which would put
+ * "Truck 12" before "Truck 2"). Splits each string into runs of digits vs.
+ * non-digits, compares digit runs numerically and everything else
+ * case-insensitively. Falls back gracefully (plain text compare) for names
+ * with no digits at all, so it's safe to use as a general-purpose "sort
+ * these names sensibly" comparator, not just for purely numeric names.
+ */
+function naturalCompare_(a, b) {
+  var chunks = /(\d+)|(\D+)/g;
+  var aParts = String(a == null ? '' : a).match(chunks) || [];
+  var bParts = String(b == null ? '' : b).match(chunks) || [];
+  var len = Math.max(aParts.length, bParts.length);
+  for (var i = 0; i < len; i++) {
+    var ap = aParts[i] || '';
+    var bp = bParts[i] || '';
+    if (ap === bp) continue;
+    var aIsNum = /^\d+$/.test(ap);
+    var bIsNum = /^\d+$/.test(bp);
+    if (aIsNum && bIsNum) {
+      var diff = parseInt(ap, 10) - parseInt(bp, 10);
+      if (diff !== 0) return diff;
+    } else {
+      var cmp = ap.toLowerCase().localeCompare(bp.toLowerCase());
+      if (cmp !== 0) return cmp;
+    }
+  }
+  return 0;
+}
+
+/**
+ * Sorted in "numerical order" by truck name (Shane's request) - e.g. Truck
+ * 1, Truck 2, ... Truck 12, rather than the raw sheet order (creation
+ * order) it used to return. This is the single shared source for every
+ * truck list in the app (Admin's Trucks tab, the checker's "Select a
+ * truck" screen via getTrucksForSelection, and the Trucks Board via
+ * getTruckAssignmentBoard), so sorting here keeps truck ordering
+ * consistent everywhere instead of just fixing one screen.
+ */
 function listTrucks(activeOnly) {
   var trucks = sheetToObjects_(getSheet_(SHEET_NAMES.TRUCKS));
   if (activeOnly) trucks = trucks.filter(function (t) { return t.Active === true; });
+  trucks.sort(function (a, b) { return naturalCompare_(a.Name, b.Name); });
   return trucks;
+}
+
+/**
+ * Active trucks plus today's dispatch status for each, for the checker's
+ * "Select a truck" screen - so a truck that's already been dispatched today
+ * shows that up front, instead of a checker only finding out after tapping
+ * in. A truck can run more than one dispatch a day, so this also reports
+ * whether an in-progress (not yet dispatched) session exists right now.
+ *
+ * Also includes a per-trip breakdown (driver, route, and the orders
+ * allocated to that specific trip) - deliberately NOT merged into one flat
+ * list, because the driver (and sometimes the route) can be different on a
+ * truck's 2nd or 3rd dispatch of the day, so lumping them together would
+ * make it look like one driver had every order when really trip 1 and trip
+ * 2 each had their own.
+ */
+function getTrucksForSelection() {
+  var trucks = listTrucks(true);
+  var today = todayString_();
+  var sessionsToday = sheetToObjects_(getSheet_(SHEET_NAMES.SESSIONS))
+    .filter(function (s) { return normalizeDateStr_(s.Date) === today; })
+    .sort(function (a, b) { return String(a.StartedAt).localeCompare(String(b.StartedAt)); });
+  var orderChecksToday = sheetToObjects_(getSheet_(SHEET_NAMES.ORDER_CHECKS))
+    .filter(function (c) { return normalizeDateStr_(c.Date) === today; });
+
+  var ordersBySessionId = {};
+  orderChecksToday.forEach(function (c) {
+    if (!ordersBySessionId[c.TruckSessionID]) ordersBySessionId[c.TruckSessionID] = [];
+    ordersBySessionId[c.TruckSessionID].push({ orderNumber: c.OrderNumber, customer: c.Customer, status: c.Status });
+  });
+
+  return trucks.map(function (t) {
+    var truckSessions = sessionsToday.filter(function (s) { return s.TruckID === t.ID; });
+    var dispatchCountToday = truckSessions.filter(function (s) { return s.Status === SESSION_STATUS.DISPATCHED; }).length;
+    var withStatus = {};
+    Object.keys(t).forEach(function (k) { withStatus[k] = t[k]; });
+    withStatus.dispatchCountToday = dispatchCountToday;
+    withStatus.hasActiveSessionToday = truckSessions.some(function (s) { return s.Status === SESSION_STATUS.IN_PROGRESS; });
+    withStatus.trips = truckSessions.map(function (s, i) {
+      return {
+        tripNumber: i + 1,
+        status: s.Status,
+        driver: s.Driver || '',
+        driverContacts: s.DriverContacts || '',
+        route: s.Route || '',
+        orders: ordersBySessionId[s.ID] || []
+      };
+    });
+    return withStatus;
+  });
 }
 
 function addTruck(name, registration, type) {
@@ -350,6 +939,49 @@ function updateTruck(id, patch) {
 
 function deleteTruck(id) {
   deleteRowById_(getSheet_(SHEET_NAMES.TRUCKS), id);
+  return { ok: true };
+}
+
+// ---------------------------------------------------------------------------
+// ADMIN - DRIVERS CRUD
+//
+// A pre-set list of drivers (name + contact number), managed from Admin >
+// Drivers, so a truck session's trip modal can offer them as dropdowns
+// instead of re-typing a name and number from scratch every trip. A driver
+// not yet on this list is still handled - the trip modal has one extra
+// freeform slot for that - so this list only needs to be kept roughly up to
+// date, not perfectly complete before anyone can dispatch.
+// ---------------------------------------------------------------------------
+
+function listDrivers(activeOnly) {
+  var drivers = sheetToObjects_(getSheet_(SHEET_NAMES.DRIVERS));
+  if (activeOnly) drivers = drivers.filter(function (d) { return d.Active === true; });
+  drivers.sort(function (a, b) { return String(a.Name).localeCompare(String(b.Name)); });
+  return drivers;
+}
+
+function addDriver(name, contact) {
+  name = String(name || '').trim();
+  if (!name) throw new Error('Enter a driver name.');
+  var sheet = getSheet_(SHEET_NAMES.DRIVERS);
+  var id = Utilities.getUuid();
+  // Contact is forced to Plain Text before this write - it's nothing but
+  // digits (e.g. "0821234567"), which Sheets otherwise silently
+  // reinterprets as a Number and strips the leading 0 from, same as the
+  // PIN column bug elsewhere in this file.
+  appendObjectForcingText_(sheet, SHEET_HEADERS.Drivers, {
+    ID: id, Name: name, Contact: String(contact || '').trim(), Active: true, CreatedAt: nowIso_()
+  }, ['Contact']);
+  return { id: id };
+}
+
+function updateDriver(id, patch) {
+  updateRowById_(getSheet_(SHEET_NAMES.DRIVERS), SHEET_HEADERS.Drivers, id, patch, ['Contact']);
+  return { ok: true };
+}
+
+function deleteDriver(id) {
+  deleteRowById_(getSheet_(SHEET_NAMES.DRIVERS), id);
   return { ok: true };
 }
 
@@ -420,45 +1052,76 @@ function seedInitialTrucks() {
   return { added: added.length, skipped: skipped };
 }
 
-// ---------------------------------------------------------------------------
-// ADMIN - NO-STOCK REASONS CRUD
-// ---------------------------------------------------------------------------
+/**
+ * One-time bulk-add of Shane's driver list, with contact numbers not yet on
+ * hand at seed time - run this once from the Apps Script editor (select
+ * seedInitialDrivers from the function dropdown next to Run/Debug, then
+ * click Run), same way as seedInitialTrucks above. Every driver goes in
+ * Active with Contact set to '0' as a placeholder, editable (name, contact,
+ * or active flag) afterwards in Admin > Drivers exactly like a driver added
+ * one at a time through that screen - update each Contact there as Shane
+ * gets the real numbers. Safe to re-run: any name already on file (matched
+ * case-insensitively, trimmed) is skipped, not duplicated - so it's also
+ * safe to run again later with a longer list if more names get added before
+ * everyone's contact numbers are in.
+ */
+function seedInitialDrivers() {
+  var DRIVER_NAMES = [
+    'Rodney Mkhari', 'Shane Malungana', 'Parfait Bakala', 'Lucas Kau', 'Matimu Maluleke',
+    'Abed Mathonsi', 'Henneck Nukeri', 'Mavin Ngobeni', 'Posh Maluleke', 'Phumlani Mathonsi',
+    'Selby Ndzovela', 'Therents Makoma', 'Mzwandile Ndlovu', 'Innocent Ngwenya', 'Robert Letshedi',
+    'Welsh Shisinge', 'Irvin Hlongwane', 'Erick Sedibane', 'Chris Baloyi', 'Godfrey Pilusa',
+    'Matimba Nobela', 'Joseph Molise', 'Jerry Matlala', 'Thembani Maluleke', 'Tiyane Ngobeni',
+    'Sandile Thwala', 'Tshepo Ranku', 'Reason Ngoveni', 'Sthembiso Ndlovu', 'Nyiko Maluleke',
+    'Ntwanano Mabaso', 'Kgatla Basco', 'Lungelo Maphumulo', 'Mpho Griffith', 'Tiyani Mathebula',
+    'Neverdi Mkensi', 'Ariel Mabunda', 'Lunga Hlongwane', 'Mudzhedzi Mulaudzi', 'Phillip Mokgethi',
+    'Johannes Semono', 'Lelethu Maselana', 'Mduduzi Mabele', 'Levy Lekganyane', 'Lungile Shuba',
+    'Mashangu Khoza'
+  ];
 
-function listReasons(activeOnly) {
-  var reasons = sheetToObjects_(getSheet_(SHEET_NAMES.REASONS));
-  if (activeOnly) reasons = reasons.filter(function (r) { return r.Active === true; });
-  reasons.sort(function (a, b) { return (a.SortOrder || 0) - (b.SortOrder || 0); });
-  return reasons;
+  var existing = sheetToObjects_(getSheet_(SHEET_NAMES.DRIVERS));
+  var existingNames = {};
+  existing.forEach(function (d) {
+    if (d.Name) existingNames[String(d.Name).trim().toLowerCase()] = true;
+  });
+
+  var sheet = getSheet_(SHEET_NAMES.DRIVERS);
+  var added = [], skipped = [];
+
+  DRIVER_NAMES.forEach(function (rawName) {
+    var name = String(rawName).trim();
+    var key = name.toLowerCase();
+    if (existingNames[key]) { skipped.push(name); return; }
+
+    var id = Utilities.getUuid();
+    // Contact forced to Plain Text same as addDriver() above, so a later
+    // real number typed in over this '0' placeholder (e.g. "0821234567")
+    // doesn't lose its leading zero to Sheets' auto-Number conversion.
+    appendObjectForcingText_(sheet, SHEET_HEADERS.Drivers, {
+      ID: id, Name: name, Contact: '0', Active: true, CreatedAt: nowIso_()
+    }, ['Contact']);
+    existingNames[key] = true;
+    added.push(name);
+  });
+
+  Logger.log('seedInitialDrivers: added ' + added.length + ', skipped (already existed) ' + skipped.length +
+    (skipped.length ? ': ' + skipped.join(', ') : ''));
+  return { added: added.length, skipped: skipped };
 }
 
-function addReason(text) {
-  var sheet = getSheet_(SHEET_NAMES.REASONS);
-  var existing = sheetToObjects_(sheet);
-  var id = Utilities.getUuid();
-  var maxOrder = existing.reduce(function (m, r) { return Math.max(m, r.SortOrder || 0); }, 0);
-  appendObject_(sheet, SHEET_HEADERS.NoStockReasons, { ID: id, Reason: text, Active: true, SortOrder: maxOrder + 1 });
-  return { id: id };
-}
-
-function updateReason(id, patch) {
-  updateRowById_(getSheet_(SHEET_NAMES.REASONS), SHEET_HEADERS.NoStockReasons, id, patch);
-  return { ok: true };
-}
-
 // ---------------------------------------------------------------------------
-// ADMIN - SETTINGS / ADMIN PIN
+// ADMIN - SETTINGS
 // ---------------------------------------------------------------------------
+//
+// Admin/Dispatch Manager PINs used to live here as global settings; each is
+// now just the PIN on that person's own row on the Checkers ("Users") sheet
+// instead, edited from Admin > Users like anyone else's.
 
 function getAdminSettings() {
   var s = readSettings_();
   return {
     packingSpreadsheetId: s.PackingSpreadsheetId || ''
   };
-}
-
-function setAdminPin(newPin) {
-  writeSetting_('AdminPin', String(newPin).trim());
-  return { ok: true };
 }
 
 // ---------------------------------------------------------------------------
@@ -478,6 +1141,30 @@ var ORDER_ITEMS_TAB_NAME = 'OrderItems';
 
 var ORDERS_COLUMNS = { orderId: 'OrderID', sageRef: 'SageRef', customer: 'CustomerName', deliveryDate: 'DeliveryDate' };
 var ORDER_ITEMS_COLUMNS = { orderId: 'OrderID', description: 'Description', department: 'Department', qty: 'Qty', unit: 'Unit' };
+// RequiresCoa (Packing & Production's new "does this order need a Certificate
+// of Analysis" flag, added on the Orders tab) is looked up OPTIONALLY, unlike
+// every column above - a sheet that hasn't been redeployed with this column
+// yet (or has it under a slightly different name for a moment) should still
+// let every order through checking as normal, just without the COA
+// checkbox/gate, rather than requiredColIndex_'s hard failure taking down
+// order fetching entirely for something this non-critical.
+//
+// ProductionCompletedAt (Shane's 2026-09-16 request: "show the pack and
+// production status of an order in the dispatch system so if an order is in
+// dispatch for today but production hasn't completed the work yet that it
+// shows that on the order") is the same order-level flag Packing &
+// Production's own board stamps the moment every Production line on an
+// order is done - blank means still outstanding. Also optional, for the
+// same reason: an order fetch should never fail just because this column
+// isn't on the sheet yet. See deriveProductionStatus_ below for how this
+// combines with QtyCompleted (ORDER_ITEMS_OPTIONAL_COLUMNS) into what the
+// frontend actually shows.
+var ORDERS_OPTIONAL_COLUMNS = { coa: 'RequiresCoa', productionCompletedAt: 'ProductionCompletedAt' };
+// QtyCompleted (Packing & Production's per-item running total for a
+// partially-completed Production line, e.g. "200 of 400kg done") - optional
+// for the same reason as the columns above. Only meaningful on Production
+// department lines; Packing lines never set it.
+var ORDER_ITEMS_OPTIONAL_COLUMNS = { qtyCompleted: 'QtyCompleted' };
 
 /** Extracts a Spreadsheet ID from either a raw ID or a full Google Sheets URL. */
 function extractSpreadsheetId_(idOrUrl) {
@@ -503,7 +1190,15 @@ function probeSpreadsheet(idOrUrl) {
 
 function saveDataSourceConfig(idOrUrl) {
   var id = extractSpreadsheetId_(idOrUrl);
+  var previousId = readSettings_().PackingSpreadsheetId;
   writeSetting_('PackingSpreadsheetId', id);
+  // The cached Packing & Production read (see fetchAllOrdersFromPacking_)
+  // is keyed by spreadsheet ID, so switching data sources already reads
+  // fresh on its own - this just tidies up the old entry immediately
+  // instead of letting it sit until its TTL expires.
+  if (previousId && previousId !== id) {
+    try { CacheService.getScriptCache().remove('packingOrders_' + previousId); } catch (err) { /* best-effort */ }
+  }
   return { ok: true };
 }
 
@@ -515,32 +1210,199 @@ function requiredColIndex_(headers, tabName, columnName) {
 }
 
 /**
- * Reads today's orders by joining the Orders and OrderItems tabs on OrderID.
- * Orders are filtered to DeliveryDate === today, matching the assumption
- * that dispatch happens on the delivery day. Order "number" shown to
- * checkers is SageRef (the human-readable invoice ref), falling back to the
- * internal OrderID if that's blank.
+ * Reads a checkbox-ish cell value as a real boolean. Packing & Production's
+ * RequiresCoa column is a Sheets checkbox in the normal case (Apps Script
+ * hands that back as a genuine boolean already), but EmailImport.gs over
+ * there writes it as plain TRUE/FALSE, so this also accepts the handful of
+ * other spellings a cell like that could reasonably hold (text "TRUE"/"Yes"/
+ * "Y"/"1", case-insensitive) rather than assuming one exact representation.
+ * Blank/missing/anything else reads as false.
  */
-function readTodaysOrdersFromPacking_() {
+function parseBoolCell_(value) {
+  if (value === true) return true;
+  if (value === false || value === '' || value === null || value === undefined) return false;
+  var s = String(value).trim().toUpperCase();
+  return s === 'TRUE' || s === 'YES' || s === 'Y' || s === '1';
+}
+
+/**
+ * Derives an order's Production status from its own OrderItems (only
+ * 'Production' department lines count - Packing lines never factor in) plus
+ * Packing & Production's order-level ProductionCompletedAt flag. Built for
+ * Shane's 2026-09-16 request to show, right on a dispatch order, whether
+ * Production has actually finished the work yet - not just whether the
+ * order has been packed/checked here in Dispatch.
+ *
+ * An order with no Production lines at all (a pure Packing order) is never
+ * flagged - there's nothing for Production to finish, so productionDone is
+ * always true and productionStatus is 'none'.
+ *
+ * hasQtyCompletedColumn is whether Packing & Production's OrderItems tab has
+ * picked up the QtyCompleted column yet (see ORDER_ITEMS_OPTIONAL_COLUMNS) -
+ * until it has, this can only tell done vs not-done, not how far along a
+ * partially-completed line is, so productionNote stays a generic message
+ * instead of claiming a false "0 done" for every not-yet-finished order.
+ */
+function deriveProductionStatus_(items, productionCompletedAtRaw, hasQtyCompletedColumn) {
+  var productionItems = items.filter(function (i) { return i.department === 'Production'; });
+  if (productionItems.length === 0) {
+    return { hasProductionItems: false, productionDone: true, productionStatus: 'none', productionNote: '' };
+  }
+  if (productionCompletedAtRaw) {
+    return { hasProductionItems: true, productionDone: true, productionStatus: 'done', productionNote: '' };
+  }
+  if (!hasQtyCompletedColumn) {
+    return { hasProductionItems: true, productionDone: false, productionStatus: 'not_started', productionNote: 'Production not yet complete' };
+  }
+  var anyProgress = productionItems.some(function (i) { return (i.qtyCompleted || 0) > 0; });
+  if (!anyProgress) {
+    return { hasProductionItems: true, productionDone: false, productionStatus: 'not_started', productionNote: 'Production not started' };
+  }
+  var outstanding = productionItems
+    .filter(function (i) { return (i.qtyCompleted || 0) < Number(i.qty); })
+    .map(function (i) { return i.description + ': ' + i.qtyCompleted + '/' + i.qty + ' ' + (i.unit || ''); });
+  return { hasProductionItems: true, productionDone: false, productionStatus: 'in_progress', productionNote: outstanding.join(', ') };
+}
+
+// How long a Packing & Production read is reused before fetchAllOrdersFromPacking_
+// goes back to the sheet for a fresh one. See fetchAllOrdersFromPacking_'s
+// comment for why this exists and what it trades away.
+var PACKING_ORDERS_CACHE_TTL_SECONDS = 45;
+
+// How long a getTruckAssignmentBoard() response is reused before going back
+// to the sheet for a fresh one - see getTruckAssignmentBoard's own comment.
+// Deliberately shorter than BOARD_POLL_INTERVAL_MS (15s, index.html) rather
+// than some fraction of it - this only needs to collapse concurrent pollers
+// hitting the SAME tick together, not survive across ticks, so the added
+// staleness this can introduce is always well under one poll interval.
+var TRUCK_BOARD_CACHE_TTL_SECONDS = 5;
+
+/**
+ * Fetches EVERY order (with its items) from the Packing & Production
+ * sheet, joining the Orders and OrderItems tabs on OrderID - unfiltered by
+ * date. readOrdersFromPacking_ below applies the actual date filter
+ * in-memory, so this is the one place that actually touches the sheet -
+ * opening a different spreadsheet and pulling two full tabs from it is the
+ * single most expensive thing this app does. getOrderFulfillmentOverview
+ * needs BOTH "due today" and "overdue" at once, so it calls this itself
+ * ONCE and passes the result into readTodaysOrdersFromPacking_/
+ * readOverdueOrdersFromPacking_ (their optional preloadedOrders param)
+ * rather than letting each of them independently re-fetch it - that used
+ * to mean paying for this read twice on every single Dashboard load.
+ * Order "number" shown to checkers is SageRef (the human-readable invoice
+ * ref), falling back to the internal OrderID if that's blank.
+ *
+ * On top of that, the result is cached for PACKING_ORDERS_CACHE_TTL_SECONDS
+ * via CacheService - on a large/growing Packing & Production sheet, this
+ * read alone was slow enough to blow through the app's 20s API timeout
+ * (seen live as "Request timed out ... getOrderFulfillmentOverview"). This
+ * trades a little staleness (an order added or edited directly in Packing
+ * can take up to PACKING_ORDERS_CACHE_TTL_SECONDS to show up here) for a
+ * Dashboard that reliably loads fast - exactly the tradeoff SETUP.md's
+ * "Making the app faster" section flagged and deferred until it was
+ * actually needed. The cache key includes the configured
+ * PackingSpreadsheetId, so switching data sources (Admin > Data Source)
+ * always reads fresh instead of serving another sheet's cached orders.
+ */
+function fetchAllOrdersFromPacking_() {
   var s = readSettings_();
   if (!s.PackingSpreadsheetId) throw new Error('Data source not configured yet. Go to Admin > Data Source.');
-  var ss = SpreadsheetApp.openById(s.PackingSpreadsheetId);
+
+  var cache = CacheService.getScriptCache();
+  var cacheKey = packingOrdersCacheKey_(s.PackingSpreadsheetId);
+  var cached = cache.get(cacheKey);
+  if (cached) {
+    try {
+      return JSON.parse(cached);
+    } catch (err) {
+      // Corrupt/unexpected cache value - fall through and re-fetch for real.
+    }
+  }
+
+  var orders = fetchAllOrdersFromPackingUncached_(s.PackingSpreadsheetId);
+  cachePackingOrders_(s.PackingSpreadsheetId, orders);
+  return orders;
+}
+
+function packingOrdersCacheKey_(spreadsheetId) {
+  return 'packingOrders_' + spreadsheetId;
+}
+
+/**
+ * Writes an already-fetched Packing & Production order list into the same
+ * cache fetchAllOrdersFromPacking_ reads from. Pulled out of
+ * fetchAllOrdersFromPacking_ so markTruckDispatched (build-2026-10-30) can
+ * also "warm" this cache with the fresh, uncached read it already pays for
+ * on its own - see markTruckDispatched's own comment for why that matters
+ * (its force=true confirm call reuses this instead of re-paying for the
+ * exact same scan a few seconds later).
+ */
+function cachePackingOrders_(spreadsheetId, orders) {
+  try {
+    CacheService.getScriptCache().put(packingOrdersCacheKey_(spreadsheetId), JSON.stringify(orders), PACKING_ORDERS_CACHE_TTL_SECONDS);
+  } catch (err) {
+    // CacheService rejects values over ~100KB - on a big enough orders
+    // list this can throw. Caching is a speed optimization, not a
+    // correctness requirement, so just skip caching this time rather than
+    // let that break the actual fetch.
+  }
+}
+
+// Minimum fragment length for a Hidden Customers entry to count as a match -
+// mirrors Packing & Production's own Admin > Hidden Customers rule exactly
+// (contains, case-insensitive, names under 3 letters ignored) so the two
+// systems can never disagree about who's hidden.
+var HIDDEN_CUSTOMER_MIN_FRAGMENT_LENGTH = 3;
+
+/**
+ * Customer-name fragments to hide, read from the Packing & Production
+ * spreadsheet's own "HiddenCustomers" tab (column A, one name/fragment per
+ * row, header in row 1) - Shane's Nov 2026 request: internal/own-company
+ * Sage invoices (e.g. Rental Blendid) should never surface in Dispatch
+ * either, matching the hide-list he already maintains in Packing's own
+ * Admin > Hidden Customers. Gracefully returns [] (nothing hidden) if the
+ * tab doesn't exist yet rather than throwing - this must never be the
+ * reason Dispatch can't see today's orders.
+ */
+function readHiddenCustomerFragments_(spreadsheetId) {
+  var ss = SpreadsheetApp.openById(spreadsheetId);
+  var sheet = ss.getSheetByName('HiddenCustomers');
+  if (!sheet) return [];
+  var values = sheet.getDataRange().getValues();
+  var fragments = [];
+  for (var i = 1; i < values.length; i++) { // row 1 is the header
+    var name = String(values[i][0] || '').trim().toLowerCase();
+    if (name.length >= HIDDEN_CUSTOMER_MIN_FRAGMENT_LENGTH) fragments.push(name);
+  }
+  return fragments;
+}
+
+/** True if customerName contains any of the (already-lowercased) hiddenFragments. */
+function customerIsHidden_(customerName, hiddenFragments) {
+  if (hiddenFragments.length === 0) return false;
+  var haystack = String(customerName || '').toLowerCase();
+  return hiddenFragments.some(function (fragment) { return haystack.indexOf(fragment) !== -1; });
+}
+
+/** The real (uncached) Packing & Production read - see fetchAllOrdersFromPacking_ above. */
+function fetchAllOrdersFromPackingUncached_(spreadsheetId) {
+  var ss = SpreadsheetApp.openById(spreadsheetId);
 
   var ordersSheet = ss.getSheetByName(ORDERS_TAB_NAME);
   if (!ordersSheet) throw new Error('Tab "' + ORDERS_TAB_NAME + '" not found in the Packing & Production sheet.');
   var itemsSheet = ss.getSheetByName(ORDER_ITEMS_TAB_NAME);
   if (!itemsSheet) throw new Error('Tab "' + ORDER_ITEMS_TAB_NAME + '" not found in the Packing & Production sheet.');
 
-  var today = todayString_();
-
-  // --- Orders tab: order header info, filtered to today's deliveries ---
+  // --- Orders tab: order header info ---
   var orderValues = ordersSheet.getDataRange().getValues();
   var oHeaders = orderValues[0];
   var oCol = {
     orderId: requiredColIndex_(oHeaders, ORDERS_TAB_NAME, ORDERS_COLUMNS.orderId),
     sageRef: requiredColIndex_(oHeaders, ORDERS_TAB_NAME, ORDERS_COLUMNS.sageRef),
     customer: requiredColIndex_(oHeaders, ORDERS_TAB_NAME, ORDERS_COLUMNS.customer),
-    deliveryDate: requiredColIndex_(oHeaders, ORDERS_TAB_NAME, ORDERS_COLUMNS.deliveryDate)
+    deliveryDate: requiredColIndex_(oHeaders, ORDERS_TAB_NAME, ORDERS_COLUMNS.deliveryDate),
+    coa: oHeaders.indexOf(ORDERS_OPTIONAL_COLUMNS.coa), // -1 until Packing & Production's sheet has this column
+    productionCompletedAt: oHeaders.indexOf(ORDERS_OPTIONAL_COLUMNS.productionCompletedAt) // -1 until Packing & Production's sheet has this column
   };
 
   var ordersById = {};
@@ -556,7 +1418,11 @@ function readTodaysOrdersFromPacking_() {
       ? Utilities.formatDate(rawDate, Session.getScriptTimeZone() || 'Africa/Johannesburg', 'yyyy-MM-dd')
       : String(rawDate || '').trim();
 
-    if (deliveryDateStr && deliveryDateStr !== today) continue; // only today's deliveries
+    // A blank DeliveryDate is never a match for any caller - it used to
+    // fall through and get treated as "today's delivery" forever, which is
+    // exactly how old orders (added back before delivery dates were
+    // reliably set) kept surfacing no matter how old they got.
+    if (!deliveryDateStr) continue;
 
     var sageRef = String(row[oCol.sageRef] || '').trim();
     ordersById[orderId] = {
@@ -564,6 +1430,13 @@ function readTodaysOrdersFromPacking_() {
       orderNumber: sageRef || orderId,
       customer: row[oCol.customer],
       deliveryDate: deliveryDateStr,
+      requiresCoa: oCol.coa !== -1 ? parseBoolCell_(row[oCol.coa]) : false,
+      // Raw cell, kept only long enough for deriveProductionStatus_ to turn
+      // it into the productionDone/productionStatus/productionNote fields
+      // added onto this same order object in the final pass below, once
+      // items (needed to know if this order even HAS Production lines) are
+      // in hand.
+      productionCompletedAt: oCol.productionCompletedAt !== -1 ? row[oCol.productionCompletedAt] : '',
       items: []
     };
   }
@@ -576,7 +1449,8 @@ function readTodaysOrdersFromPacking_() {
     description: requiredColIndex_(iHeaders, ORDER_ITEMS_TAB_NAME, ORDER_ITEMS_COLUMNS.description),
     department: requiredColIndex_(iHeaders, ORDER_ITEMS_TAB_NAME, ORDER_ITEMS_COLUMNS.department),
     qty: requiredColIndex_(iHeaders, ORDER_ITEMS_TAB_NAME, ORDER_ITEMS_COLUMNS.qty),
-    unit: requiredColIndex_(iHeaders, ORDER_ITEMS_TAB_NAME, ORDER_ITEMS_COLUMNS.unit)
+    unit: requiredColIndex_(iHeaders, ORDER_ITEMS_TAB_NAME, ORDER_ITEMS_COLUMNS.unit),
+    qtyCompleted: iHeaders.indexOf(ORDER_ITEMS_OPTIONAL_COLUMNS.qtyCompleted) // -1 until Packing & Production's sheet has this column
   };
 
   for (var j = 1; j < itemValues.length; j++) {
@@ -585,18 +1459,98 @@ function readTodaysOrdersFromPacking_() {
 
     var itemOrderId = String(irow[iCol.orderId]).trim();
     var order = ordersById[itemOrderId];
-    if (!order) continue; // not one of today's orders (or an order that didn't match the delivery-date filter)
+    if (!order) continue; // not a Packing order with a valid DeliveryDate
 
     order.items.push({
       itemKey: itemOrderId + '_' + order.items.length,
       description: irow[iCol.description],
       qty: irow[iCol.qty],
       unit: irow[iCol.unit],
-      department: irow[iCol.department]
+      department: irow[iCol.department],
+      qtyCompleted: iCol.qtyCompleted !== -1 ? (Number(irow[iCol.qtyCompleted]) || 0) : 0
     });
   }
 
-  return Object.keys(ordersById).map(function (id) { return ordersById[id]; });
+  // Now that every order has its full item list, derive each order's
+  // Production status (see deriveProductionStatus_) and fold it onto the
+  // same order object the frontend already gets orderId/orderNumber/etc.
+  // from - one read-only pass, not a second shape callers have to know
+  // about.
+  var hasQtyCompletedColumn = iCol.qtyCompleted !== -1;
+  // Hidden Customers (Nov 2026, see readHiddenCustomerFragments_'s own
+  // comment) - filtered out here, in the shared uncached read, rather than
+  // only in the cached fetchAllOrdersFromPacking_ wrapper above, so every
+  // caller agrees including markTruckDispatched's own direct uncached call
+  // (which also WARMS that same shared cache - see cachePackingOrders_ -
+  // filtering only in the wrapper would let an unfiltered warm-up leak a
+  // hidden customer back into the cache for up to
+  // PACKING_ORDERS_CACHE_TTL_SECONDS).
+  var hiddenFragments = readHiddenCustomerFragments_(spreadsheetId);
+  return Object.keys(ordersById)
+    .map(function (id) { return ordersById[id]; })
+    .filter(function (order) { return !customerIsHidden_(order.customer, hiddenFragments); })
+    .map(function (order) {
+      var status = deriveProductionStatus_(order.items, order.productionCompletedAt, hasQtyCompletedColumn);
+      order.hasProductionItems = status.hasProductionItems;
+      order.productionDone = status.productionDone;
+      order.productionStatus = status.productionStatus;
+      order.productionNote = status.productionNote;
+      return order;
+    });
+}
+
+/**
+ * Every order from Packing & Production whose DeliveryDate satisfies
+ * isMatch(deliveryDateStr, referenceDate). Shared engine behind
+ * readTodaysOrdersFromPacking_ (today's deliveries) and
+ * readOverdueOrdersFromPacking_ (past deliveries still outstanding).
+ * referenceDate defaults to the real current day, but the Admin
+ * dashboard's date picker passes in whatever day it's viewing, so
+ * "today's orders"/overdue are evaluated as of THAT date instead of always
+ * meaning right now. preloadedOrders (optional) skips the actual sheet
+ * read and filters that array instead - see fetchAllOrdersFromPacking_.
+ */
+function readOrdersFromPacking_(isMatch, referenceDate, preloadedOrders) {
+  var today = referenceDate || todayString_();
+  var allOrders = preloadedOrders || fetchAllOrdersFromPacking_();
+  return allOrders.filter(function (o) { return isMatch(o.deliveryDate, today); });
+}
+
+/**
+ * Deliveries due on referenceDate (defaults to the real current day) -
+ * matches the assumption that dispatch happens on the delivery day. The
+ * Admin dashboard's date picker passes in the day it's viewing so this
+ * means "orders due that day", not always "orders due right now".
+ * preloadedOrders: see fetchAllOrdersFromPacking_/readOrdersFromPacking_.
+ */
+function readTodaysOrdersFromPacking_(referenceDate, preloadedOrders) {
+  return readOrdersFromPacking_(function (deliveryDateStr, today) { return deliveryDateStr === today; }, referenceDate, preloadedOrders);
+}
+
+// How far back (from whichever date is being viewed) to look for orders
+// that were due on a past day and still haven't been dispatched or
+// collected. Bounded so this query doesn't get slower and slower forever
+// as the Packing & Production sheet grows - nothing this app can act on
+// should realistically be older than this.
+var OVERDUE_LOOKBACK_DAYS = 30;
+
+/**
+ * Deliveries due on a day before referenceDate (within the lookback
+ * window before it), for the "overdue" warnings on the dashboard.
+ * referenceDate defaults to the real current day - pass in a date to see
+ * what was overdue as of THAT day instead of as of right now.
+ * preloadedOrders: see fetchAllOrdersFromPacking_/readOrdersFromPacking_.
+ */
+function readOverdueOrdersFromPacking_(referenceDate, preloadedOrders) {
+  var today = referenceDate || todayString_();
+  var todayParts = today.split('-').map(Number);
+  var cutoffDate = new Date(todayParts[0], todayParts[1] - 1, todayParts[2] - OVERDUE_LOOKBACK_DAYS);
+  var cutoffStr = Utilities.formatDate(cutoffDate, Session.getScriptTimeZone() || 'Africa/Johannesburg', 'yyyy-MM-dd');
+  // 'yyyy-MM-dd' strings sort lexicographically the same as chronologically,
+  // so plain string comparison is enough here.
+  return readOrdersFromPacking_(function (deliveryDateStr, refDate) {
+    return deliveryDateStr < refDate && deliveryDateStr >= cutoffStr;
+  }, today, preloadedOrders);
 }
 
 /** Search today's orders by order number or customer name (case-insensitive substring). */
@@ -612,6 +1566,21 @@ function searchOrders(sessionId, query) {
       })
     : orders;
 
+  // Built lazily, at most once per call, the first time a result actually
+  // needs a truck name - not via getTruckNameForSession_ per match, which
+  // would re-read the whole TruckSessions sheet from scratch for every
+  // single order in the results that happens to be allocated to another
+  // truck (findOrderAcrossTrucks below builds this same map once up front
+  // for the same reason).
+  var sessionsById = null;
+  function truckNameForSession_(id) {
+    if (!sessionsById) {
+      sessionsById = {};
+      sheetToObjects_(getSheet_(SHEET_NAMES.SESSIONS)).forEach(function (s) { sessionsById[s.ID] = s; });
+    }
+    return sessionsById[id] ? sessionsById[id].TruckName : null;
+  }
+
   return filtered.map(function (o) {
     var existingCheck = checksBySheet[o.orderId];
     var allocatedToOtherTruck = existingCheck && existingCheck.TruckSessionID !== sessionId;
@@ -624,9 +1593,128 @@ function searchOrders(sessionId, query) {
       allocated: !!existingCheck,
       // status is null when the order hasn't been allocated to any truck yet
       status: existingCheck ? existingCheck.Status : null,
-      checkedOnOtherTruck: allocatedToOtherTruck ? getTruckNameForSession_(existingCheck.TruckSessionID) : null
+      checkedOnOtherTruck: allocatedToOtherTruck ? truckNameForSession_(existingCheck.TruckSessionID) : null,
+      productionDone: o.productionDone,
+      productionStatus: o.productionStatus,
+      productionNote: o.productionNote
     };
   });
+}
+
+/**
+ * Orders already allocated to one specific truck session - what the
+ * checker's main Orders tab shows by default, instead of every order in
+ * today's Packing & Production data (that full list is only surfaced via
+ * the separate "Add Order" search, see searchOrders above).
+ *
+ * Joins in each order's live Production status (productionDone/
+ * productionStatus/productionNote - see deriveProductionStatus_) from
+ * today's Packing & Production read, since this list is exactly what
+ * Shane's 2026-09-16 request meant by "an order in dispatch" - orders
+ * already sitting on this truck are precisely where he wants to see
+ * Production still hasn't finished. That read is best-effort here: this
+ * list's whole reason to exist is OrderChecks/ItemChecks (this app's own
+ * data), so a Packing & Production hiccup shouldn't take it down - it just
+ * means every order shows as if Production were done until the next
+ * successful read.
+ */
+function getOrdersForSession(sessionId) {
+  var orderChecks = sheetToObjects_(getSheet_(SHEET_NAMES.ORDER_CHECKS))
+    .filter(function (c) { return c.TruckSessionID === sessionId; });
+  var itemChecks = sheetToObjects_(getSheet_(SHEET_NAMES.ITEM_CHECKS));
+
+  var packingOrdersById = {};
+  try {
+    fetchAllOrdersFromPacking_().forEach(function (o) { packingOrdersById[orderIdKey_(o.orderId)] = o; });
+  } catch (err) {
+    // best-effort - see this function's own comment above
+  }
+
+  return orderChecks.map(function (c) {
+    var siblingItems = itemChecks.filter(function (i) { return i.OrderCheckID === c.ID; });
+    var packingOrder = packingOrdersById[orderIdKey_(c.OrderID)];
+    // Self-heal a snapshot Packing & Production has since outgrown - see
+    // reconcileOrderItemsAgainstPacking_'s own comment for why this can
+    // happen.
+    siblingItems = reconcileOrderItemsAgainstPacking_(c, siblingItems, packingOrder ? packingOrder.items : null);
+    return {
+      orderId: c.OrderID,
+      orderNumber: c.OrderNumber,
+      customer: c.Customer,
+      itemCount: siblingItems.length,
+      // Self-heal a drifted Status before showing it - see
+      // reconcileOrderCheckStatus_'s own comment for why this can happen.
+      status: reconcileOrderCheckStatus_(c, siblingItems),
+      productionDone: packingOrder ? packingOrder.productionDone : true,
+      productionStatus: packingOrder ? packingOrder.productionStatus : 'none',
+      productionNote: packingOrder ? packingOrder.productionNote : ''
+    };
+  });
+}
+
+/**
+ * Admin-facing lookup: "which truck did this order go out on?" - unlike
+ * searchOrders above (today's Packing & Production data only, for putting
+ * an order onto a truck), this searches OrderChecks directly across EVERY
+ * day on record, since the whole point is tracing an order that may have
+ * gone out days ago. Only orders that were actually allocated to some
+ * truck can show up here at all - an order never allocated has no truck to
+ * report. Returns most-recent-first, capped at 50 so a very broad query
+ * (e.g. a common customer name) doesn't dump the entire sheet into the UI.
+ */
+/**
+ * Cross-day order lookup for Customer Care and Admin's "Find an order"
+ * search - matches by order number or customer name substring (either can
+ * be blank if the other narrows things down). An optional dateStr
+ * ('yyyy-MM-dd') restricts to just that one day - Shane's request
+ * (2026-09-28): Customer Care needed a way to check a PREVIOUS day's
+ * deliveries when a customer calls with a query but no order number handy,
+ * not just a free-text search across all history. At least one of
+ * query/dateStr must be given, or nothing is returned (browsing the ENTIRE
+ * order history with no filter at all would be both slow and useless).
+ * With a date picked, the 50-result cap below (there to keep an unscoped
+ * text search across ALL history from dumping huge unrelated results) is
+ * lifted, since a single day's order volume is naturally bounded already;
+ * results are sorted by customer name instead of by date in that case (every
+ * row already shares the same date, so sorting by it would do nothing) -
+ * easier to scan a whole day's list for one customer than a date-sorted one.
+ */
+function findOrderAcrossTrucks(query, dateStr) {
+  var q = String(query || '').trim().toLowerCase();
+  var targetDate = String(dateStr || '').trim();
+  if (!q && !targetDate) return [];
+
+  var checks = sheetToObjects_(getSheet_(SHEET_NAMES.ORDER_CHECKS)).filter(function (c) {
+    if (targetDate && normalizeDateStr_(c.Date) !== targetDate) return false;
+    if (!q) return true;
+    return String(c.OrderNumber).toLowerCase().indexOf(q) !== -1 ||
+           String(c.Customer).toLowerCase().indexOf(q) !== -1;
+  });
+
+  var sessionsById = {};
+  sheetToObjects_(getSheet_(SHEET_NAMES.SESSIONS)).forEach(function (s) { sessionsById[s.ID] = s; });
+
+  var results = checks.map(function (c) {
+    var session = sessionsById[c.TruckSessionID];
+    return {
+      orderId: c.OrderID,
+      orderNumber: c.OrderNumber,
+      customer: c.Customer,
+      date: normalizeDateStr_(c.Date),
+      status: c.Status,
+      truckName: session ? session.TruckName : null,
+      truckStatus: session ? session.Status : null,
+      dispatchedAt: session ? session.DispatchedAt : null,
+      driver: session ? session.Driver : null,
+      driverContacts: session ? session.DriverContacts : null,
+      route: session ? session.Route : null
+    };
+  });
+
+  if (targetDate) {
+    return results.sort(function (a, b) { return String(a.customer).localeCompare(String(b.customer)); });
+  }
+  return results.sort(function (a, b) { return b.date.localeCompare(a.date); }).slice(0, 50);
 }
 
 function getAllOrderChecksToday_() {
@@ -647,54 +1735,188 @@ function getTruckNameForSession_(sessionId) {
 // TRUCK SESSIONS
 // ---------------------------------------------------------------------------
 
-/** Starts a new truck session for today, or resumes today's existing one for that truck. */
+/**
+ * Starts a new truck session for today, or resumes today's IN-PROGRESS one
+ * for that truck, if there is one. Deliberately does NOT resume a session
+ * that's already been marked Dispatched - some trucks run more than one
+ * dispatch a day, so reopening an already-dispatched trip has to be an
+ * explicit choice (see getTruckSessionsForTruckToday + startNewTruckSession
+ * below), not something this silently does on its own.
+ */
 function startTruckSession(truckId, checkerId, checkerName) {
-  var sheet = getSheet_(SHEET_NAMES.SESSIONS);
-  var sessions = sheetToObjects_(sheet);
-  var today = todayString_();
-  var existing = sessions.filter(function (s) { return s.TruckID === truckId && normalizeDateStr_(s.Date) === today; })[0];
-  if (existing) return getTruckSessionState(existing.ID);
+  return getTruckSessionState(getOrCreateTodaysOpenSessionId_(truckId, checkerId, checkerName));
+}
 
+/**
+ * The bare session ID for today's open session on this truck (creating one
+ * if it doesn't have one yet) - the lean subset of what startTruckSession
+ * above does. Traced 2026-10-22 (Shane: dispatch staff finding the Trucks
+ * board slow to assign orders on): assignOrderToTruck used to call
+ * startTruckSession for this, which - on the hot path (truck already has an
+ * open session, true for every drop after the truck's FIRST one each day) -
+ * calls getTruckSessionState, which re-reads the ENTIRE SESSIONS sheet a
+ * SECOND time (startTruckSession had just read it once already, to find
+ * this exact session) plus the entire OrderChecks and Jobs sheets, all of
+ * it immediately discarded since assignOrderToTruck only ever wanted the
+ * session's own ID. Combined with assignOrderToTruck's own OrderChecks read
+ * (checking whether the order is on a DIFFERENT truck already) and
+ * allocateOrderToTruck's own safety-critical OrderChecks re-read (done
+ * under its lock specifically to catch a racing concurrent call - see its
+ * own comment, this one can't be removed), a single drag-and-drop was
+ * reading OrderChecks three times and TruckSessions twice from scratch,
+ * every single time. This cuts that to OrderChecks twice (one avoidable,
+ * one load-bearing) and TruckSessions once, with Jobs not read at all on
+ * this path - startTruckSession itself is untouched, for its other callers
+ * (the checker's own "select a truck" screen) that genuinely need the full
+ * session state this trims away.
+ */
+function findOrCreateTruckSessionId_(truckId, checkerId, checkerName) {
+  return getOrCreateTodaysOpenSessionId_(truckId, checkerId, checkerName);
+}
+
+/**
+ * The actual find-or-create, shared by startTruckSession and
+ * findOrCreateTruckSessionId_ above, wrapped in a per-truck+day lock
+ * (build-2026-10-30 - Shane: a truck ended up with 2 open trips, Trip 2
+ * sitting empty forever, after apparently 2 checkers/dispatchers tapped the
+ * same truck at close to the same moment). Before this, BOTH callers did
+ * their own unlocked "is there already an open session for this truck
+ * today" read-then-append - if two calls for the SAME truck land close
+ * enough together, each one's read can land before either's write, so both
+ * independently conclude "no session yet" and each creates its own row.
+ * Every order dropped afterward lands on whichever row happened to get
+ * created first (findOrCreateTruckSessionId_'s own filter always returns
+ * the first match), leaving the second, later row permanently open with
+ * nothing on it - exactly Truck 4's Trip 2 in Shane's screenshot. Same
+ * shape of bug as the one already fixed for allocateOrderToTruck's own
+ * duplicate-row risk (see its comment) and setItemStatus's order-status
+ * recompute (see its comment) - just never applied to session creation
+ * itself until now. Scoped per truck+day via withTruckSessionCreateLock_,
+ * not script-wide, for the same reason withOrderStatusLock_ is scoped per
+ * order rather than using LockService.getScriptLock() - see setItemStatus's
+ * comment for the live "Request timed out" incident that was traced back to
+ * a script-wide lock serializing every unrelated request behind it.
+ */
+function getOrCreateTodaysOpenSessionId_(truckId, checkerId, checkerName) {
+  return withTruckSessionCreateLock_(truckId, function () {
+    var sessions = sheetToObjects_(getSheet_(SHEET_NAMES.SESSIONS));
+    var today = todayString_();
+    var existing = sessions.filter(function (s) {
+      return s.TruckID === truckId && normalizeDateStr_(s.Date) === today && s.Status === SESSION_STATUS.IN_PROGRESS;
+    })[0];
+    if (existing) return existing.ID;
+
+    return createTruckSession_(truckId, checkerId, checkerName).session.ID;
+  });
+}
+
+/** Always starts a brand-new session, even if this truck already has one (or several) today - used for a truck's 2nd/3rd dispatch of the day. */
+function startNewTruckSession(truckId, checkerId, checkerName) {
+  return createTruckSession_(truckId, checkerId, checkerName);
+}
+
+function createTruckSession_(truckId, checkerId, checkerName) {
   var trucks = sheetToObjects_(getSheet_(SHEET_NAMES.TRUCKS));
   var truck = trucks.filter(function (t) { return t.ID === truckId; })[0];
   if (!truck) throw new Error('Truck not found.');
 
   var id = Utilities.getUuid();
-  appendObject_(sheet, SHEET_HEADERS.TruckSessions, {
-    ID: id, Date: today, TruckID: truckId, TruckName: truck.Name, CheckerID: checkerId,
+  appendObject_(getSheet_(SHEET_NAMES.SESSIONS), SHEET_HEADERS.TruckSessions, {
+    ID: id, Date: todayString_(), TruckID: truckId, TruckName: truck.Name, CheckerID: checkerId,
     CheckerName: checkerName, StartedAt: nowIso_(), TrayCount: '', TrayCountUpdatedAt: '',
     Status: SESSION_STATUS.IN_PROGRESS, DispatchedAt: '', DispatchedBy: '', Driver: '', Route: '',
-    TraySmall: '', TrayMedium: '', TrayLarge: '', TrayOther: ''
+    TraySmall: '', TrayMedium: '', TrayLarge: '', TrayOther: '', DriverContacts: '', NoTraysOnTrip: false,
+    // false (not '') specifically - this is what makes a BRAND-NEW trip
+    // trigger the truck-issues prompt exactly once: startTruckSession only
+    // ever calls createTruckSession_ when there's no existing in-progress
+    // session to resume, so this only ever runs at the true start of a trip.
+    TruckIssuesPrompted: false
   });
   return getTruckSessionState(id);
 }
 
-/** Sets/updates the driver for today's truck session - captured by the checker when loading the truck, since drivers aren't fixed to a particular truck. */
 /**
- * Sets/updates the driver(s) for today's truck session - a truck can carry
- * up to 3 drivers on a given trip. Accepts an array of names and stores
- * them joined into the single Driver column ("Sipho, Thabo") so the sheet
- * schema doesn't need to change - keeps the value easy to read directly in
- * the spreadsheet too. Also accepts a plain string for backward
- * compatibility with any existing caller.
+ * All of today's sessions for one truck (could be none, one, or several if
+ * it's done more than one dispatch today), oldest first, each tagged with
+ * its trip number (1st, 2nd, ...) computed on the fly rather than stored -
+ * lets the checker's truck-selection screen decide whether to resume,
+ * offer a choice, or start fresh.
  */
-function updateSessionDriver(sessionId, driverNames) {
-  var names = (Array.isArray(driverNames) ? driverNames : [driverNames])
-    .map(function (n) { return String(n || '').trim(); })
-    .filter(Boolean)
-    .slice(0, 3);
-  updateRowById_(getSheet_(SHEET_NAMES.SESSIONS), SHEET_HEADERS.TruckSessions, sessionId, {
-    Driver: names.join(', ')
+function getTruckSessionsForTruckToday(truckId) {
+  var today = todayString_();
+  var sessions = sheetToObjects_(getSheet_(SHEET_NAMES.SESSIONS))
+    .filter(function (s) { return s.TruckID === truckId && normalizeDateStr_(s.Date) === today; })
+    .sort(function (a, b) { return String(a.StartedAt).localeCompare(String(b.StartedAt)); });
+  return sessions.map(function (s, i) {
+    var withTripNumber = {};
+    Object.keys(s).forEach(function (k) { withTripNumber[k] = s[k]; });
+    withTripNumber.tripNumber = i + 1;
+    return withTripNumber;
   });
-  return { ok: true };
 }
 
-/** Sets/updates the route for today's truck session - captured by the checker when loading the truck, since a truck's route can change trip to trip. */
-function updateSessionRoute(sessionId, route) {
-  updateRowById_(getSheet_(SHEET_NAMES.SESSIONS), SHEET_HEADERS.TruckSessions, sessionId, {
-    Route: route
+/**
+ * Sets/updates the driver(s), their contact numbers, and the route for
+ * today's truck session in ONE call - a truck can carry up to 4 drivers on
+ * a given trip (the frontend's trip modal offers 3 dropdown slots sourced
+ * from the pre-set Drivers list, plus one freeform slot for a driver who
+ * isn't on that list yet - but this function itself doesn't care which
+ * slot a name/contact pair came from, it just stores whatever it's given,
+ * up to that cap). Names and contacts are two parallel arrays (same index =
+ * same driver) and are stored joined into single columns ("Sipho, Thabo" /
+ * "082 123 4567, 083 234 5678") so the sheet schema doesn't need extra
+ * per-driver columns - keeps the values easy to read directly in the
+ * spreadsheet too.
+ *
+ * This used to be two separate API calls (updateSessionDriver and
+ * updateSessionRoute) that the frontend fired in parallel with
+ * Promise.all. Each did its own unlocked read-modify-write on the same
+ * session row, which is a lost-update race: if both calls read the row
+ * before either had written back, whichever call's write landed LAST would
+ * overwrite the other's field with the stale blank value it had read - so
+ * a driver name that was clearly saved (and shown right there in the UI)
+ * could still be blank in the sheet a moment later. That's how
+ * markTruckDispatched could come back with "Driver name has not been
+ * entered" immediately after the checker entered and saved one. Combining
+ * both fields into one locked read-modify-write closes that race.
+ *
+ * Lock scoped per SESSION (build-2026-10-30; was LockService.getScriptLock(),
+ * one lock for the entire script - see allocateOrderToTruck's comment below
+ * for why that's a problem on a hot/frequent path, and setItemStatus's
+ * comment for the live incident it already caused once). This one isn't as
+ * frequent as allocateOrderToTruck, but it shared the SAME global lock, so
+ * while one checker's trip-details save held it, every unrelated
+ * allocateOrderToTruck call elsewhere queued behind it too - rescoping this
+ * one closes that cross-contention, not just this function's own.
+ */
+function updateSessionTrip(sessionId, driverNames, driverContacts, route) {
+  var namesIn = Array.isArray(driverNames) ? driverNames : [driverNames];
+  var contactsIn = Array.isArray(driverContacts) ? driverContacts : [driverContacts];
+
+  // Pair each name with the contact at the SAME original index (before
+  // dropping blanks), so a blank driver 2 slot doesn't shift driver 3's
+  // number onto driver 2's name.
+  var names = [];
+  var contacts = [];
+  for (var i = 0; i < namesIn.length && names.length < 4; i++) {
+    var name = String(namesIn[i] || '').trim();
+    if (!name) continue;
+    names.push(name);
+    contacts.push(String(contactsIn[i] || '').trim());
+  }
+
+  return withNamedLock_('sessionTripLock_' + sessionId, function () {
+    // DriverContacts is forced to Plain Text before this write - a single
+    // driver's cell here is nothing but digits (e.g. "0821234567"), which
+    // Sheets otherwise silently reinterprets as a Number and strips the
+    // leading 0 from, same as the PIN column bug elsewhere in this file.
+    updateRowById_(getSheet_(SHEET_NAMES.SESSIONS), SHEET_HEADERS.TruckSessions, sessionId, {
+      Driver: names.join(', '),
+      DriverContacts: contacts.join(', '),
+      Route: String(route || '').trim()
+    }, ['DriverContacts']);
+    return { ok: true };
   });
-  return { ok: true };
 }
 
 function getTruckSessionState(sessionId) {
@@ -705,9 +1927,16 @@ function getTruckSessionState(sessionId) {
   var orderChecks = sheetToObjects_(getSheet_(SHEET_NAMES.ORDER_CHECKS))
     .filter(function (c) { return c.TruckSessionID === sessionId; });
 
+  // Included alongside orderChecks so markTruckDispatched's incomplete-work
+  // check covers both in one place - a Job blocks dispatch until Done, the
+  // same hard rule as an order (see the Jobs section further down).
+  var jobs = sheetToObjects_(getSheet_(SHEET_NAMES.JOBS))
+    .filter(function (j) { return j.TruckSessionID === sessionId; });
+
   return {
     session: session,
-    orderChecks: orderChecks
+    orderChecks: orderChecks,
+    jobs: jobs
   };
 }
 
@@ -716,10 +1945,20 @@ function getTruckSessionState(sessionId) {
  * since trays come in Small/Medium/Large, plus an Other catch-all. Replaces the old single TrayCount
  * total - that column is kept as unused legacy for the same
  * non-destructive-migration reason used elsewhere.
+ *
+ * noTrays is the checker's own "this dispatch genuinely carries no fruit
+ * trays" flag (see the SHEET_HEADERS.TruckSessions comment above) - when
+ * true, the four counts are force-blanked regardless of whatever was typed
+ * into them beforehand, so a stale number from before the box was ticked
+ * can never linger and contradict the flag. markTruckDispatched reads this
+ * flag to skip its "tray counts not entered" warning for a trip marked
+ * this way.
  */
-function updateTrayCounts(sessionId, small, medium, large, other) {
+function updateTrayCounts(sessionId, small, medium, large, other, noTrays) {
   updateRowById_(getSheet_(SHEET_NAMES.SESSIONS), SHEET_HEADERS.TruckSessions, sessionId, {
-    TraySmall: small, TrayMedium: medium, TrayLarge: large, TrayOther: other, TrayCountUpdatedAt: nowIso_()
+    TraySmall: noTrays ? '' : small, TrayMedium: noTrays ? '' : medium,
+    TrayLarge: noTrays ? '' : large, TrayOther: noTrays ? '' : other,
+    NoTraysOnTrip: !!noTrays, TrayCountUpdatedAt: nowIso_()
   });
   return { ok: true };
 }
@@ -729,23 +1968,44 @@ function updateTrayCounts(sessionId, small, medium, large, other) {
  * OrderCheck + ItemChecks rows (a snapshot of the order's items at
  * allocation time). This is a deliberate step the checker takes before
  * checking items, separate from just opening/viewing the order. Wrapped in
- * a script lock so two near-simultaneous calls (a double-tap, or a slow
- * request retried) can't create duplicate rows for the same order - it's
- * safe to call again on an order that's already allocated (no-op).
+ * a lock so two near-simultaneous calls (a double-tap, or a slow request
+ * retried) can't create duplicate rows for the same order - it's safe to
+ * call again on an order that's already allocated (no-op).
+ *
+ * Lock scoped per ORDER+day (build-2026-10-30; was
+ * LockService.getScriptLock(), ONE lock for the entire script) - this is
+ * the single busiest write in the app (every drag-and-drop on the Trucks
+ * board ends up here, via assignOrderToTruck below), so a script-wide lock
+ * here means every checker/dispatcher allocating ANY order to ANY truck,
+ * anywhere, queues behind every other one doing the same, however
+ * unrelated - exactly the "Request timed out" shape already traced and
+ * fixed once for setItemStatus (see its own comment for that incident).
+ * That fix was never carried over here even though the same risk applied,
+ * which is almost certainly what a checker meant by the app being "stuck
+ * on loading for a long time" during a busy morning (Shane, 2026-10-30) -
+ * the frontend's own EXTENDED_TIMEOUT_ACTIONS comment already names this
+ * exact lock as the reason this action gets a longer timeout than most.
+ * Scoped per orderId+day via withOrderAllocationLock_ instead, same
+ * CacheService-mutex mechanism as withOrderStatusLock_, so two DIFFERENT
+ * orders never wait on each other - only two calls for the SAME order
+ * (the actual race this exists to prevent) still serialize.
  */
 function allocateOrderToTruck(sessionId, orderId) {
-  var lock = LockService.getScriptLock();
-  lock.waitLock(10000);
-  try {
+  return withOrderAllocationLock_(orderId, function () {
     var orderChecksSheet = getSheet_(SHEET_NAMES.ORDER_CHECKS);
     var today = todayString_();
     var existingChecks = sheetToObjects_(orderChecksSheet);
-    // String(...) on both sides: OrderID round-trips through this sheet as a
-    // raw cell value, and Sheets silently stores a numeric-looking value
-    // (e.g. an OrderID that's just digits) as a real Number once it's been
-    // appended - a bare === against the always-string orderId param would
-    // then never match, even for the row this exact call just wrote.
-    var existing = existingChecks.filter(function (c) { return String(c.OrderID) === String(orderId) && normalizeDateStr_(c.Date) === today; })[0];
+    // orderIdKey_(...) on both sides (build-2026-10-30, was a bare
+    // String(...) === String(...)): OrderID round-trips through this sheet
+    // as a raw cell value, and Sheets can silently store a numeric-looking
+    // value (e.g. an OrderID that's just digits, possibly with a leading
+    // zero) as a real Number once it's been appended - a bare String(...)
+    // comparison against the always-string orderId param could then never
+    // match, even for the row this exact call just wrote, risking a
+    // duplicate allocation of the same order. See orderIdKey_'s own
+    // comment for the full story (traced from a Dashboard "Outstanding"
+    // display bug that turned out to be this same root cause).
+    var existing = existingChecks.filter(function (c) { return orderIdKey_(c.OrderID) === orderIdKey_(orderId) && normalizeDateStr_(c.Date) === today; })[0];
     if (existing) return { ok: true, alreadyAllocated: true };
 
     var orders = readTodaysOrdersFromPacking_();
@@ -756,22 +2016,469 @@ function allocateOrderToTruck(sessionId, orderId) {
     appendObject_(orderChecksSheet, SHEET_HEADERS.OrderChecks, {
       ID: orderCheckId, TruckSessionID: sessionId, Date: today, OrderID: order.orderId,
       OrderNumber: order.orderNumber, Customer: order.customer, DeliveryDate: order.deliveryDate,
-      Status: ORDER_STATUS.PENDING, StartedAt: nowIso_(), CompletedAt: ''
+      Status: ORDER_STATUS.PENDING, StartedAt: nowIso_(), CompletedAt: '',
+      RequiresCoa: !!order.requiresCoa, CoaConfirmed: false, CoaConfirmedBy: '', CoaConfirmedAt: ''
     });
 
     var itemChecksSheet = getSheet_(SHEET_NAMES.ITEM_CHECKS);
-    order.items.forEach(function (item) {
-      appendObject_(itemChecksSheet, SHEET_HEADERS.ItemChecks, {
-        ID: Utilities.getUuid(), OrderCheckID: orderCheckId, TruckSessionID: sessionId, OrderID: order.orderId,
-        ItemKey: item.itemKey, ProductDescription: item.description, Qty: item.qty, Unit: item.unit,
-        Status: ITEM_STATUS.PENDING, NoStockReasonID: '', NoStockReason: '', CheckedBy: '', CheckedAt: ''
-      });
-    });
+    try {
+      appendObjects_(itemChecksSheet, SHEET_HEADERS.ItemChecks, order.items.map(function (item) {
+        return {
+          ID: Utilities.getUuid(), OrderCheckID: orderCheckId, TruckSessionID: sessionId, OrderID: order.orderId,
+          ItemKey: item.itemKey, ProductDescription: item.description, Qty: item.qty, Unit: item.unit,
+          Status: ITEM_STATUS.PENDING, NoStockReasonID: '', NoStockReason: '', CheckedBy: '', CheckedAt: '', PackedQty: ''
+        };
+      }));
+    } catch (e) {
+      // The OrderCheck row above already exists at this point - if the items
+      // write throws, roll it back rather than leaving an OrderCheck with
+      // zero items sitting in the sheet. Without this, the "already
+      // allocated" check at the top of this function would treat that
+      // half-finished row as done and permanently refuse to ever write its
+      // items, since items are only ever written once, right here.
+      deleteRowById_(orderChecksSheet, orderCheckId);
+      throw e;
+    }
 
     return { ok: true, alreadyAllocated: false };
-  } finally {
-    lock.releaseLock();
+  });
+}
+
+/**
+ * The Trucks board's drag-and-drop entry point (Dispatch Manager/Admin
+ * only, enforced in the frontend nav same as every other role split in
+ * this app - see the comment on API_ACTIONS). Assigns an order onto a
+ * truck's currently open trip today, creating that trip first if the
+ * truck doesn't have one yet - including the case where the truck's only
+ * trip(s) today have already dispatched, which starts a fresh trip, same
+ * as "Start a new dispatch" elsewhere in the app.
+ *
+ * If the order is currently sitting on a DIFFERENT truck's open trip, this
+ * MOVES it: unallocates it from there first (its checking starts over from
+ * Pending on the new truck, same as the existing manual Unallocate flow),
+ * then allocates it fresh here. Refuses to move an order off a truck
+ * that's already dispatched - that truck has physically left with it -
+ * mirroring unallocateOrder's own guard. Dropping an order back onto the
+ * SAME truck it's already on is a harmless no-op.
+ */
+function assignOrderToTruck(truckId, orderId, checkerId, checkerName) {
+  var today = todayString_();
+  var existing = sheetToObjects_(getSheet_(SHEET_NAMES.ORDER_CHECKS))
+    .filter(function (c) { return orderIdKey_(c.OrderID) === orderIdKey_(orderId) && normalizeDateStr_(c.Date) === today; })[0];
+
+  if (existing) {
+    var existingSession = sheetToObjects_(getSheet_(SHEET_NAMES.SESSIONS))
+      .filter(function (s) { return s.ID === existing.TruckSessionID; })[0];
+    if (existingSession && String(existingSession.TruckID) === String(truckId)) {
+      return { ok: true, alreadyAssigned: true };
+    }
+    if (existingSession && existingSession.Status === SESSION_STATUS.DISPATCHED) {
+      throw new Error('Can\'t move this order - truck "' + existingSession.TruckName + '" has already dispatched with it.');
+    }
+    // existing/existingSession were already looked up just above to decide
+    // whether this move is even allowed - reuse them here instead of
+    // calling unallocateOrder(orderId), which would redundantly re-read
+    // OrderChecks+TruckSessions from scratch to rediscover the exact same
+    // check/session this function already has in hand.
+    unallocateOrderCheck_(existing, existingSession);
   }
+
+  // findOrCreateTruckSessionId_, not the heavier startTruckSession - see its
+  // own comment for why: this call only ever needs the session's bare ID,
+  // and it runs on every single drag-and-drop, not just occasionally.
+  var sessionId = findOrCreateTruckSessionId_(truckId, checkerId, checkerName);
+  return allocateOrderToTruck(sessionId, orderId);
+}
+
+/**
+ * Everything the Trucks board needs in one call: every active truck (with
+ * whatever's already assigned to its open trip today, plus a read-only
+ * look at anything on an already-dispatched trip so the board isn't
+ * misleadingly empty for a truck that's already gone out) on one side, and
+ * every one of today's Packing & Production orders that isn't assigned to
+ * ANY truck yet on the other, PLUS (2026-10-26) today's dispatch timeline
+ * and per-dispatcher scorecard - see buildDispatchTimelineAndScorecard_'s
+ * own comment - and each truck's live openTripPackStartAt/the board-wide
+ * packWarningThresholdMinutes, so the frontend can flag a truck that's
+ * been packing past target before it even dispatches (see the comment on
+ * openTripPackStartAt in the boardTrucks.map below). Folded into this
+ * same call/cache rather than a separate API
+ * action since it's shown on this same screen - no point paying for a 2nd
+ * round trip (and a 2nd Apps Script redirect) just to show it. This only
+ * reads the current state - dragging an order calls assignOrderToTruck
+ * (onto a truck) or unallocateOrder (back to Unassigned), then the board is
+ * simply reloaded.
+ *
+ * Cached for TRUCK_BOARD_CACHE_TTL_SECONDS via CacheService - added
+ * 2026-09-16 since several Dispatch Managers/checkers can have the board
+ * open at once, each polling it every 15s (see BOARD_POLL_INTERVAL_MS in
+ * index.html). Without this, every one of those polls independently
+ * re-reads the full OrderChecks and TruckSessions sheets, so 5 people
+ * watching the board is 5x the Sheets reads for what's overwhelmingly the
+ * same answer within any given 15s window. Same tradeoff-and-pattern as
+ * fetchAllOrdersFromPacking_ above (a short-lived cached read, corrupt/
+ * oversized values just fall through to a real fetch rather than erroring)
+ * - a drag-and-drop's own optimistic client-side update (see the board's
+ * assignOrderToTruck/renderTruckBoard handling in index.html) is what
+ * makes the ACTING checker's own screen feel instant regardless of this
+ * cache; this only affects how quickly a DIFFERENT viewer's next poll
+ * picks up someone else's change.
+ */
+function getTruckAssignmentBoard() {
+  var cache = CacheService.getScriptCache();
+  var cacheKey = 'truckBoard';
+  var cached = cache.get(cacheKey);
+  if (cached) {
+    try {
+      return JSON.parse(cached);
+    } catch (err) {
+      // Corrupt/unexpected cache value - fall through and rebuild for real.
+    }
+  }
+
+  var board = getTruckAssignmentBoardUncached_();
+
+  try {
+    cache.put(cacheKey, JSON.stringify(board), TRUCK_BOARD_CACHE_TTL_SECONDS);
+  } catch (err) {
+    // CacheService rejects values over ~100KB - on a big enough board this
+    // can throw (a single truck with 100+ orders allocated has already
+    // happened live). Caching is a speed optimization, not a correctness
+    // requirement, so just skip caching this time rather than let that
+    // break the actual read.
+  }
+
+  return board;
+}
+
+/**
+ * Builds today's dispatch timeline (every truck session actually dispatched
+ * today, newest first) and the per-dispatcher scorecard built from it -
+ * Shane's 2026-10-26 request, to encourage dispatchers to get a truck out
+ * quickly. The score is the "pack-to-dispatch" gap: the time between a
+ * truck's trip actually starting and the moment it was marked Dispatched.
+ * "Started" is the FIRST order being dropped onto the truck (OrderChecks.
+ * StartedAt, set the instant allocateOrderToTruck creates that row) when it
+ * has any orders at all; for a trip with NO orders on it - a trays-only or
+ * Jobs-only run, which Shane confirmed is a real, common case (the two
+ * trucks showing no gap on 2026-10-26 turned out to be exactly this, not a
+ * bug) - there's no "first order" to measure from, so it falls back to the
+ * truck session's own StartedAt (when the trip itself was opened) instead.
+ * Every dispatched trip always has a session StartedAt, so this fallback
+ * means every trip gets a real, countable gap - never a silent null just
+ * for having no orders. Changed 2026-10-26 per Shane, twice the same day:
+ * first from the truck's LAST order/job finishing (the "ready" moment) to
+ * its FIRST order starting (time the whole pack-and-dispatch process, not
+ * just the tail end), then this session-StartedAt fallback once he pointed
+ * out trays-only trucks were being left out entirely. (Jobs themselves are
+ * still never part of the start time when orders DO exist on the trip -
+ * only the no-orders-at-all fallback reaches for the session's own
+ * StartedAt.)
+ *
+ * Split out as its own pure function (sessionsToday/orderChecksToday/
+ * jobsToday/tripNumberBySessionId are exactly what
+ * getTruckAssignmentBoardUncached_ already has in hand, no extra sheet
+ * reads needed beyond the one new Jobs read added there) so it's unit-
+ * testable on its own, same pattern as deriveOrderStatus_/
+ * deriveProductionStatus_ elsewhere in this file. jobsToday is still
+ * accepted (and still read upstream) even though it's unused here now, so
+ * the call site/signature doesn't need to change again if a future ask
+ * brings jobs back into the calculation.
+ */
+function buildDispatchTimelineAndScorecard_(sessionsToday, orderChecksToday, jobsToday, tripNumberBySessionId) {
+  var orderChecksBySessionId = {};
+  orderChecksToday.forEach(function (c) {
+    if (!orderChecksBySessionId[c.TruckSessionID]) orderChecksBySessionId[c.TruckSessionID] = [];
+    orderChecksBySessionId[c.TruckSessionID].push(c);
+  });
+
+  function firstOrderStartAtMsForSession_(sessionId) {
+    var timestamps = [];
+    (orderChecksBySessionId[sessionId] || []).forEach(function (c) { if (c.StartedAt) timestamps.push(new Date(c.StartedAt).getTime()); });
+    if (timestamps.length === 0) return null;
+    return Math.min.apply(null, timestamps);
+  }
+
+  var dispatchTimeline = sessionsToday
+    .filter(function (s) { return s.Status === SESSION_STATUS.DISPATCHED && s.DispatchedAt; })
+    .map(function (s) {
+      // No orders on this trip at all (trays-only/Jobs-only) - fall back to
+      // the session's own StartedAt so it still gets a real, timed gap
+      // instead of a silent "-".
+      var startAtMs = firstOrderStartAtMsForSession_(s.ID);
+      if (startAtMs === null && s.StartedAt) startAtMs = new Date(s.StartedAt).getTime();
+      var dispatchedAtMs = new Date(s.DispatchedAt).getTime();
+      // Floored at 0 - clock skew between two near-simultaneous writes
+      // shows as instant rather than a confusing negative number.
+      var packToDispatchSeconds = startAtMs !== null ? Math.max(0, Math.round((dispatchedAtMs - startAtMs) / 1000)) : null;
+      return {
+        truckSessionId: s.ID, truckId: s.TruckID, truckName: s.TruckName,
+        tripNumber: tripNumberBySessionId[s.ID] || 1,
+        dispatchedAt: s.DispatchedAt, dispatchedBy: s.DispatchedBy || '',
+        packToDispatchSeconds: packToDispatchSeconds
+      };
+    })
+    .sort(function (a, b) { return new Date(b.dispatchedAt) - new Date(a.dispatchedAt); });
+
+  var byDispatcher = {};
+  dispatchTimeline.forEach(function (entry) {
+    var name = entry.dispatchedBy || 'Unknown';
+    if (!byDispatcher[name]) byDispatcher[name] = { dispatcherName: name, trucksDispatched: 0, gapSecondsTotal: 0, gapSecondsCount: 0, trucks: [] };
+    byDispatcher[name].trucksDispatched++;
+    if (entry.packToDispatchSeconds !== null) {
+      byDispatcher[name].gapSecondsTotal += entry.packToDispatchSeconds;
+      byDispatcher[name].gapSecondsCount++;
+    }
+    // Kept so the Scorecard can drill down into exactly which trucks make
+    // up a dispatcher's average, not just the number itself - same
+    // dispatchTimeline entry shape the Dashboard's own timeline card uses,
+    // minus dispatchedBy (redundant once it's already grouped by name).
+    // dispatchTimeline is already sorted newest-first, so each
+    // dispatcher's own trucks list comes out newest-first too.
+    byDispatcher[name].trucks.push({
+      truckSessionId: entry.truckSessionId, truckName: entry.truckName, tripNumber: entry.tripNumber,
+      dispatchedAt: entry.dispatchedAt, packToDispatchSeconds: entry.packToDispatchSeconds
+    });
+  });
+  var scorecard = Object.keys(byDispatcher).map(function (name) {
+    var d = byDispatcher[name];
+    return {
+      dispatcherName: d.dispatcherName,
+      trucksDispatched: d.trucksDispatched,
+      avgPackToDispatchSeconds: d.gapSecondsCount > 0 ? Math.round(d.gapSecondsTotal / d.gapSecondsCount) : null,
+      trucks: d.trucks
+    };
+  }).sort(function (a, b) {
+    // Ranked fastest average first. A dispatcher with no computable average
+    // (every truck they sent out had no orders to time against) sorts
+    // LAST, not first - an undefined average is not "infinitely fast", and
+    // showing them at the top would misrepresent a data gap as a win.
+    // Among two such dispatchers, more trucks dispatched ranks higher.
+    if (a.avgPackToDispatchSeconds === null && b.avgPackToDispatchSeconds === null) return b.trucksDispatched - a.trucksDispatched;
+    if (a.avgPackToDispatchSeconds === null) return 1;
+    if (b.avgPackToDispatchSeconds === null) return -1;
+    return a.avgPackToDispatchSeconds - b.avgPackToDispatchSeconds;
+  });
+
+  return { dispatchTimeline: dispatchTimeline, scorecard: scorecard };
+}
+
+/** The real (uncached) Trucks board read - see getTruckAssignmentBoard above. */
+function getTruckAssignmentBoardUncached_() {
+  var trucks = listTrucks(true);
+  var today = todayString_();
+  var todaysOrders = readTodaysOrdersFromPacking_();
+  // Keyed lookup so orders already allocated to a truck (built from
+  // OrderChecks below, which doesn't carry Production status of its own)
+  // can still show the same live productionDone/productionStatus/
+  // productionNote Shane asked for - see the ordersByTruckId.push below.
+  var todaysOrdersById = {};
+  todaysOrders.forEach(function (o) { todaysOrdersById[orderIdKey_(o.orderId)] = o; });
+
+  var orderChecksToday = sheetToObjects_(getSheet_(SHEET_NAMES.ORDER_CHECKS))
+    .filter(function (c) { return normalizeDateStr_(c.Date) === today; });
+  var checksByOrderId = {};
+  orderChecksToday.forEach(function (c) { checksByOrderId[orderIdKey_(c.OrderID)] = c; });
+
+  // Only read for the dispatch timeline/scorecard below (buildDispatchTimelineAndScorecard_) -
+  // a Job's DoneAt can be the thing that actually makes a truck "ready" to
+  // dispatch, same as an order's CompletedAt.
+  var jobsToday = sheetToObjects_(getSheet_(SHEET_NAMES.JOBS))
+    .filter(function (j) { return normalizeDateStr_(j.Date) === today; });
+
+  var sessionsToday = sheetToObjects_(getSheet_(SHEET_NAMES.SESSIONS))
+    .filter(function (s) { return normalizeDateStr_(s.Date) === today; })
+    // Chronological, same as getTrucksForSelection - so "Trip 1"/"Trip 2"
+    // numbering matches between the checker's truck list and this board.
+    .sort(function (a, b) { return String(a.StartedAt).localeCompare(String(b.StartedAt)); });
+  var sessionsById = {};
+  sessionsToday.forEach(function (s) { sessionsById[s.ID] = s; });
+
+  // Which trip (1st, 2nd, ...) each session is, per truck - same ordinal a
+  // truck's own `trips` array below numbers them, computed once here so
+  // each order can be tagged with it too (see ordersByTruckId just below).
+  // sessionsToday is already sorted chronologically, so counting sessions
+  // per truck in order as they're walked gives the same numbering as the
+  // truckSessionsToday.map(...,tripNumber: i+1) done per-truck further down.
+  var tripNumberBySessionId = {};
+  var tripCountByTruckId = {};
+  sessionsToday.forEach(function (s) {
+    tripCountByTruckId[s.TruckID] = (tripCountByTruckId[s.TruckID] || 0) + 1;
+    tripNumberBySessionId[s.ID] = tripCountByTruckId[s.TruckID];
+  });
+
+  var ordersByTruckId = {};
+  orderChecksToday.forEach(function (c) {
+    var session = sessionsById[c.TruckSessionID];
+    if (!session) return;
+    if (!ordersByTruckId[session.TruckID]) ordersByTruckId[session.TruckID] = [];
+    var packingOrder = todaysOrdersById[orderIdKey_(c.OrderID)];
+    ordersByTruckId[session.TruckID].push({
+      orderId: c.OrderID, orderNumber: c.OrderNumber, customer: c.Customer, status: c.Status,
+      truckDispatched: session.Status === SESSION_STATUS.DISPATCHED,
+      // Which of the truck's trips today this order was actually checked
+      // against - lets the board show trip 1's orders separately from trip
+      // 2's, instead of pooling everything under one truck. Kept as a plain
+      // field on the existing flat order object (not nested under `trips`)
+      // so the drag-and-drop code, which reads/mutates this same array
+      // directly, needs no changes at all.
+      tripNumber: tripNumberBySessionId[session.ID],
+      // Live Production status (see deriveProductionStatus_) - an order
+      // already on a truck is exactly where Shane wants to see Production
+      // still hasn't finished, per his 2026-09-16 request. Defaults to
+      // "done" if this order has somehow dropped out of today's Packing &
+      // Production read (e.g. its DeliveryDate changed) - never invent a
+      // false warning for an order this board can't currently see.
+      productionDone: packingOrder ? packingOrder.productionDone : true,
+      productionStatus: packingOrder ? packingOrder.productionStatus : 'none',
+      productionNote: packingOrder ? packingOrder.productionNote : ''
+    });
+  });
+
+  var boardTrucks = trucks.map(function (t) {
+    var truckSessionsToday = sessionsToday.filter(function (s) { return s.TruckID === t.ID; });
+    var allDispatchedToday = truckSessionsToday.length > 0 && truckSessionsToday.every(function (s) { return s.Status === SESSION_STATUS.DISPATCHED; });
+    // dispatchedAt/dispatchedBy below is still just the MOST RECENT dispatch
+    // (kept for anything that only wants the one-line summary), but `trips`
+    // now carries every trip today individually so the board can show trip 1
+    // vs trip 2 separately instead of collapsing them - see the matching
+    // `trips` array on getTrucksForSelection. Deliberately NOT nesting
+    // `orders` under each trip here (unlike getTrucksForSelection) - the
+    // existing drag-and-drop code reads and mutates the flat `orders` list
+    // below directly, and re-keying that by trip isn't worth the risk of
+    // breaking a drag/drop flow that already works.
+    var latestDispatchedSession = null;
+    if (allDispatchedToday) {
+      latestDispatchedSession = truckSessionsToday.reduce(function (latest, s) {
+        return (!latest || new Date(s.DispatchedAt) > new Date(latest.DispatchedAt)) ? s : latest;
+      }, null);
+    }
+    // Live 30-minute pack-time warning (Shane, 2026-10-26): the earliest
+    // StartedAt among the CURRENT open trip's orders - i.e. when the first
+    // order was actually dropped onto the truck this trip, same moment
+    // buildDispatchTimelineAndScorecard_ measures from once the truck
+    // dispatches. Only looks at the open (In Progress) session, never an
+    // already-dispatched earlier trip today. If that open trip has no
+    // orders on it at all - a trays-only or Jobs-only run, same real case
+    // buildDispatchTimelineAndScorecard_ falls back for - falls back to the
+    // session's own StartedAt, so a trays-only truck still gets a live
+    // timer (Shane confirmed this is common, not an edge case to skip).
+    var openSession = truckSessionsToday.filter(function (s) { return s.Status === SESSION_STATUS.IN_PROGRESS; })[0];
+    var openTripPackStartAt = '';
+    if (openSession) {
+      var openSessionOrderStartMs = orderChecksToday
+        .filter(function (c) { return c.TruckSessionID === openSession.ID && c.StartedAt; })
+        .map(function (c) { return new Date(c.StartedAt).getTime(); });
+      if (openSessionOrderStartMs.length > 0) {
+        openTripPackStartAt = new Date(Math.min.apply(null, openSessionOrderStartMs)).toISOString();
+      } else if (openSession.StartedAt) {
+        openTripPackStartAt = openSession.StartedAt;
+      }
+    }
+    return {
+      truckId: t.ID, name: t.Name, registration: t.Registration, type: t.Type,
+      hasOpenTrip: truckSessionsToday.some(function (s) { return s.Status === SESSION_STATUS.IN_PROGRESS; }),
+      allDispatchedToday: allDispatchedToday,
+      dispatchedAt: latestDispatchedSession ? latestDispatchedSession.DispatchedAt : '',
+      dispatchedBy: latestDispatchedSession ? latestDispatchedSession.DispatchedBy : '',
+      openTripPackStartAt: openTripPackStartAt,
+      trips: truckSessionsToday.map(function (s, i) {
+        return {
+          tripNumber: i + 1, status: s.Status, driver: s.Driver || '',
+          driverContacts: s.DriverContacts || '', route: s.Route || '',
+          // Who's actually checking/dispatching this trip (the signed-in
+          // Checker/Dispatch Manager who started it, TruckSessions.
+          // CheckerName) - NOT the truck's own driver. Shane noticed the
+          // Trucks board showed driver but no checker/dispatcher name at
+          // all, especially awkward on an overdue card where knowing WHO
+          // to go check on matters.
+          checkerName: s.CheckerName || '',
+          dispatchedAt: s.DispatchedAt || '', dispatchedBy: s.DispatchedBy || ''
+        };
+      }),
+      orders: ordersByTruckId[t.ID] || []
+    };
+  });
+
+  // Order NUMBERS (not IDs) belonging to a check already DISPATCHED today -
+  // used below so an order that got amended in Sage AFTER it was already
+  // checked and dispatched doesn't reappear as a plain, draggable
+  // Unassigned chip under a brand-new OrderID. Reported 2026-10-31
+  // (INV0141104, Truck 19): Packing & Production's Sage importer
+  // deliberately "auto-replaces" an amended invoice with a fresh OrderID
+  // (Shane's own 2026-10-29 Sage go-live decision), same order number -
+  // Dispatch's OrderID-based matching has no way to know the old and new
+  // IDs are the same real-world order, so the order looked simultaneously
+  // dispatched (under the old ID, correctly) and unassigned (under the
+  // new one). Deliberately scoped to DISPATCHED checks only, never an
+  // order still on an open (In Progress) trip - silently hiding THAT
+  // would risk a checker finishing a stale checklist with no way to
+  // notice Sage already changed the order out from under them; only a
+  // truck that's already gone gets this "assume it's handled" treatment.
+  var dispatchedOrderNumbersToday = {};
+  orderChecksToday.forEach(function (c) {
+    var session = sessionsById[c.TruckSessionID];
+    if (session && session.Status === SESSION_STATUS.DISPATCHED) {
+      dispatchedOrderNumbersToday[String(c.OrderNumber || '').trim()] = true;
+    }
+  });
+
+  var unassignedOrders = todaysOrders
+    .filter(function (o) { return !checksByOrderId[orderIdKey_(o.orderId)]; })
+    .filter(function (o) { return !dispatchedOrderNumbersToday[String(o.orderNumber || '').trim()]; })
+    .map(function (o) {
+      return {
+        orderId: o.orderId, orderNumber: o.orderNumber, customer: o.customer, itemCount: o.items.length,
+        productionDone: o.productionDone, productionStatus: o.productionStatus, productionNote: o.productionNote
+      };
+    });
+
+  // Only `scorecard` is actually used from this - the Dispatch Timeline
+  // itself moved to the Dashboard (build-2026-10-26-04, Shane's request),
+  // which computes its own copy of it from getDashboardForDate instead (see
+  // that function's own comment). Still calling this same helper here for
+  // its scorecard half costs nothing extra to compute either part.
+  var timelineAndScorecard = buildDispatchTimelineAndScorecard_(sessionsToday, orderChecksToday, jobsToday, tripNumberBySessionId);
+
+  return {
+    trucks: boardTrucks, unassignedOrders: unassignedOrders,
+    scorecard: timelineAndScorecard.scorecard,
+    packWarningThresholdMinutes: PACK_WARNING_THRESHOLD_MINUTES
+  };
+}
+
+/**
+ * Lightweight poll target for the workspace screen's own 30-minute pack
+ * warning badge (Shane, 2026-10-27: "if the checker is already clicked on
+ * the truck... is there any visual notification" - there wasn't; the
+ * warning only ever lived on the Trucks board, which stops polling the
+ * instant a checker navigates into a truck's workspace - see showScreen's
+ * own comment in index.html). Deliberately NOT the full
+ * getTruckAssignmentBoard (every truck + Unassigned Orders) - a checker
+ * sitting inside one truck's workspace only ever needs THIS session's own
+ * timer, polled independently while that screen is open. Mirrors the exact
+ * same openTripPackStartAt logic as getTruckAssignmentBoardUncached_
+ * (earliest order StartedAt on the current open trip, falling back to the
+ * session's own StartedAt for a trays-only/Jobs-only run) so the two
+ * screens can never disagree, and returns an empty openTripPackStartAt
+ * whenever the session isn't actually open (e.g. editing an already-
+ * dispatched trip) - same as the board does for any non-open trip.
+ */
+function getTruckPackTimerInfo(sessionId) {
+  var session = sheetToObjects_(getSheet_(SHEET_NAMES.SESSIONS)).filter(function (s) { return s.ID === sessionId; })[0];
+  if (!session || session.Status !== SESSION_STATUS.IN_PROGRESS) {
+    return { openTripPackStartAt: '', packWarningThresholdMinutes: PACK_WARNING_THRESHOLD_MINUTES };
+  }
+  var orderStartMs = sheetToObjects_(getSheet_(SHEET_NAMES.ORDER_CHECKS))
+    .filter(function (c) { return c.TruckSessionID === sessionId && c.StartedAt; })
+    .map(function (c) { return new Date(c.StartedAt).getTime(); });
+  var openTripPackStartAt = '';
+  if (orderStartMs.length > 0) {
+    openTripPackStartAt = new Date(Math.min.apply(null, orderStartMs)).toISOString();
+  } else if (session.StartedAt) {
+    openTripPackStartAt = session.StartedAt;
+  }
+  return { openTripPackStartAt: openTripPackStartAt, packWarningThresholdMinutes: PACK_WARNING_THRESHOLD_MINUTES };
 }
 
 /**
@@ -779,6 +2486,14 @@ function allocateOrderToTruck(sessionId, orderId) {
  * hasn't been allocated to a truck yet (see allocateOrderToTruck above),
  * returns { allocated: false, orderSummary } so the UI can show an
  * "Allocate to This Truck" step before any items can be checked.
+ *
+ * If the order is already allocated to a DIFFERENT truck's session, this
+ * deliberately does NOT hand back its items/orderCheck - only the read-only
+ * orderSummary plus allocatedElsewhere/truckName - so a checker on this
+ * truck can see who has it but can't tick off items that actually belong to
+ * the other truck's checklist. The only way forward is to unallocate it
+ * first (see unallocateOrder below), which clears its checking progress, and
+ * then allocate it fresh on this truck - the check process starts over.
  */
 function getOrderForChecking(sessionId, orderId) {
   var orderChecksSheet = getSheet_(SHEET_NAMES.ORDER_CHECKS);
@@ -786,85 +2501,528 @@ function getOrderForChecking(sessionId, orderId) {
   var existingChecks = sheetToObjects_(orderChecksSheet);
   // See the matching comment in allocateOrderToTruck - OrderID can come back
   // from the sheet as a Number even though orderId here is always a string.
-  var orderCheck = existingChecks.filter(function (c) { return String(c.OrderID) === String(orderId) && normalizeDateStr_(c.Date) === today; })[0];
+  var orderCheck = existingChecks.filter(function (c) { return orderIdKey_(c.OrderID) === orderIdKey_(orderId) && normalizeDateStr_(c.Date) === today; })[0];
+
+  // Production status is read live off today's Packing & Production data on
+  // every call, never snapshotted the way RequiresCoa is onto the
+  // OrderChecks row at allocation time - the whole point of Shane's
+  // 2026-09-16 request is seeing Production finish WHILE an order already
+  // sits allocated on a truck, so a one-time snapshot from allocation would
+  // go stale the moment Production made more progress. Best-effort: this
+  // screen's real job is order checking, not Production status, so a
+  // Packing & Production hiccup shouldn't block it either.
+  var packingOrder = null;
+  try {
+    packingOrder = readTodaysOrdersFromPacking_().filter(function (o) { return o.orderId === orderId; })[0] || null;
+  } catch (err) {
+    // best-effort - see comment above
+  }
+  var productionFields = packingOrder
+    ? { productionDone: packingOrder.productionDone, productionStatus: packingOrder.productionStatus, productionNote: packingOrder.productionNote }
+    : { productionDone: true, productionStatus: 'none', productionNote: '' };
 
   if (!orderCheck) {
-    var orders = readTodaysOrdersFromPacking_();
-    var order = orders.filter(function (o) { return o.orderId === orderId; })[0];
+    var order = packingOrder;
     if (!order) throw new Error('Order not found in today\'s Packing & Production data.');
     return {
-      allocated: false,
-      orderSummary: { orderId: order.orderId, orderNumber: order.orderNumber, customer: order.customer, itemCount: order.items.length },
+      allocated: false, allocatedElsewhere: false, truckName: null,
+      orderSummary: {
+        orderId: order.orderId, orderNumber: order.orderNumber, customer: order.customer, itemCount: order.items.length,
+        productionDone: productionFields.productionDone, productionStatus: productionFields.productionStatus, productionNote: productionFields.productionNote
+      },
       orderCheck: null, items: [], warning: null
     };
   }
 
-  var warning = orderCheck.TruckSessionID !== sessionId
-    ? 'This order was already allocated to truck "' + getTruckNameForSession_(orderCheck.TruckSessionID) + '".'
-    : null;
+  var allocatedElsewhere = orderCheck.TruckSessionID !== sessionId;
+  var truckName = allocatedElsewhere ? getTruckNameForSession_(orderCheck.TruckSessionID) : null;
+  var warning = allocatedElsewhere ? 'This order was already allocated to truck "' + truckName + '".' : null;
+
+  if (allocatedElsewhere) {
+    return {
+      allocated: true, allocatedElsewhere: true, truckName: truckName,
+      orderSummary: {
+        orderId: orderCheck.OrderID, orderNumber: orderCheck.OrderNumber, customer: orderCheck.Customer, itemCount: null,
+        productionDone: productionFields.productionDone, productionStatus: productionFields.productionStatus, productionNote: productionFields.productionNote
+      },
+      orderCheck: null, items: [], warning: warning
+    };
+  }
 
   var items = sheetToObjects_(getSheet_(SHEET_NAMES.ITEM_CHECKS))
     .filter(function (i) { return i.OrderCheckID === orderCheck.ID; });
 
-  return { allocated: true, orderSummary: null, orderCheck: orderCheck, items: items, warning: warning };
+  // Self-heal a snapshot Packing & Production has since outgrown - see
+  // reconcileOrderItemsAgainstPacking_'s own comment for why this can
+  // happen. packingOrder was already read live, just above, for the
+  // productionStatus fields - reused here rather than reading it twice.
+  items = reconcileOrderItemsAgainstPacking_(orderCheck, items, packingOrder ? packingOrder.items : null);
+
+  // Self-heal a drifted Status before showing it - see
+  // reconcileOrderCheckStatus_'s own comment for why this can happen. The
+  // Done button's own enabled state is derived client-side straight from
+  // these same items (so it was never actually affected by the drift), but
+  // orderCheck.Status itself still needs correcting here since it's what
+  // the checker's Orders list and markTruckDispatched's dispatch-block
+  // check both go by.
+  orderCheck.Status = reconcileOrderCheckStatus_(orderCheck, items);
+
+  return {
+    allocated: true, allocatedElsewhere: false, truckName: null, orderSummary: null, orderCheck: orderCheck, items: items, warning: null,
+    productionDone: productionFields.productionDone, productionStatus: productionFields.productionStatus, productionNote: productionFields.productionNote
+  };
 }
 
-function setItemStatus(itemCheckId, status, noStockReasonId, checkerName) {
-  // Locked because this reads all sibling items to recompute the parent
-  // order's status, then writes it back - two items marked in quick
-  // succession (fast taps, or a retried request) could otherwise race and
-  // one recompute could overwrite the other with a stale status.
-  var lock = LockService.getScriptLock();
-  lock.waitLock(10000);
-  try {
-    var itemSheet = getSheet_(SHEET_NAMES.ITEM_CHECKS);
-    var reasonText = '';
-    if (status === ITEM_STATUS.NO_STOCK) {
-      var reasons = sheetToObjects_(getSheet_(SHEET_NAMES.REASONS));
-      var reason = reasons.filter(function (r) { return r.ID === noStockReasonId; })[0];
-      reasonText = reason ? reason.Reason : '';
-    }
-    updateRowById_(itemSheet, SHEET_HEADERS.ItemChecks, itemCheckId, {
-      Status: status, NoStockReasonID: status === ITEM_STATUS.NO_STOCK ? noStockReasonId : '',
-      NoStockReason: reasonText, CheckedBy: checkerName, CheckedAt: nowIso_()
+/**
+ * Records the checker's own on-screen tick confirming a physical COA
+ * (Certificate of Analysis) is attached to an order that Packing &
+ * Production flagged as requiring one (RequiresCoa, snapshotted onto this
+ * OrderChecks row at allocation time - see allocateOrderToTruck). Separate
+ * from RequiresCoa itself so "does this order need one" and "has someone
+ * actually confirmed it's attached" can never be conflated. Overwrites by
+ * ID like every other single-field update in this file (setItemStatus,
+ * updateTruck, ...), so it's safe to call again with the same values - a
+ * retried/duplicate call is a no-op change, not a duplicate record.
+ * Un-ticking (confirmed=false) clears who/when, so a stale name+time can't
+ * linger against an order that's no longer actually confirmed.
+ */
+function setOrderCoaConfirmed(orderCheckId, confirmed, checkerName) {
+  // Shares withOrderStatusLock_ with setItemStatus's own recompute below -
+  // both read-modify-write the SAME OrderChecks row (Status/CompletedAt vs
+  // CoaConfirmed/CoaConfirmedBy/CoaConfirmedAt), so without this a COA tick
+  // landing at the same moment as an item tap on the same order could
+  // silently lose one of the two writes.
+  return withOrderStatusLock_(orderCheckId, function () {
+    updateRowById_(getSheet_(SHEET_NAMES.ORDER_CHECKS), SHEET_HEADERS.OrderChecks, orderCheckId, {
+      CoaConfirmed: !!confirmed,
+      CoaConfirmedBy: confirmed ? String(checkerName || '') : '',
+      CoaConfirmedAt: confirmed ? nowIso_() : ''
     });
+    return { ok: true };
+  });
+}
 
-    // Recompute the parent order's status
+/**
+ * The actual deletion step of "unallocate" - given an OrderCheck (and its
+ * session, for the return value's previousTruckName) ALREADY looked up by
+ * the caller, deletes it and every ItemChecks row under it. Split out of
+ * unallocateOrder (2026-09-16, efficiency pass) so assignOrderToTruck can
+ * reuse a check/session it already read moments earlier while deciding
+ * whether a move is even allowed, instead of unallocateOrder redoing that
+ * exact same lookup (2 more full-sheet reads of OrderChecks+TruckSessions)
+ * for data the caller already has in hand - measured effect on the "move
+ * to a different truck" path: 4 reads of each sheet down to 3, since
+ * startTruckSession's own getTruckSessionState call still re-reads both on
+ * its own account regardless of this fix. unallocateOrder below is still
+ * the one place that does its
+ * own lookup - for its other caller (a direct "Remove from truck"/drag-to-
+ * Unassigned action), nothing has looked this up yet.
+ */
+function unallocateOrderCheck_(check, session) {
+  deleteRowsWhere_(getSheet_(SHEET_NAMES.ITEM_CHECKS), function (row, headers) {
+    return String(row[headers.indexOf('OrderCheckID')]) === String(check.ID);
+  });
+  deleteRowById_(getSheet_(SHEET_NAMES.ORDER_CHECKS), check.ID);
+  return { ok: true, wasAllocated: true, previousTruckName: session ? session.TruckName : null };
+}
+
+/**
+ * Unallocates an order from whichever truck it's currently on - deletes its
+ * OrderCheck row and every ItemChecks row under it, so if/when it's
+ * allocated again (on this truck or another), allocateOrderToTruck creates
+ * a brand-new checklist from scratch rather than resuming stale progress.
+ * Used when an order was put on the wrong truck and needs to move: refuses
+ * to touch an order whose truck has already dispatched, since that truck
+ * has physically left with it and unallocating would just corrupt an
+ * already-final record. A no-op (not an error) if the order isn't
+ * allocated to anything today.
+ */
+function unallocateOrder(orderId) {
+  var today = todayString_();
+  var check = sheetToObjects_(getSheet_(SHEET_NAMES.ORDER_CHECKS))
+    .filter(function (c) { return orderIdKey_(c.OrderID) === orderIdKey_(orderId) && normalizeDateStr_(c.Date) === today; })[0];
+  if (!check) return { ok: true, wasAllocated: false };
+
+  var session = sheetToObjects_(getSheet_(SHEET_NAMES.SESSIONS))
+    .filter(function (s) { return s.ID === check.TruckSessionID; })[0];
+  if (session && session.Status === SESSION_STATUS.DISPATCHED) {
+    throw new Error('Can\'t unallocate - truck "' + session.TruckName + '" has already dispatched with this order.');
+  }
+
+  return unallocateOrderCheck_(check, session);
+}
+
+// packedQty is only meaningful when status is Packed, and only needs to be
+// passed at all when the checker used the Edit Qty button to record packing
+// something other than the full ordered Qty (see the ItemChecks.PackedQty
+// comment above) - omit it (or pass '') for the plain "Packed" tap, which
+// leaves PackedQty blank and means "packed as ordered". No-Stock no longer
+// carries a reason - that whole admin-managed feature was removed, so this
+// only ever writes the item's Status/CheckedBy/CheckedAt/PackedQty now.
+function setItemStatus(itemCheckId, status, checkerName, packedQty) {
+  var itemSheet = getSheet_(SHEET_NAMES.ITEM_CHECKS);
+
+  // updateRowById_ already has to scan ItemChecks once to find this row
+  // (see findRowIndexById_) and hands back its full updated contents - so
+  // reading which order this item belongs to (OrderCheckID, needed below to
+  // scope the lock) from THAT return value is free, instead of a separate
+  // upfront lookup that would scan this same sheet a second time before
+  // even getting to the recompute's own read. That distinction matters
+  // because ItemChecks only grows over the life of the app (pruneOldRecords
+  // aside) - an extra full-sheet scan on every single tap is exactly the
+  // kind of per-call cost that compounds on a busy day and was very nearly
+  // reintroduced here.
+  var updatedItemRow = updateRowById_(itemSheet, SHEET_HEADERS.ItemChecks, itemCheckId, {
+    Status: status, CheckedBy: checkerName, CheckedAt: nowIso_(),
+    PackedQty: (status === ITEM_STATUS.PACKED && packedQty !== undefined && packedQty !== null && packedQty !== '') ? packedQty : ''
+  });
+  var orderCheckId = updatedItemRow[SHEET_HEADERS.ItemChecks.indexOf('OrderCheckID')];
+
+  // Recomputing the parent order's status below reads every sibling item
+  // and writes ONE order-status value derived from them all - if two items
+  // on the SAME order are ticked at nearly the same instant, both
+  // recomputes could race and whichever writes last could overwrite the
+  // other with a stale-derived status. Two DIFFERENT orders never conflict
+  // with each other this way, so this used to be over-protected with
+  // LockService.getScriptLock() - ONE lock for the entire script, meaning
+  // every checker checking any item on any truck queued behind every other
+  // one doing the same, however unrelated, and that queue only grew as
+  // more people tapped items at once. That's what a live "Request timed
+  // out after 20s (setItemStatus)" report traced back to. Scoped instead to
+  // a CacheService-based mutex keyed by this one order (LockService itself
+  // has no per-key granularity - only whole script/user/document locks) -
+  // see withOrderStatusLock_ below, shared with setOrderCoaConfirmed since
+  // both read-modify-write this same OrderChecks row.
+  // Note this does NOT speed up several items on the SAME order being
+  // ticked in a rapid burst by one checker - those still serialize against
+  // each other here, correctly - it only stops UNRELATED orders/trucks from
+  // needlessly queuing behind each other.
+  return withOrderStatusLock_(orderCheckId, function () {
     var items = sheetToObjects_(itemSheet);
-    var itemRow = items.filter(function (i) { return i.ID === itemCheckId; })[0];
-    var siblingItems = items.filter(function (i) { return i.OrderCheckID === itemRow.OrderCheckID; });
-    var allResolved = siblingItems.every(function (i) { return i.Status !== ITEM_STATUS.PENDING; });
-    var anyResolved = siblingItems.some(function (i) { return i.Status !== ITEM_STATUS.PENDING; });
-    var newOrderStatus = allResolved ? ORDER_STATUS.COMPLETE : (anyResolved ? ORDER_STATUS.IN_PROGRESS : ORDER_STATUS.PENDING);
+    var siblingItems = items.filter(function (i) { return i.OrderCheckID === orderCheckId; });
+    var newOrderStatus = deriveOrderStatus_(siblingItems);
 
     var orderChecksSheet = getSheet_(SHEET_NAMES.ORDER_CHECKS);
-    updateRowById_(orderChecksSheet, SHEET_HEADERS.OrderChecks, itemRow.OrderCheckID, {
+    updateRowById_(orderChecksSheet, SHEET_HEADERS.OrderChecks, orderCheckId, {
       Status: newOrderStatus,
       CompletedAt: newOrderStatus === ORDER_STATUS.COMPLETE ? nowIso_() : ''
     });
 
     return { ok: true, orderStatus: newOrderStatus };
-  } finally {
-    lock.releaseLock();
-  }
+  });
 }
 
 /**
- * Marks a truck as dispatched. Returns warnings (tray count not entered,
- * orders still pending) without dispatching unless force=true, so the UI
- * can show a confirmation first.
+ * Acquires the per-order CacheService mutex keyed to one OrderCheckID (see
+ * setItemStatus's comment above for why this exists and why it's scoped to
+ * just one order, not the whole script/document) around fn(), then releases
+ * it. Shared by setItemStatus's own order-status recompute and
+ * setOrderCoaConfirmed, since both read-modify-write the SAME OrderChecks
+ * row (Status/CompletedAt vs CoaConfirmed/CoaConfirmedBy/CoaConfirmedAt) -
+ * without this, a COA tick landing at the same moment as an item tap on the
+ * same order could silently lose one of the two writes (the exact
+ * "lost update" bug documented elsewhere in this file for TruckSessions).
+ * Proceeds even if the lock was never acquired (40 retries x 250ms used up,
+ * or a CacheService outage) rather than failing the request outright -
+ * worst case is the same rare stale-overwrite risk the lock exists to
+ * reduce, not a hard failure, and the very next write to this order
+ * re-derives/re-applies its own fields fresh regardless.
+ */
+/**
+ * Pure derivation of an order's own Status from its items' Status values -
+ * shared by setItemStatus's own recompute and reconcileOrderCheckStatus_'s
+ * self-heal below, so there's exactly one place that decides what "done"
+ * means. An order with zero items is vacuously Complete (nothing left to
+ * resolve) - same as items.every() on an empty array always being true,
+ * which is what the original inline version of this logic already did.
+ */
+function deriveOrderStatus_(items) {
+  var allResolved = items.every(function (i) { return i.Status !== ITEM_STATUS.PENDING; });
+  if (allResolved) return ORDER_STATUS.COMPLETE;
+  var anyResolved = items.some(function (i) { return i.Status !== ITEM_STATUS.PENDING; });
+  return anyResolved ? ORDER_STATUS.IN_PROGRESS : ORDER_STATUS.PENDING;
+}
+
+/**
+ * Self-heals an OrderCheck row whose stored Status has drifted from what
+ * its own items actually say - traced 2026-10-12 (Shane reported order
+ * INV0139035 stuck showing "In Progress" in the checker's Orders list with
+ * every one of its 4 items already individually Packed). Root cause: two
+ * setItemStatus calls for the SAME order can race on the server (the
+ * per-order CacheService mutex in withOrderStatusLock_ is advisory, not a
+ * hard guarantee - it proceeds anyway after 40 failed retries rather than
+ * erroring out, by design) - whichever call's own OrderChecks write lands
+ * LAST wins, even if ITS computed status was derived from an earlier,
+ * now-stale read of the other items. The client-side orderSaveChain queue
+ * in index.html is meant to keep calls for one order fully serialized so
+ * this never actually races in practice, but reopening the SAME order
+ * before its previous taps finished saving used to reset that queue
+ * unconditionally, breaking the guarantee - fixed alongside this (see
+ * openOrder's comment in index.html) - this function is the safety net for
+ * whenever it still happens anyway (a retried request, a flaky connection,
+ * or anything else that produces two genuinely concurrent calls).
+ *
+ * Only writes when something's actually wrong (re-checked fresh, under the
+ * same per-order lock, right before writing - the drift this is fixing may
+ * already have been fixed by another call between the caller's read and
+ * this one), so in the normal/healthy case this costs one extra array scan
+ * and no write at all. Returns the correct (possibly just-healed) status
+ * string, for the caller to use immediately rather than needing a 2nd
+ * round trip to see its own fix take effect.
+ */
+function reconcileOrderCheckStatus_(orderCheck, siblingItems) {
+  var correctStatus = deriveOrderStatus_(siblingItems);
+  if (correctStatus === orderCheck.Status) return orderCheck.Status;
+  return withOrderStatusLock_(orderCheck.ID, function () {
+    var freshItems = sheetToObjects_(getSheet_(SHEET_NAMES.ITEM_CHECKS))
+      .filter(function (i) { return i.OrderCheckID === orderCheck.ID; });
+    var freshStatus = deriveOrderStatus_(freshItems);
+    if (freshStatus !== orderCheck.Status) {
+      updateRowById_(getSheet_(SHEET_NAMES.ORDER_CHECKS), SHEET_HEADERS.OrderChecks, orderCheck.ID, {
+        Status: freshStatus,
+        CompletedAt: freshStatus === ORDER_STATUS.COMPLETE ? nowIso_() : ''
+      });
+    }
+    return freshStatus;
+  });
+}
+
+/**
+ * Self-heals an OrderCheck's ItemChecks snapshot when Packing & Production's
+ * OWN item list for that order now has items Dispatch never captured -
+ * traced 2026-10-21 (Shane reported order DFV0013963/SageRef showing only 1
+ * of 3 items in Dispatch's order-detail screen, while Packing & Production's
+ * own view of the same order showed all 3). Root cause: allocateOrderToTruck
+ * snapshots an order's items from Packing & Production exactly ONCE, at the
+ * instant it's dropped onto a truck (by design - see its own comment, so a
+ * checker part-way through ticking items doesn't have the list shift under
+ * them). For DFV0013963, Dispatch's own ItemChecks data shows exactly ONE
+ * row was ever written (ItemKey "..._0", the FIRST line in Packing's
+ * OrderItems sheet by LineNo) - not zero, and not a partial multi-row write
+ * (the 2026-10-01 Spinach fix already made that batch atomic, all-or-
+ * nothing) - meaning Packing's own OrderItems tab itself only had 1 of this
+ * order's 3 lines at the exact instant Dispatch read it for allocation; the
+ * clean, un-mangled OrderID join (confirmed directly against both sides'
+ * raw exports) rules out the kind of join bug a prior Packing & Production
+ * incident had trained us to suspect first. The other 2 lines showed up in
+ * Packing's sheet sometime AFTER that one read - whether a genuine race
+ * (Packing's own write isn't necessarily atomic either) or a later edit
+ * Dispatch has no visibility into, the fix is the same either way.
+ *
+ * Rather than trying to eliminate a race on a system Dispatch doesn't own,
+ * this closes the gap from Dispatch's side: wherever an order's current
+ * state is shown or acted on, re-check its snapshot against whatever
+ * Packing & Production says RIGHT NOW and append any item the snapshot is
+ * missing (as a brand-new Pending ItemChecks row) before the order's Status
+ * gets (re)computed - so a newly-discovered item shows up for the checker to
+ * actually tick, and correctly reopens an order that had wrongly looked
+ * Complete. packingItems is the current order.items array for this OrderID
+ * from Packing & Production (every call site already has this in hand, or
+ * can get it, from its own Packing read) - null/undefined (Packing read
+ * failed, or no matching order) is a safe no-op, same as every other
+ * best-effort Packing read in this file. Matches on ItemKey, the same
+ * "<orderId>_<index-into-Packing's-list>" scheme allocateOrderToTruck
+ * already snapshots - never on Description/Qty, which a genuine edit in
+ * Packing could legitimately change for an item Dispatch already has.
+ */
+function reconcileOrderItemsAgainstPacking_(orderCheck, siblingItems, packingItems) {
+  if (!packingItems || packingItems.length === 0) return siblingItems;
+
+  var knownKeys = {};
+  siblingItems.forEach(function (i) { knownKeys[i.ItemKey] = true; });
+  var missing = packingItems.filter(function (pi) { return !knownKeys[pi.itemKey]; });
+  if (missing.length === 0) return siblingItems;
+
+  var newRows = missing.map(function (pi) {
+    return {
+      ID: Utilities.getUuid(), OrderCheckID: orderCheck.ID, TruckSessionID: orderCheck.TruckSessionID, OrderID: orderCheck.OrderID,
+      ItemKey: pi.itemKey, ProductDescription: pi.description, Qty: pi.qty, Unit: pi.unit,
+      Status: ITEM_STATUS.PENDING, NoStockReasonID: '', NoStockReason: '', CheckedBy: '', CheckedAt: '', PackedQty: ''
+    };
+  });
+
+  try {
+    appendObjects_(getSheet_(SHEET_NAMES.ITEM_CHECKS), SHEET_HEADERS.ItemChecks, newRows);
+  } catch (err) {
+    // Best-effort healing, same spirit as every other best-effort Packing
+    // read in this file - if the write fails, just show what was already
+    // there rather than erroring out an otherwise-working screen.
+    return siblingItems;
+  }
+
+  return siblingItems.concat(newRows);
+}
+
+/**
+ * Generic CacheService-based advisory mutex, keyed by an arbitrary string -
+ * the mechanism this file already used just for setItemStatus/
+ * setOrderCoaConfirmed's shared per-order lock (withOrderStatusLock_ below),
+ * generalized (build-2026-10-30) so allocateOrderToTruck, updateSessionTrip,
+ * and truck-session creation can each get their own correctly-SCOPED lock
+ * (per order, per session, per truck+day) instead of sharing ONE
+ * script-wide LockService lock between completely unrelated trucks/orders -
+ * see setItemStatus's own comment for the "Request timed out" incident a
+ * script-wide lock already caused once, which is exactly what allocating
+ * orders (the busiest write in the app) and starting truck sessions were
+ * both still exposed to until this round. Proceeds even if the lock was
+ * never acquired (40 retries x 250ms used up, or a CacheService outage)
+ * rather than failing the request outright - worst case is the same rare
+ * race this exists to reduce, not a hard failure.
+ */
+function withNamedLock_(lockKey, fn) {
+  var cache = CacheService.getScriptCache();
+  var acquired = false;
+  for (var attempt = 0; attempt < 40 && !acquired; attempt++) {
+    if (cache.get(lockKey) === null) {
+      try { cache.put(lockKey, '1', 20); acquired = true; } catch (err) { /* CacheService hiccup - retry */ }
+    }
+    if (!acquired) Utilities.sleep(250);
+  }
+  try {
+    return fn();
+  } finally {
+    if (acquired) { try { cache.remove(lockKey); } catch (err) { /* best-effort */ } }
+  }
+}
+
+/** Per-order (for today) mutex - see allocateOrderToTruck's own comment. */
+function withOrderAllocationLock_(orderId, fn) {
+  return withNamedLock_('orderAllocLock_' + orderId + '_' + todayString_(), fn);
+}
+
+/** Per-truck (for today) mutex - see getOrCreateTodaysOpenSessionId_'s own comment. */
+function withTruckSessionCreateLock_(truckId, fn) {
+  return withNamedLock_('truckSessionCreateLock_' + truckId + '_' + todayString_(), fn);
+}
+
+/** Per-order (OrderCheckID) mutex shared by setItemStatus's order-status recompute and setOrderCoaConfirmed - see setItemStatus's own comment for why this exists and why it's scoped to just one order, not the whole script/document. */
+function withOrderStatusLock_(orderCheckId, fn) {
+  return withNamedLock_('orderStatusLock_' + orderCheckId, fn);
+}
+
+/**
+ * Marks a truck as dispatched.
+ *
+ * Incomplete orders are a HARD block, never overridable - Shane's rule:
+ * "the truck can only be dispatched once all orders have been checked".
+ * There's no force-past-it path for this one; the only way to unstick a
+ * truck that's blocked on a problem order is for the Dispatch Manager to
+ * drag that order off it on the Trucks board (see assignOrderToTruck /
+ * unallocateOrder below), which removes it from THIS truck's checklist so
+ * the rest can go out on time.
+ *
+ * Driver/route/tray-count warnings are unchanged from before - still
+ * overridable with force=true, still flagged afterward on the Admin
+ * Dashboard as dispatched-with-warnings, since those are judgment calls a
+ * checker can reasonably make in a genuine rush.
  */
 function markTruckDispatched(sessionId, checkerName, force) {
   var state = getTruckSessionState(sessionId);
+
+  // A retry of an already-successful dispatch - the frontend's own
+  // timeout-triggered automatic retry (markTruckDispatched is in
+  // RETRYABLE_ACTIONS), or a checker double-tapping - should resolve
+  // instantly, not silently redo the expensive Packing & Production
+  // reconciliation below and push DispatchedAt later with every repeat.
+  // Reported 2026-10-30 as "the loading window stays for long after
+  // marking dispatched": without this guard, a single slow-but-actually-
+  // successful call whose response the frontend gave up waiting for (see
+  // EXTENDED_TIMEOUT_ACTIONS in index.html) could repeat this whole
+  // function's cost two or three times back-to-back before the checker
+  // ever sees it resolve.
+  if (state.session.Status === SESSION_STATUS.DISPATCHED) {
+    return { ok: true, alreadyDispatched: true };
+  }
+
+  // Self-heal any order whose stored Status has drifted from what its own
+  // items actually say, BEFORE deciding whether dispatch is blocked - see
+  // reconcileOrderCheckStatus_'s own comment for how this drift can
+  // happen. Without this, a truck whose every single item is genuinely
+  // packed could be stuck un-dispatchable indefinitely over a stale Status
+  // value with nothing on screen to explain why - this is the one place
+  // that actually matters operationally, not just cosmetically, so it's
+  // worth the extra ItemChecks read here even though getTruckSessionState
+  // itself deliberately doesn't carry one for its other (more frequent)
+  // call sites.
+  if (state.orderChecks.length > 0) {
+    var itemChecksForDispatch = sheetToObjects_(getSheet_(SHEET_NAMES.ITEM_CHECKS));
+
+    // Best-effort: also catch an order whose Packing & Production item list
+    // has grown since it was allocated (see
+    // reconcileOrderItemsAgainstPacking_'s own comment - this is how
+    // DFV0013963 slipped through on 2026-10-21) BEFORE deciding whether
+    // this truck is clear to dispatch. This is the one place that actually
+    // stops a truck physically leaving without an item Packing & Production
+    // says belongs on one of its orders, so - unlike the other two call
+    // sites, which are happy reusing whatever's already cached - the FIRST
+    // (force=false) call for a given dispatch pays for a fresh, uncached
+    // Packing & Production read, not the up-to-45-second-stale one
+    // fetchAllOrdersFromPacking_ would otherwise serve.
+    //
+    // The checker's confirm tap after a driver/route/tray-count warning
+    // (force=true) calls this function a SECOND time for the same
+    // dispatch, seconds later - until build-2026-10-30 that redid this
+    // exact same full uncached scan again from scratch, doubling the cost
+    // of every warning-involving dispatch for no real safety gain (nothing
+    // about order/Packing readiness changes in the few seconds a checker
+    // spends reading a confirm modal). Now the force=false call warms the
+    // shared cache with what it just read, and the force=true call reuses
+    // it via the normal cached fetchAllOrdersFromPacking_ - still far
+    // fresher in practice than the 45-second staleness every other caller
+    // already accepts, at a small fraction of the cost.
+    var packingOrdersForDispatch = {};
+    try {
+      var dispatchSettings = readSettings_();
+      if (dispatchSettings.PackingSpreadsheetId) {
+        var packingOrdersForReconcile = force
+          ? fetchAllOrdersFromPacking_()
+          : fetchAllOrdersFromPackingUncached_(dispatchSettings.PackingSpreadsheetId);
+        if (!force) cachePackingOrders_(dispatchSettings.PackingSpreadsheetId, packingOrdersForReconcile);
+        packingOrdersForReconcile.forEach(function (o) { packingOrdersForDispatch[orderIdKey_(o.orderId)] = o; });
+      }
+    } catch (err) {
+      // best-effort - a Packing & Production hiccup here shouldn't itself
+      // block dispatch; the existing Status-based completeness check below
+      // still runs on whatever Dispatch already has.
+    }
+
+    state.orderChecks.forEach(function (c) {
+      var siblingItems = itemChecksForDispatch.filter(function (i) { return i.OrderCheckID === c.ID; });
+      var packingOrder = packingOrdersForDispatch[orderIdKey_(c.OrderID)];
+      siblingItems = reconcileOrderItemsAgainstPacking_(c, siblingItems, packingOrder ? packingOrder.items : null);
+      c.Status = reconcileOrderCheckStatus_(c, siblingItems);
+    });
+  }
+
+  var incomplete = state.orderChecks.filter(function (c) { return c.Status !== ORDER_STATUS.COMPLETE; });
+  // A Job blocks dispatch until Done, the same hard rule as an order (see
+  // the Jobs section further down) - Shane's explicit call, treating it as
+  // a lightweight order (no items to pack, just one instruction to carry
+  // out) rather than a side note that could be silently left undone.
+  var incompleteJobs = state.jobs.filter(function (j) { return j.Status !== JOB_STATUS.DONE; });
+  if (incomplete.length > 0 || incompleteJobs.length > 0) {
+    var parts = [];
+    if (incomplete.length > 0) parts.push(incomplete.length + ' order(s)');
+    if (incompleteJobs.length > 0) parts.push(incompleteJobs.length + ' job(s)');
+    return {
+      ok: false,
+      blocked: true,
+      blockedReason: parts.join(' and ') + ' on this truck ' + ((incomplete.length + incompleteJobs.length) === 1 ? 'is' : 'are') + ' not yet complete.',
+      incompleteOrders: incomplete.map(function (c) { return { orderId: c.OrderID, orderNumber: c.OrderNumber, customer: c.Customer, status: c.Status }; }),
+      incompleteJobs: incompleteJobs.map(function (j) { return { jobId: j.ID, subject: j.Subject, status: j.Status }; })
+    };
+  }
+
   var warnings = [];
   if (!state.session.Driver) warnings.push('Driver name has not been entered.');
   if (!state.session.Route) warnings.push('Route has not been entered.');
   var noTraysEntered = ['TraySmall', 'TrayMedium', 'TrayLarge', 'TrayOther'].every(function (key) {
     return state.session[key] === '' || state.session[key] === undefined || state.session[key] === null;
   });
-  if (noTraysEntered) warnings.push('Fruit tray counts have not been entered.');
-  var incomplete = state.orderChecks.filter(function (c) { return c.Status !== ORDER_STATUS.COMPLETE; });
-  if (incomplete.length > 0) warnings.push(incomplete.length + ' order(s) on this truck are not fully checked.');
+  // A trip explicitly marked "no fruit trays" (NoTraysOnTrip) is blank on
+  // purpose, not forgotten - skip the warning entirely for it rather than
+  // making the checker force-dispatch past a warning that doesn't apply.
+  if (noTraysEntered && !state.session.NoTraysOnTrip) warnings.push('Fruit tray counts have not been entered.');
 
   if (warnings.length > 0 && !force) {
     return { ok: false, warnings: warnings };
@@ -884,16 +3042,34 @@ function getTodaysTruckOverview() {
 }
 
 /**
- * Full admin dashboard for today: every truck session, the orders checked
- * under it (with packed/no-stock breakdowns), and a summary row with
- * quality signals - most importantly trucks that got dispatched despite
- * open warnings (incomplete orders, missing driver/tray count), since
- * that's the clearest "something was rushed" signal available.
+ * Full admin dashboard for a given day: every truck session, the orders
+ * checked under it (with packed/no-stock breakdowns), and a summary row
+ * with quality signals - most importantly trucks that got dispatched
+ * despite open warnings (incomplete orders, missing driver/tray count),
+ * since that's the clearest "something was rushed" signal available.
+ * Defaults to today when no date is given, but any past 'yyyy-MM-dd' date
+ * works too - lets Admin/Dispatch Manager look back at a previous day's
+ * dispatch record (who checked what, tray counts, driver, route, no-stock
+ * items, timing) without having to dig through the raw Sheet.
+ *
+ * Also returns dispatchTimeline (build-2026-10-26-04) - the Dispatch
+ * Timeline card that originally lived on the Trucks board (2026-10-26) but
+ * Shane asked to have moved here instead, so it sits alongside the rest of
+ * the day's dispatch record rather than the morning order-assignment
+ * screen. Reuses buildDispatchTimelineAndScorecard_ (see its own comment
+ * for what the gap actually measures) - this function already has
+ * sessions/allOrderChecks for the target date in hand, so computing it
+ * costs one more trip-numbering pass, no extra sheet reads. jobsToday is
+ * passed as [] since buildDispatchTimelineAndScorecard_ no longer reads it
+ * anyway (see its own comment) - no point reading Jobs here just to hand
+ * it an array it won't use. Only the Scorecard half (not returned here)
+ * stayed on the Trucks board, computed separately by
+ * getTruckAssignmentBoardUncached_ for that screen's own cached payload.
  */
-function getTodaysDashboard() {
-  var today = todayString_();
-  var sessions = sheetToObjects_(getSheet_(SHEET_NAMES.SESSIONS)).filter(function (s) { return normalizeDateStr_(s.Date) === today; });
-  var allOrderChecks = sheetToObjects_(getSheet_(SHEET_NAMES.ORDER_CHECKS)).filter(function (c) { return normalizeDateStr_(c.Date) === today; });
+function getDashboardForDate(dateStr) {
+  var targetDate = dateStr || todayString_();
+  var sessions = sheetToObjects_(getSheet_(SHEET_NAMES.SESSIONS)).filter(function (s) { return normalizeDateStr_(s.Date) === targetDate; });
+  var allOrderChecks = sheetToObjects_(getSheet_(SHEET_NAMES.ORDER_CHECKS)).filter(function (c) { return normalizeDateStr_(c.Date) === targetDate; });
   var allItemChecks = sheetToObjects_(getSheet_(SHEET_NAMES.ITEM_CHECKS));
 
   var trucks = sessions.map(function (session) {
@@ -902,6 +3078,16 @@ function getTodaysDashboard() {
     var orders = orderChecks.map(function (oc) {
       var items = allItemChecks.filter(function (i) { return i.OrderCheckID === oc.ID; });
       var noStockItems = items.filter(function (i) { return i.Status === ITEM_STATUS.NO_STOCK; });
+      // "Short-packed" = marked Packed but the checker used Edit Qty to
+      // record packing something other than the full ordered Qty (a blank
+      // PackedQty means "packed as ordered" - see the ItemChecks.PackedQty
+      // comment above). Kept as its own rollup, parallel to no-stock, since
+      // it's a different signal: the order still went out, just not at the
+      // full quantity, whereas no-stock is nothing going out at all.
+      var shortPackedItems = items.filter(function (i) {
+        return i.Status === ITEM_STATUS.PACKED && i.PackedQty !== '' && i.PackedQty !== null && i.PackedQty !== undefined &&
+          Number(i.PackedQty) !== Number(i.Qty);
+      });
       return {
         orderNumber: oc.OrderNumber,
         customer: oc.Customer,
@@ -909,7 +3095,11 @@ function getTodaysDashboard() {
         itemCount: items.length,
         packedCount: items.filter(function (i) { return i.Status === ITEM_STATUS.PACKED; }).length,
         noStockCount: noStockItems.length,
-        noStockDetails: noStockItems.map(function (i) { return { description: i.ProductDescription, reason: i.NoStockReason }; })
+        noStockDetails: noStockItems.map(function (i) { return { description: i.ProductDescription, reason: i.NoStockReason || '' }; }),
+        shortPackedCount: shortPackedItems.length,
+        shortPackedDetails: shortPackedItems.map(function (i) {
+          return { description: i.ProductDescription, orderedQty: i.Qty, packedQty: i.PackedQty, unit: i.Unit };
+        })
       };
     });
 
@@ -919,9 +3109,16 @@ function getTodaysDashboard() {
     }
 
     return {
+      // sessionId (build-2026-10-26-05) - a stable per-truck-trip key the
+      // frontend uses to remember which card is expanded/collapsed across
+      // re-renders (tile clicks, search) without needing anything keyed
+      // off truckName, which isn't unique across a truck's multiple trips
+      // today.
+      sessionId: session.ID,
       truckName: session.TruckName,
       checkerName: session.CheckerName,
       driver: session.Driver || '',
+      driverContacts: session.DriverContacts || '',
       route: session.Route || '',
       status: session.Status,
       startedAt: session.StartedAt,
@@ -931,11 +3128,13 @@ function getTodaysDashboard() {
       trayMedium: session.TrayMedium,
       trayLarge: session.TrayLarge,
       trayOther: session.TrayOther,
+      noTraysOnTrip: session.NoTraysOnTrip === true,
       durationMinutes: durationMinutes,
       dispatchedWithWarnings: session.DispatchedWithWarnings === true,
       dispatchWarningsText: session.DispatchWarningsText || '',
       orderCount: orders.length,
       noStockTotal: orders.reduce(function (sum, o) { return sum + o.noStockCount; }, 0),
+      shortPackedTotal: orders.reduce(function (sum, o) { return sum + o.shortPackedCount; }, 0),
       orders: orders
     };
   });
@@ -949,8 +3148,528 @@ function getTodaysDashboard() {
     inProgressCount: trucks.filter(function (t) { return t.status === SESSION_STATUS.IN_PROGRESS; }).length,
     totalOrders: trucks.reduce(function (sum, t) { return sum + t.orderCount; }, 0),
     totalNoStockItems: trucks.reduce(function (sum, t) { return sum + t.noStockTotal; }, 0),
+    totalShortPackedItems: trucks.reduce(function (sum, t) { return sum + t.shortPackedTotal; }, 0),
     forcedDispatchCount: trucks.filter(function (t) { return t.dispatchedWithWarnings; }).length
   };
 
-  return { summary: summary, trucks: trucks };
+  // Same ordinal-per-truck trip numbering as getTruckAssignmentBoardUncached_
+  // (chronological by StartedAt, counted per TruckID) - only used so
+  // dispatchTimeline can label a truck's 2nd+ trip today, same as it did on
+  // the Trucks board.
+  var sessionsForTripNumbering = sessions.slice().sort(function (a, b) { return String(a.StartedAt).localeCompare(String(b.StartedAt)); });
+  var tripNumberBySessionId = {};
+  var tripCountByTruckId = {};
+  sessionsForTripNumbering.forEach(function (s) {
+    tripCountByTruckId[s.TruckID] = (tripCountByTruckId[s.TruckID] || 0) + 1;
+    tripNumberBySessionId[s.ID] = tripCountByTruckId[s.TruckID];
+  });
+  var dispatchTimeline = buildDispatchTimelineAndScorecard_(sessions, allOrderChecks, [], tripNumberBySessionId).dispatchTimeline;
+
+  return { date: targetDate, summary: summary, trucks: trucks, dispatchTimeline: dispatchTimeline };
+}
+
+/**
+ * "Trucks consistently leaving late" (build-2026-10-27-05) - Shane asked
+ * for a Dashboard data point surfacing trucks whose first trip of the day
+ * keeps missing the leave-by target, not just a one-off bad morning.
+ * "Late" uses the same 07:00 cutoff as the Dispatch Timeline's own
+ * on-time badge (see onTimeBadge_ in index.html - kept in sync by eye,
+ * since this is backend-only data with no shared constant to import), and
+ * "trip 2 excluded" applies here exactly as it does there - a truck's 2nd+
+ * trip of the day has no fixed leave-by target, so only each day's trip 1
+ * counts toward a truck's tally.
+ *
+ * Looks back LATE_TRUCK_WINDOW_DAYS days (including today) and flags any
+ * truck with LATE_TRUCK_MIN_LATE_COUNT or more late trip-1 dispatches in
+ * that window. One pass over TruckSessions, pre-filtered to the window,
+ * rather than calling getDashboardForDate once per day in the window -
+ * that would be 30 separate full-sheet reads for data this one read
+ * already has.
+ */
+var LATE_TRUCK_WINDOW_DAYS = 30;
+var LATE_TRUCK_MIN_LATE_COUNT = 3;
+var LATE_TRUCK_CUTOFF_MINUTES = 7 * 60; // 07:00 - matches onTimeBadge_'s amber/red boundary in index.html
+
+function getLateTruckLeaderboard() {
+  var tz = Session.getScriptTimeZone() || 'Africa/Johannesburg';
+  var windowStart = new Date();
+  windowStart.setDate(windowStart.getDate() - (LATE_TRUCK_WINDOW_DAYS - 1));
+  var windowStartStr = Utilities.formatDate(windowStart, tz, 'yyyy-MM-dd');
+
+  var sessionsInWindow = sheetToObjects_(getSheet_(SHEET_NAMES.SESSIONS)).filter(function (s) {
+    return s.Status === SESSION_STATUS.DISPATCHED && s.DispatchedAt && normalizeDateStr_(s.Date) >= windowStartStr;
+  });
+
+  // Trip numbering is per truck PER DAY (same rule used everywhere else in
+  // this file, e.g. getTruckAssignmentBoardUncached_/getDashboardForDate) -
+  // group by truck+day first, then number chronologically within each group.
+  var byTruckAndDay = {};
+  sessionsInWindow.forEach(function (s) {
+    var key = s.TruckID + '|' + normalizeDateStr_(s.Date);
+    (byTruckAndDay[key] = byTruckAndDay[key] || []).push(s);
+  });
+  var tripNumberBySessionId = {};
+  Object.keys(byTruckAndDay).forEach(function (key) {
+    var group = byTruckAndDay[key].slice().sort(function (a, b) { return String(a.StartedAt).localeCompare(String(b.StartedAt)); });
+    group.forEach(function (s, i) { tripNumberBySessionId[s.ID] = i + 1; });
+  });
+
+  var statsByTruck = {}; // truckName -> { lateCount, trip1Count }
+  sessionsInWindow.forEach(function (s) {
+    if (tripNumberBySessionId[s.ID] !== 1) return; // only trip 1 is held to the leave-by target
+    var hm = Utilities.formatDate(new Date(s.DispatchedAt), tz, 'HH:mm').split(':');
+    var minutesOfDay = Number(hm[0]) * 60 + Number(hm[1]);
+    var truckName = s.TruckName;
+    if (!statsByTruck[truckName]) statsByTruck[truckName] = { lateCount: 0, trip1Count: 0 };
+    statsByTruck[truckName].trip1Count++;
+    if (minutesOfDay > LATE_TRUCK_CUTOFF_MINUTES) statsByTruck[truckName].lateCount++;
+  });
+
+  var trucks = Object.keys(statsByTruck)
+    .map(function (truckName) {
+      return { truckName: truckName, lateCount: statsByTruck[truckName].lateCount, trip1Count: statsByTruck[truckName].trip1Count };
+    })
+    .filter(function (row) { return row.lateCount >= LATE_TRUCK_MIN_LATE_COUNT; })
+    .sort(function (a, b) { return b.lateCount - a.lateCount; });
+
+  return { windowDays: LATE_TRUCK_WINDOW_DAYS, minLateCount: LATE_TRUCK_MIN_LATE_COUNT, trucks: trucks };
+}
+
+// ---------------------------------------------------------------------------
+// DISPATCH MANAGER - end-of-day order fulfillment overview
+//
+// A separate view from getTodaysDashboard above: that one is organized by
+// TRUCK (what happened on each truck's run). This is organized by ORDER -
+// of everything that was due today (or overdue from a previous day), did it
+// actually leave, and if not, why not. An order counts as "dispatched" if
+// it was allocated to a truck session that has since been marked Dispatched;
+// "collected" if the customer picked it up directly (see CollectedOrders,
+// markOrderCollected below) - anything else is outstanding.
+// ---------------------------------------------------------------------------
+
+function getCollectedOrderIds_() {
+  var ids = {};
+  sheetToObjects_(getSheet_(SHEET_NAMES.COLLECTED_ORDERS)).forEach(function (r) { ids[orderIdKey_(r.OrderID)] = true; });
+  return ids;
+}
+
+/** Marks an order as collected by the customer directly, instead of going out on a truck. Safe to call twice - no duplicate rows. */
+function markOrderCollected(orderId, orderNumber, customer, collectedBy) {
+  var sheet = getSheet_(SHEET_NAMES.COLLECTED_ORDERS);
+  var alreadyCollected = sheetToObjects_(sheet).some(function (r) { return orderIdKey_(r.OrderID) === orderIdKey_(orderId); });
+  if (alreadyCollected) return { ok: true };
+  appendObject_(sheet, SHEET_HEADERS.CollectedOrders, {
+    OrderID: orderId, OrderNumber: orderNumber, Customer: customer, CollectedAt: nowIso_(), CollectedBy: collectedBy
+  });
+  return { ok: true };
+}
+
+/** Undoes markOrderCollected - e.g. it was marked by mistake. */
+function unmarkOrderCollected(orderId) {
+  var sheet = getSheet_(SHEET_NAMES.COLLECTED_ORDERS);
+  var data = sheet.getDataRange().getValues();
+  for (var i = data.length - 1; i >= 1; i--) {
+    if (orderIdKey_(data[i][0]) === orderIdKey_(orderId)) sheet.deleteRow(i + 1);
+  }
+  return { ok: true };
+}
+
+// ---------------------------------------------------------------------------
+// JOBS (non-order instructions on a truck's trip)
+//
+// A checker can add a plain-language instruction to their truck's CURRENT
+// trip for something that isn't a real Packing & Production order - "collect
+// crates from ABC Farms", "drop pallets at the depot" - from right inside
+// the truck's own workspace, alongside "+ Add Order". Unlike the old
+// Non-Order Dispatch feature this replaces (Dispatch Manager/Admin only, a
+// separate logged record untouched by the dispatch checklist), a Job IS
+// tied to a real TruckSessionID and DOES block dispatch until marked Done -
+// Shane's explicit call (2026-09-16): treat it as a lightweight order
+// (no items to pack, just one thing to do) rather than a side note.
+// ---------------------------------------------------------------------------
+
+/**
+ * Adds a Job to a truck's CURRENT trip. Refuses on an already-dispatched
+ * session (that truck has physically left - same reasoning as
+ * unallocateOrder's guard below) so a Job can never be added somewhere it
+ * would never be seen. Deliberately NOT in RETRYABLE_ACTIONS on the
+ * frontend: unlike setItemStatus/setJobStatus (idempotent overwrites-by-ID),
+ * this always appends a brand-new row, so blindly retrying a lost response
+ * could create a duplicate Job.
+ */
+function addJobToTruck(sessionId, subject, instructions, checkerId, checkerName) {
+  subject = String(subject || '').trim();
+  instructions = String(instructions || '').trim();
+  if (!subject) throw new Error('Enter an order number or subject line.');
+  if (!instructions) throw new Error('Enter the instructions for this job.');
+
+  var session = sheetToObjects_(getSheet_(SHEET_NAMES.SESSIONS)).filter(function (s) { return s.ID === sessionId; })[0];
+  if (!session) throw new Error('Truck session not found.');
+  if (session.Status === SESSION_STATUS.DISPATCHED) {
+    throw new Error('Can\'t add a job - truck "' + session.TruckName + '" has already dispatched.');
+  }
+
+  var id = Utilities.getUuid();
+  appendObject_(getSheet_(SHEET_NAMES.JOBS), SHEET_HEADERS.Jobs, {
+    ID: id, TruckSessionID: sessionId, Date: todayString_(), Subject: subject, Instructions: instructions,
+    Status: JOB_STATUS.PENDING, CreatedByID: checkerId || '', CreatedByName: checkerName || '',
+    CreatedAt: nowIso_(), DoneBy: '', DoneAt: ''
+  });
+  return { id: id };
+}
+
+/** Jobs on one truck session, for the truck's own Orders pane (merged there with real orders - see getOrdersForSession). */
+function getJobsForSession(sessionId) {
+  return sheetToObjects_(getSheet_(SHEET_NAMES.JOBS)).filter(function (j) { return j.TruckSessionID === sessionId; });
+}
+
+/**
+ * Marks a Job Done or back to Pending. Overwrites by ID like every other
+ * single-field update in this file (setItemStatus, setOrderCoaConfirmed,
+ * ...), so a retried/duplicate call is a safe no-op, not a duplicate
+ * record - unlike addJobToTruck above. Un-marking (status back to Pending)
+ * clears DoneBy/At, same reasoning as CoaConfirmed's clear-on-un-tick.
+ */
+function setJobStatus(jobId, status, checkerName) {
+  var done = status === JOB_STATUS.DONE;
+  updateRowById_(getSheet_(SHEET_NAMES.JOBS), SHEET_HEADERS.Jobs, jobId, {
+    Status: done ? JOB_STATUS.DONE : JOB_STATUS.PENDING,
+    DoneBy: done ? String(checkerName || '') : '',
+    DoneAt: done ? nowIso_() : ''
+  });
+  return { ok: true };
+}
+
+/**
+ * Removes a Job added by mistake - mirrors unallocateOrder's "undo" role
+ * for orders. Refuses once the truck has dispatched (can't retroactively
+ * pull an instruction off a run that's already left), and is itself a
+ * safe no-op if the Job is already gone (a genuinely retried call after a
+ * lost response, same pattern as unallocateOrder's own early return) -
+ * unlike addJobToTruck, this one's fine to mark RETRYABLE on the frontend.
+ */
+function removeJob(jobId) {
+  var job = sheetToObjects_(getSheet_(SHEET_NAMES.JOBS)).filter(function (j) { return j.ID === jobId; })[0];
+  if (!job) return { ok: true, wasRemoved: false };
+
+  var session = sheetToObjects_(getSheet_(SHEET_NAMES.SESSIONS)).filter(function (s) { return s.ID === job.TruckSessionID; })[0];
+  if (session && session.Status === SESSION_STATUS.DISPATCHED) {
+    throw new Error('Can\'t remove - truck "' + session.TruckName + '" has already dispatched.');
+  }
+
+  deleteRowById_(getSheet_(SHEET_NAMES.JOBS), jobId);
+  return { ok: true, wasRemoved: true };
+}
+
+/**
+ * For the Admin Dashboard's Viewing date - every Job added that day, across
+ * all trucks, most recent first, with the truck name it belongs to (a Job
+ * itself only stores TruckSessionID, so this joins against TruckSessions
+ * to resolve it - same join getTruckAssignmentBoard already does for
+ * orders-by-truck).
+ */
+function listJobsForDate(dateStr) {
+  var targetDate = dateStr || todayString_();
+  var sessionsById = {};
+  sheetToObjects_(getSheet_(SHEET_NAMES.SESSIONS)).forEach(function (s) { sessionsById[s.ID] = s; });
+
+  return sheetToObjects_(getSheet_(SHEET_NAMES.JOBS))
+    .filter(function (j) { return normalizeDateStr_(j.Date) === targetDate; })
+    .map(function (j) {
+      var session = sessionsById[j.TruckSessionID];
+      return {
+        id: j.ID, truckName: session ? session.TruckName : '(truck no longer on record)',
+        subject: j.Subject, instructions: j.Instructions, status: j.Status,
+        createdByName: j.CreatedByName, createdAt: j.CreatedAt, doneBy: j.DoneBy, doneAt: j.DoneAt
+      };
+    })
+    .sort(function (a, b) { return new Date(b.createdAt) - new Date(a.createdAt); });
+}
+
+// ---------------------------------------------------------------------------
+// PACKING QUALITY FLAGS (checker-reported packer mistakes)
+//
+// While checking stock, a checker can flag a specific item as a packer
+// having done a poor job on it - poor quality, wrong weight, etc. - with a
+// short free-text note (Shane's request, 2026-09-16). Deliberately NOT the
+// Jobs model: this does NOT block dispatch and does NOT change the item's
+// own Status (Pending/Packed/No Stock) - it's purely a side note that
+// surfaces as a checklist on the Admin Dashboard for someone to follow up
+// on, the same non-blocking spirit as the dispatched-with-warnings signals
+// elsewhere in this file.
+// ---------------------------------------------------------------------------
+
+/**
+ * Flags one item with a short quality note. Can be raised regardless of the
+ * item's current Status - a packer's mistake is often only noticed after
+ * the item's already been marked Packed, so this deliberately doesn't
+ * require (or change) any particular status. TruckName/OrderNumber/Customer/
+ * ProductDescription are all snapshotted onto the new row at flag time (the
+ * same denormalization already used for Jobs/OrderChecks elsewhere in this
+ * file) so the Dashboard checklist can render straight from PackingIssues
+ * without joining back across ItemChecks/OrderChecks/TruckSessions again.
+ */
+function flagPackingIssue(itemCheckId, note, checkerId, checkerName) {
+  note = String(note || '').trim();
+  if (!note) throw new Error('Enter a short explanation of the issue.');
+
+  var item = sheetToObjects_(getSheet_(SHEET_NAMES.ITEM_CHECKS)).filter(function (i) { return i.ID === itemCheckId; })[0];
+  if (!item) throw new Error('Item not found.');
+
+  var orderCheck = sheetToObjects_(getSheet_(SHEET_NAMES.ORDER_CHECKS)).filter(function (c) { return c.ID === item.OrderCheckID; })[0];
+  var session = sheetToObjects_(getSheet_(SHEET_NAMES.SESSIONS)).filter(function (s) { return s.ID === item.TruckSessionID; })[0];
+
+  var id = Utilities.getUuid();
+  appendObject_(getSheet_(SHEET_NAMES.PACKING_ISSUES), SHEET_HEADERS.PackingIssues, {
+    ID: id, TruckSessionID: item.TruckSessionID, OrderCheckID: item.OrderCheckID, ItemCheckID: itemCheckId,
+    Date: todayString_(), TruckName: session ? session.TruckName : '',
+    OrderNumber: orderCheck ? orderCheck.OrderNumber : '', Customer: orderCheck ? orderCheck.Customer : '',
+    ProductDescription: item.ProductDescription, Note: note, Status: ISSUE_STATUS.OPEN,
+    FlaggedByID: checkerId || '', FlaggedByName: checkerName || '', FlaggedAt: nowIso_(),
+    ResolvedByName: '', ResolvedAt: ''
+  });
+  return { id: id };
+}
+
+/** For History's "Flagged Packing Issues" checklist - every flag raised on the picked day, across all trucks, most recently flagged first, regardless of whether it's since been resolved (a historical record of that specific day). The Admin Dashboard itself uses listOpenPackingIssues below instead - see its own comment for why. */
+function listPackingIssuesForDate(dateStr) {
+  var targetDate = dateStr || todayString_();
+  return sheetToObjects_(getSheet_(SHEET_NAMES.PACKING_ISSUES))
+    .filter(function (p) { return normalizeDateStr_(p.Date) === targetDate; })
+    // p.Date was already being normalized above to FILTER by day, but the
+    // raw (possibly Sheets-auto-converted-to-a-real-Date) value was still
+    // what got sent back to the frontend - formatDateForDisplay only
+    // handles a plain 'yyyy-MM-dd' string, so a Date object serialized to
+    // JSON as a full ISO timestamp ("2026-09-26T00:00:00.000Z") broke its
+    // naive split-by-dash parsing and showed "Invalid Date" (Shane,
+    // 2026-09-28). Normalizing here, not just in the filter, fixes it -
+    // and does so correctly (same script timezone normalizeDateStr_
+    // always uses), unlike a frontend-side String(...).slice(0,10) fix
+    // would have (that would read the UTC-shifted ISO string and could
+    // land on the wrong calendar day entirely).
+    .map(function (p) { p.Date = normalizeDateStr_(p.Date); return p; })
+    .sort(function (a, b) { return new Date(b.FlaggedAt) - new Date(a.FlaggedAt); });
+}
+
+/**
+ * For the Admin Dashboard's "Flagged Packing Issues" checklist - EVERY
+ * still-open flag, regardless of which day it was raised (Shane's
+ * 2026-09-22 request: unlike Jobs, which always get resolved same-day so
+ * staying date-scoped there is fine, a packing issue can linger unresolved
+ * past midnight and Shane wants it to stay visible on the Dashboard until
+ * someone actually resolves it, not just on the day it was flagged). Most
+ * recently flagged first, same ordering as listPackingIssuesForDate above.
+ * pruneOldRecords (see above) exempts OPEN rows from its normal
+ * age-based cleanup for the same reason - an old unresolved flag should
+ * never silently vanish out from under this list.
+ */
+function listOpenPackingIssues() {
+  return sheetToObjects_(getSheet_(SHEET_NAMES.PACKING_ISSUES))
+    .filter(function (p) { return p.Status === ISSUE_STATUS.OPEN; })
+    // See the matching comment in listPackingIssuesForDate above - same
+    // "Invalid Date" fix (Shane, 2026-09-28), needed here too since this is
+    // the Dashboard's own path and wasn't normalizing its filter's Date at
+    // all (no date filtering happens here, so there was no normalizeDateStr_
+    // call anywhere in this function to begin with).
+    .map(function (p) { p.Date = normalizeDateStr_(p.Date); return p; })
+    .sort(function (a, b) { return new Date(b.FlaggedAt) - new Date(a.FlaggedAt); });
+}
+
+/**
+ * Marks a flagged packing issue Resolved or back to Open - mirrors
+ * setJobStatus's overwrite-by-ID, toggle-back-and-forth pattern, so a
+ * Dispatch Manager can tick one off (or undo a mistaken tick) straight from
+ * the Dashboard checklist. Un-resolving clears ResolvedByName/At, same
+ * reasoning as CoaConfirmed's/Jobs' own clear-on-undo.
+ */
+function setPackingIssueStatus(issueId, status, checkerName) {
+  var resolved = status === ISSUE_STATUS.RESOLVED;
+  updateRowById_(getSheet_(SHEET_NAMES.PACKING_ISSUES), SHEET_HEADERS.PackingIssues, issueId, {
+    Status: resolved ? ISSUE_STATUS.RESOLVED : ISSUE_STATUS.OPEN,
+    ResolvedByName: resolved ? String(checkerName || '') : '',
+    ResolvedAt: resolved ? nowIso_() : ''
+  });
+  return { ok: true };
+}
+
+// ---------------------------------------------------------------------------
+// TRUCK ISSUES (checker-reported truck problems)
+//
+// A mandatory "any truck issues?" prompt (mechanical problems, cleanliness,
+// etc.) shown once at the very start of a BRAND-NEW trip - Shane's request
+// (2026-09-16): "when clicking on a truck to start loading orders a window
+// first comes up to report any truck issues". Once per new trip, not every
+// time the truck is opened - see TruckSessions.TruckIssuesPrompted (set
+// false only by createTruckSession_, i.e. only when there's genuinely no
+// existing in-progress session to resume) and reportTruckIssues below, which
+// is the only thing that ever flips it back to true. Also non-blocking, same
+// as PackingIssues above - reported issues are a checklist for Dispatch
+// Managers on the Dashboard, not a gate on dispatching.
+// ---------------------------------------------------------------------------
+
+/**
+ * Records the answer to that prompt. issues is an array of short free-text
+ * notes - an empty array (or all-blank entries) is exactly what "No truck
+ * issues" sends: nothing gets appended to TruckIssues, but the session is
+ * still marked prompted so it's never asked again this trip. Always marks
+ * TruckIssuesPrompted regardless of whether any real issue text came
+ * through, since the point being tracked is "was the checker asked", not
+ * "did anything come of it".
+ */
+function reportTruckIssues(sessionId, issues, checkerId, checkerName) {
+  var session = sheetToObjects_(getSheet_(SHEET_NAMES.SESSIONS)).filter(function (s) { return s.ID === sessionId; })[0];
+  if (!session) throw new Error('Truck session not found.');
+
+  var sheet = getSheet_(SHEET_NAMES.TRUCK_ISSUES);
+  var notes = (issues || []).map(function (rawNote) { return String(rawNote || '').trim(); }).filter(Boolean);
+  appendObjects_(sheet, SHEET_HEADERS.TruckIssues, notes.map(function (note) {
+    return {
+      ID: Utilities.getUuid(), TruckSessionID: sessionId, TruckID: session.TruckID, TruckName: session.TruckName,
+      Date: todayString_(), Note: note, Status: ISSUE_STATUS.OPEN,
+      ReportedByID: checkerId || '', ReportedByName: checkerName || '', ReportedAt: nowIso_(),
+      ResolvedByName: '', ResolvedAt: ''
+    };
+  }));
+
+  updateRowById_(getSheet_(SHEET_NAMES.SESSIONS), SHEET_HEADERS.TruckSessions, sessionId, { TruckIssuesPrompted: true });
+  return { ok: true };
+}
+
+/** For History's "Truck Issues" checklist - every issue reported on the picked day, across all trucks, most recently reported first, regardless of whether it's since been resolved (a historical record of that specific day). The Admin Dashboard itself uses listOpenTruckIssues below instead - see its own comment for why. */
+function listTruckIssuesForDate(dateStr) {
+  var targetDate = dateStr || todayString_();
+  return sheetToObjects_(getSheet_(SHEET_NAMES.TRUCK_ISSUES))
+    .filter(function (t) { return normalizeDateStr_(t.Date) === targetDate; })
+    // Same "Invalid Date" fix as listPackingIssuesForDate above (Shane,
+    // 2026-09-28) - t.Date was normalized for the day-filter but not for
+    // what actually gets sent back to the frontend.
+    .map(function (t) { t.Date = normalizeDateStr_(t.Date); return t; })
+    .sort(function (a, b) { return new Date(b.ReportedAt) - new Date(a.ReportedAt); });
+}
+
+/**
+ * For the Admin Dashboard's "Truck Issues" checklist - EVERY still-open
+ * report, regardless of which day it was made (same reasoning, and same
+ * pruneOldRecords exemption for OPEN rows, as listOpenPackingIssues above -
+ * Shane's 2026-09-22 request). Most recently reported first, same ordering
+ * as listTruckIssuesForDate above.
+ */
+function listOpenTruckIssues() {
+  return sheetToObjects_(getSheet_(SHEET_NAMES.TRUCK_ISSUES))
+    .filter(function (t) { return t.Status === ISSUE_STATUS.OPEN; })
+    // Same "Invalid Date" fix as listOpenPackingIssues above (Shane, 2026-09-28).
+    .map(function (t) { t.Date = normalizeDateStr_(t.Date); return t; })
+    .sort(function (a, b) { return new Date(b.ReportedAt) - new Date(a.ReportedAt); });
+}
+
+/** Marks a reported truck issue Resolved or back to Open - same toggle pattern as setPackingIssueStatus above, for the Dispatch Manager's Dashboard checklist. */
+function setTruckIssueStatus(issueId, status, checkerName) {
+  var resolved = status === ISSUE_STATUS.RESOLVED;
+  updateRowById_(getSheet_(SHEET_NAMES.TRUCK_ISSUES), SHEET_HEADERS.TruckIssues, issueId, {
+    Status: resolved ? ISSUE_STATUS.RESOLVED : ISSUE_STATUS.OPEN,
+    ResolvedByName: resolved ? String(checkerName || '') : '',
+    ResolvedAt: resolved ? nowIso_() : ''
+  });
+  return { ok: true };
+}
+
+/**
+ * Works out which OrderIDs are dispatched, by cross-referencing
+ * OrderChecks against TruckSessions - an order counts as dispatched if ANY
+ * of its OrderChecks rows belongs to a truck session that has since been
+ * marked Dispatched. Not scoped to today's OrderChecks only, since an
+ * overdue order may have been allocated/dispatched on a day after its
+ * delivery date.
+ *
+ * Keyed by orderIdKey_ (build-2026-10-30, was a bare String(...)) - traced
+ * from a dispatch manager's report of an order that had genuinely
+ * dispatched on a truck still showing in the Dashboard's Outstanding
+ * section. buildOrderFulfillmentSummary_ below cross-references this
+ * lookup against Packing & Production's OWN freshly-read OrderID string -
+ * if Dispatch's own stored OrderID had silently lost a leading zero to
+ * Sheets' numeric coercion (see orderIdKey_'s own comment, and
+ * setupSpreadsheet's matching Plain-Text fix), a bare string comparison
+ * here would silently and PERMANENTLY stop matching that order as
+ * dispatched, even though it correctly shows up under its truck on the
+ * Dashboard's own "Today's trucks" card (which groups by TruckSessionID
+ * only, never by OrderID) - exactly that split symptom.
+ */
+function getDispatchedOrderIds_() {
+  var sessionsById = {};
+  sheetToObjects_(getSheet_(SHEET_NAMES.SESSIONS)).forEach(function (s) { sessionsById[s.ID] = s; });
+
+  var dispatchedOrderIds = {};
+  sheetToObjects_(getSheet_(SHEET_NAMES.ORDER_CHECKS)).forEach(function (c) {
+    var session = sessionsById[c.TruckSessionID];
+    if (session && session.Status === SESSION_STATUS.DISPATCHED) dispatchedOrderIds[orderIdKey_(c.OrderID)] = true;
+  });
+  return dispatchedOrderIds;
+}
+
+/**
+ * Cross-references a list of Packing & Production orders (from
+ * readTodaysOrdersFromPacking_/readOverdueOrdersFromPacking_) against
+ * already-computed dispatched/collected OrderID lookups to work out which
+ * are still outstanding. Takes those lookups rather than deriving them
+ * itself, since getOrderFulfillmentOverview below calls this twice (today +
+ * overdue) per Dashboard load - each call rebuilding TruckSessions,
+ * OrderChecks and CollectedOrders from scratch would double 3 full-sheet
+ * reads on every single load for identical answers both times.
+ */
+function buildOrderFulfillmentSummary_(orders, dispatchedOrderIds, collectedOrderIds) {
+  var withStatus = orders.map(function (o) {
+    var dispatched = !!dispatchedOrderIds[orderIdKey_(o.orderId)];
+    var collected = !!collectedOrderIds[orderIdKey_(o.orderId)];
+    return {
+      orderId: o.orderId, orderNumber: o.orderNumber, customer: o.customer, deliveryDate: o.deliveryDate,
+      dispatched: dispatched, collected: collected, outstanding: !dispatched && !collected
+    };
+  });
+
+  // Itemized alongside each count (not just outstanding, which is all the
+  // frontend used to need) so the Dashboard's "Orders due/Dispatched/
+  // Collected/Outstanding" tiles can each show their own underlying order
+  // list on demand instead of just a number.
+  return {
+    total: withStatus.length,
+    all: withStatus,
+    dispatchedCount: withStatus.filter(function (o) { return o.dispatched; }).length,
+    dispatched: withStatus.filter(function (o) { return o.dispatched; }),
+    collectedCount: withStatus.filter(function (o) { return o.collected; }).length,
+    collected: withStatus.filter(function (o) { return o.collected; }),
+    outstandingCount: withStatus.filter(function (o) { return o.outstanding; }).length,
+    outstanding: withStatus.filter(function (o) { return o.outstanding; })
+  };
+}
+
+/**
+ * The Dispatch Manager's main screen: orders due on referenceDate
+ * (total/dispatched/collected/outstanding, with the outstanding ones
+ * listed so they can be chased or marked collected) plus a warning list of
+ * orders due before referenceDate that still haven't gone out or been
+ * collected. referenceDate defaults to the real current day; the Admin
+ * dashboard's date picker passes in the day it's viewing so this section
+ * moves together with the rest of the page instead of always meaning
+ * "right now" regardless of what's selected.
+ */
+function getOrderFulfillmentOverview(referenceDate) {
+  var date = referenceDate || todayString_();
+  // Fetch the Packing & Production data ONCE and share it between the
+  // "today" and "overdue" calculations - this used to be the single most
+  // expensive thing a Dashboard load did, and it was doing it twice.
+  var allOrders = fetchAllOrdersFromPacking_();
+  // Same sharing principle as allOrders above, one level down: both summary
+  // calls below need the same dispatched/collected lookups, so compute each
+  // once here instead of having buildOrderFulfillmentSummary_ redo it twice.
+  var dispatchedOrderIds = getDispatchedOrderIds_();
+  var collectedOrderIds = getCollectedOrderIds_();
+  var todaySummary = buildOrderFulfillmentSummary_(readTodaysOrdersFromPacking_(date, allOrders), dispatchedOrderIds, collectedOrderIds);
+  var overdue = buildOrderFulfillmentSummary_(readOverdueOrdersFromPacking_(date, allOrders), dispatchedOrderIds, collectedOrderIds);
+  return {
+    date: date,
+    today: todaySummary,
+    // Only the still-outstanding overdue orders are a warning - "overdue
+    // but dispatched/collected" isn't something anyone needs to act on.
+    overdueWarnings: overdue.outstanding
+  };
 }

@@ -1035,7 +1035,7 @@
           <p class="hint">Everyone signs in with this name and PIN - what they can do after that is decided by their role.</p>
           <div class="row-inline">
             <input type="text" id="new-user-name" placeholder="Name">
-            <input type="text" id="new-user-pin" placeholder="PIN" style="max-width:100px;">
+            <input type="password" id="new-user-pin" inputmode="numeric" autocomplete="new-password" placeholder="PIN" style="max-width:100px;">
             <select id="new-user-role" style="max-width:170px;">
               <option value="Checker">Checker</option>
               <option value="Dispatch Manager">Dispatch Manager</option>
@@ -1107,7 +1107,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-11-01-01';
+  var BUILD_VERSION = 'build-2026-11-06-01';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -1332,7 +1332,25 @@
     // the whole sequence rather than flickering unblocked between retries.
     var tapEl = silent ? null : currentTapTarget;
     apiCallStarted(tapEl, silent);
-    return callApiAttempt_(action, params, 0).finally(function () { apiCallFinished(tapEl, silent); });
+    return callApiAttempt_(action, params, 0)
+      .catch(function (err) {
+        if (err && err.isAuthError) handleAuthLost_(err);
+        throw err;
+      })
+      .finally(function () { apiCallFinished(tapEl, silent); });
+  }
+
+  // The server stopped accepting this login mid-session (PIN changed, user
+  // deactivated or deleted, too many wrong PINs). Handled here, for every
+  // call - including silent background polls and callers with their own
+  // catch - so the user always lands back on the login screen with the
+  // reason, instead of on a screen where every action now fails. Only acts
+  // the first time: once state.auth is cleared, any other in-flight call
+  // failing the same way leaves the login screen (and its message) alone.
+  function handleAuthLost_(err) {
+    if (!state.auth) return;
+    showLogin();
+    document.getElementById('login-error').textContent = (err && err.message) || 'Please sign in again.';
   }
 
   function callApiAttempt_(action, params, retryCount) {
@@ -1343,8 +1361,13 @@
     // after allocating it would otherwise be able to return the stale
     // "not allocated" result. cache: 'no-store' plus a unique _=timestamp
     // param on every request (fresh on every retry too) makes that impossible.
+    // Every call except the login itself carries the signed-in user's name
+    // + PIN (build-2026-11-06-01) - Code.gs re-checks them, and the user's
+    // role, on every request. Read fresh on each attempt (retries included)
+    // so a PIN the user just changed for themselves is picked up.
     var url = CONFIG.API_URL + '?action=' + encodeURIComponent(action) +
       '&params=' + encodeURIComponent(JSON.stringify(params || [])) +
+      (state.auth && action !== 'authenticateUser' ? '&auth=' + encodeURIComponent(JSON.stringify(state.auth)) : '') +
       '&_=' + Date.now();
 
     // A request that never resolves (a stuck server-side lock, a dropped
@@ -1362,7 +1385,13 @@
         return r.json();
       })
       .then(function (res) {
-        if (!res.success) throw new Error(res.error || 'Request failed');
+        if (!res.success) {
+          var apiErr = new Error(res.error || 'Request failed');
+          // Login no longer valid (PIN changed, user deactivated/deleted,
+          // too many wrong PINs) - see handleApiRequest_ in Code.gs.
+          if (res.authError) apiErr.isAuthError = true;
+          throw apiErr;
+        }
         return res.result;
       })
       .catch(function (err) {
@@ -1406,6 +1435,7 @@
     currentOrder: null,   // { orderCheck, items }
     pendingQtyItemId: null,
     pendingFlagItemId: null,
+    auth: null,           // { name, pin } - sent with every API call (see callApiAttempt_); memory only, never stored
     adminRole: null,      // null | 'admin' | 'dispatchManager' - which role got them into screen-admin
     role: null            // the signed-in user's actual role: 'Admin' | 'Dispatch Manager' | 'Checker'
   };
@@ -1431,6 +1461,7 @@
   }
 
   function showLogin() {
+    state.auth = null;
     state.checker = null;
     state.adminRole = null;
     state.role = null;
@@ -1456,6 +1487,7 @@
     // matched user's role, not on which button was tapped.
     callApi('authenticateUser', [name, pin]).then(function (res) {
       if (!res.ok) { document.getElementById('login-error').textContent = res.error; return; }
+      state.auth = { name: name, pin: pin };
       state.role = res.user.role;
       // Both Admin and Dispatch Manager need a truck-checking identity to
       // go back to - Admin lands on the full Admin area first, but can
@@ -3575,7 +3607,9 @@
           var role = u.Role || 'Checker';
           return '<tr>' +
             '<td><input type="text" style="' + TRUCK_FIELD_STYLE + '" value="' + escapeHtml(u.Name) + '" onchange="updateUserField(\'' + u.ID + '\', \'Name\', this.value)"></td>' +
-            '<td><input type="text" style="' + TRUCK_FIELD_STYLE + '" value="' + escapeHtml(String(u.PIN)) + '" onchange="updateUserField(\'' + u.ID + '\', \'PIN\', this.value)"></td>' +
+            // PINs are never sent to the browser - this box is only for
+            // setting a NEW one; leaving it blank changes nothing.
+            '<td><input type="password" inputmode="numeric" autocomplete="new-password" placeholder="New PIN" style="' + TRUCK_FIELD_STYLE + '" onchange="updateUserField(\'' + u.ID + '\', \'PIN\', this.value)"></td>' +
             '<td><select style="' + TRUCK_FIELD_STYLE + '" onchange="updateUserField(\'' + u.ID + '\', \'Role\', this.value)">' +
               USER_ROLES.map(function (r) { return '<option value="' + r + '"' + (r === role ? ' selected' : '') + '>' + r + '</option>'; }).join('') +
             '</select></td>' +
@@ -3601,12 +3635,27 @@
   }
 
   function updateUserField(id, field, value) {
+    if (field === 'PIN') {
+      value = String(value).trim();
+      if (!value) return;
+      if (!/^[0-9]{4,}$/.test(value)) { showFatalError(new Error('PIN must be at least 4 digits.')); loadUsers(); return; }
+    }
     var patch = {};
     patch[field] = value;
+    var isSelf = state.checker && id === state.checker.id;
     // Reload on failure too (e.g. the "can't demote the only Admin" guard) -
     // otherwise the dropdown/checkbox is left showing the rejected value
     // even though the backend never saved it.
-    callApi('updateChecker', [id, patch]).then(loadUsers).catch(function (err) {
+    callApi('updateChecker', [id, patch]).then(function () {
+      // Editing your OWN name or PIN changes the credentials every later
+      // call has to carry - keep them in step, or the very next call
+      // would be rejected and sign you out.
+      if (isSelf && state.auth) {
+        if (field === 'PIN') state.auth.pin = value;
+        if (field === 'Name') { state.auth.name = String(value).trim(); state.checker.name = state.auth.name; }
+      }
+      loadUsers();
+    }).catch(function (err) {
       showFatalError(err);
       loadUsers();
     });
@@ -4394,6 +4443,9 @@
   }
 
   function showFatalError(err) {
+    // Already handled by handleAuthLost_ (see callApi) - the user is back
+    // on the login screen with the reason shown there.
+    if (err && err.isAuthError) return;
     // A transient failure (callApiAttempt_'s isTransient errors - the 20s+
     // timeout, or Apps Script's front door briefly too busy to answer) has
     // already used up its automatic retries by the time it gets here (see

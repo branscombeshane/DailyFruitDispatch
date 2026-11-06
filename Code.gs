@@ -167,7 +167,7 @@ var SHEET_HEADERS = {
 
 function doGet(e) {
   if (e && e.parameter && e.parameter.action) {
-    return handleApiRequest_(e.parameter.action, safeJsonParse_(e.parameter.params) || []);
+    return handleApiRequest_(e.parameter.action, safeJsonParse_(e.parameter.params) || [], safeJsonParse_(e.parameter.auth));
   }
   return HtmlService.createHtmlOutputFromFile('index')
     .setTitle('Daily Fruit - Dispatch')
@@ -176,7 +176,7 @@ function doGet(e) {
 
 function doPost(e) {
   var body = safeJsonParse_(e && e.postData && e.postData.contents) || {};
-  return handleApiRequest_(body.action, body.params || []);
+  return handleApiRequest_(body.action, body.params || [], body.auth);
 }
 
 function safeJsonParse_(str) {
@@ -242,16 +242,179 @@ var API_ACTIONS = {
   setTruckIssueStatus: setTruckIssueStatus
 };
 
-function handleApiRequest_(action, params) {
+// ---------------------------------------------------------------------------
+// API ACCESS CONTROL (build-2026-11-06-01)
+//
+// Before this, handleApiRequest_ ran any action above for anyone who called
+// the Web App URL - the PIN was only ever checked once, by authenticateUser,
+// and the frontend's role-based screens were the only thing standing
+// between a caller and e.g. listCheckers (every PIN) or saveDataSourceConfig.
+// The Web App URL is public (it's in index.html on GitHub Pages), so that
+// was no protection at all.
+//
+// Now every request except authenticateUser must carry auth = { name, pin },
+// which is re-checked against the Checkers sheet (via a ~60s cache - see
+// getAuthUsers_) before the action runs, and the matched user's Role must be
+// allowed that action by ACTION_ROLES below. Anything not listed in
+// ACTION_ROLES is refused outright, so a new action added to API_ACTIONS
+// without a matching entry here fails closed rather than open.
+// ---------------------------------------------------------------------------
+
+// Actions that skip the credential check. authenticateUser checks the
+// credentials itself (and counts failed attempts the same way).
+var PUBLIC_ACTIONS = { authenticateUser: true };
+
+var ACTION_ROLES = buildActionRoles_();
+
+function buildActionRoles_() {
+  var ALL = [ROLES.ADMIN, ROLES.DISPATCH_MANAGER, ROLES.CHECKER, ROLES.CUSTOMER_CARE];
+  var TRUCK_FLOW = [ROLES.ADMIN, ROLES.DISPATCH_MANAGER, ROLES.CHECKER];
+  var MANAGERS = [ROLES.ADMIN, ROLES.DISPATCH_MANAGER];
+  var ADMIN_ONLY = [ROLES.ADMIN];
+  var groups = [
+    // Customer Care's order lookup - also used by the Dashboard's own
+    // order search, so every role gets it.
+    [ALL, ['findOrderAcrossTrucks']],
+    // Truck-checking flow. Includes the Trucks Board (getTruckAssignmentBoard/
+    // assignOrderToTruck): since 2026-10-26 Checkers land on the board and
+    // drag orders onto trucks themselves (see goToTrucks in index.html), so
+    // taking it away from Checkers would break their login. listDrivers
+    // feeds the trip's driver dropdowns.
+    [TRUCK_FLOW, [
+      'getTrucksForSelection', 'listDrivers', 'searchOrders', 'getOrdersForSession',
+      'startTruckSession', 'startNewTruckSession', 'getTruckSessionsForTruckToday',
+      'getTruckSessionState', 'updateTrayCounts', 'updateSessionTrip',
+      'allocateOrderToTruck', 'assignOrderToTruck', 'getTruckAssignmentBoard',
+      'getTruckPackTimerInfo', 'getOrderForChecking', 'unallocateOrder',
+      'setItemStatus', 'setOrderCoaConfirmed', 'markTruckDispatched',
+      'getJobsForSession', 'addJobToTruck', 'setJobStatus', 'removeJob',
+      'flagPackingIssue', 'reportTruckIssues'
+    ]],
+    // Dashboard / History / issues checklists / collected orders.
+    [MANAGERS, [
+      'getTodaysTruckOverview', 'getDashboardForDate', 'getLateTruckLeaderboard',
+      'getOrderFulfillmentOverview', 'markOrderCollected', 'unmarkOrderCollected',
+      'listJobsForDate', 'listPackingIssuesForDate', 'listOpenPackingIssues',
+      'setPackingIssueStatus', 'listTruckIssuesForDate', 'listOpenTruckIssues',
+      'setTruckIssueStatus'
+    ]],
+    // Settings: users, trucks, drivers, data source.
+    [ADMIN_ONLY, [
+      'listCheckers', 'addChecker', 'updateChecker', 'deleteChecker',
+      'listTrucks', 'addTruck', 'updateTruck', 'deleteTruck',
+      'addDriver', 'updateDriver', 'deleteDriver',
+      'getAdminSettings', 'probeSpreadsheet', 'saveDataSourceConfig'
+    ]]
+  ];
+  var map = {};
+  groups.forEach(function (g) {
+    g[1].forEach(function (action) { map[action] = g[0]; });
+  });
+  return map;
+}
+
+// Thrown for a missing/wrong/stale login, so handleApiRequest_ can flag the
+// response with authError: true - the frontend uses that to send the user
+// back to the login screen (e.g. their PIN was just changed, or they were
+// deactivated) instead of showing a generic error.
+function AuthError_(message) {
+  var err = new Error(message);
+  err.isAuthError = true;
+  return err;
+}
+
+function handleApiRequest_(action, params, auth) {
   var result;
   try {
     var fn = API_ACTIONS[action];
     if (!fn) throw new Error('Unknown action: ' + action);
-    result = fn.apply(null, params);
+    if (!PUBLIC_ACTIONS[action]) {
+      if (!auth || !auth.name || !auth.pin) throw AuthError_('Please sign in again.');
+      var check = verifyCredentials_(auth.name, auth.pin);
+      if (!check.ok) throw AuthError_(check.error);
+      var allowed = ACTION_ROLES[action];
+      if (!allowed || allowed.indexOf(check.user.role) === -1) {
+        throw new Error('Your role (' + check.user.role + ') doesn\'t have access to that.');
+      }
+    }
+    result = fn.apply(null, Array.isArray(params) ? params : []);
     return jsonResponse_({ success: true, result: result });
   } catch (err) {
-    return jsonResponse_({ success: false, error: err.message });
+    var out = { success: false, error: err.message };
+    if (err.isAuthError) out.authError = true;
+    return jsonResponse_(out);
   }
+}
+
+// ---------------------------------------------------------------------------
+// CREDENTIAL CHECKS
+// ---------------------------------------------------------------------------
+
+var AUTH_USERS_CACHE_KEY = 'authUsers_v1';
+var AUTH_USERS_CACHE_TTL_SECONDS = 60;
+// Brute-force guard: a 4-digit PIN is only 10,000 guesses, and with every
+// request now carrying a PIN, any action is a guessing endpoint, not just
+// the login. After this many wrong PINs for one name, that name is locked
+// for AUTH_LOCKOUT_SECONDS (counted per name, so one person's lockout
+// doesn't affect anyone else).
+var AUTH_MAX_FAILURES = 10;
+var AUTH_LOCKOUT_SECONDS = 15 * 60;
+
+function hashPin_(pin) {
+  var bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, 'dispatch-pin:' + String(pin).trim());
+  return Utilities.base64Encode(bytes);
+}
+
+// The Checkers sheet, reduced to what auth needs, cached for ~60s so the
+// per-request check doesn't cost a full sheet read on every call. PINs are
+// stored hashed in the cache. addChecker/updateChecker/deleteChecker clear
+// the cache, so changes made in the app apply immediately; an edit typed
+// straight into the sheet takes up to 60s.
+function getAuthUsers_() {
+  var cache = CacheService.getScriptCache();
+  var cached = cache.get(AUTH_USERS_CACHE_KEY);
+  if (cached) {
+    try { return JSON.parse(cached); } catch (e) { /* fall through to a fresh read */ }
+  }
+  var users = sheetToObjects_(getSheet_(SHEET_NAMES.CHECKERS)).map(function (u) {
+    return {
+      id: u.ID,
+      name: String(u.Name).trim(),
+      pinHash: hashPin_(u.PIN),
+      active: !(u.Active === false || String(u.Active).toUpperCase() === 'FALSE'),
+      role: u.Role || ROLES.CHECKER
+    };
+  });
+  try { cache.put(AUTH_USERS_CACHE_KEY, JSON.stringify(users), AUTH_USERS_CACHE_TTL_SECONDS); } catch (e) { /* best-effort */ }
+  return users;
+}
+
+function clearAuthUsersCache_() {
+  try { CacheService.getScriptCache().remove(AUTH_USERS_CACHE_KEY); } catch (e) { /* best-effort */ }
+}
+
+function verifyCredentials_(name, pin) {
+  var key = String(name || '').trim().toLowerCase();
+  var pinStr = String(pin == null ? '' : pin).trim();
+  if (!key || !pinStr) return { ok: false, error: 'Enter your name and PIN.' };
+
+  var cache = CacheService.getScriptCache();
+  var failKey = 'authFail_' + hashPin_(key).slice(0, 40);
+  var failures = parseInt(cache.get(failKey), 10) || 0;
+  if (failures >= AUTH_MAX_FAILURES) {
+    return { ok: false, error: 'Too many wrong PINs for this name. Try again in 15 minutes, or ask an Admin.' };
+  }
+
+  var match = getAuthUsers_().filter(function (u) { return u.name.toLowerCase() === key; })[0];
+  if (!match || match.pinHash !== hashPin_(pinStr)) {
+    try { cache.put(failKey, String(failures + 1), AUTH_LOCKOUT_SECONDS); } catch (e) { /* best-effort */ }
+    // Same message whether the name or the PIN was wrong, so the endpoint
+    // can't be used to find out which names exist.
+    return { ok: false, error: 'Name or PIN not recognized.' };
+  }
+  if (!match.active) return { ok: false, error: 'This user is inactive. See an admin.' };
+  if (failures) { try { cache.remove(failKey); } catch (e) { /* best-effort */ } }
+  return { ok: true, user: { id: match.id, name: match.name, role: match.role } };
 }
 
 function jsonResponse_(obj) {
@@ -749,25 +912,35 @@ function pruneOldRecords() {
  * matched user's Role.
  */
 function authenticateUser(name, pin) {
-  var users = sheetToObjects_(getSheet_(SHEET_NAMES.CHECKERS));
-  var match = users.filter(function (u) {
-    return String(u.Name).trim().toLowerCase() === String(name).trim().toLowerCase();
-  })[0];
-  if (!match) return { ok: false, error: 'Name not recognized.' };
-  if (match.Active === false) return { ok: false, error: 'This user is inactive. See an admin.' };
-  if (String(match.PIN) !== String(pin).trim()) return { ok: false, error: 'Incorrect PIN.' };
-  return { ok: true, user: { id: match.ID, name: match.Name, role: match.Role || ROLES.CHECKER } };
+  var check = verifyCredentials_(name, pin);
+  if (!check.ok) return { ok: false, error: check.error };
+  return { ok: true, user: check.user };
 }
 
 // ---------------------------------------------------------------------------
 // ADMIN - USERS CRUD (Checkers sheet - Admin / Dispatch Manager / Checker)
 // ---------------------------------------------------------------------------
 
+// PINs never leave the server (build-2026-11-06-01) - the Users screen
+// gets everything else, and editing a PIN sends a new one via updateChecker.
 function listCheckers() {
-  return sheetToObjects_(getSheet_(SHEET_NAMES.CHECKERS));
+  return sheetToObjects_(getSheet_(SHEET_NAMES.CHECKERS)).map(function (u) {
+    var copy = {};
+    Object.keys(u).forEach(function (k) { if (k !== 'PIN') copy[k] = u[k]; });
+    return copy;
+  });
+}
+
+function validateNewPin_(pin) {
+  var p = String(pin == null ? '' : pin).trim();
+  if (!/^[0-9]{4,}$/.test(p)) throw new Error('PIN must be at least 4 digits.');
+  return p;
 }
 
 function addChecker(name, pin, role) {
+  if (!String(name || '').trim()) throw new Error('Name is required.');
+  pin = validateNewPin_(pin);
+  clearAuthUsersCache_();
   var sheet = getSheet_(SHEET_NAMES.CHECKERS);
   var id = Utilities.getUuid();
   // Force PIN to Plain Text - a PIN like "0123" would otherwise silently
@@ -794,6 +967,14 @@ function countOtherActiveAdmins_(users, excludingId) {
 }
 
 function updateChecker(id, patch) {
+  patch = patch || {};
+  // A blank PIN field means "leave the PIN alone", never "set it blank".
+  if ('PIN' in patch) {
+    if (String(patch.PIN == null ? '' : patch.PIN).trim() === '') delete patch.PIN;
+    else patch.PIN = validateNewPin_(patch.PIN);
+  }
+  if ('ID' in patch) delete patch.ID;
+  clearAuthUsersCache_();
   var users = sheetToObjects_(getSheet_(SHEET_NAMES.CHECKERS));
   var current = users.filter(function (u) { return u.ID === id; })[0];
   if (current) {
@@ -807,6 +988,7 @@ function updateChecker(id, patch) {
   // Force PIN to Plain Text before writing, same reason as addChecker above -
   // otherwise editing a PIN to "0123" would silently save as 123.
   updateRowById_(getSheet_(SHEET_NAMES.CHECKERS), SHEET_HEADERS.Checkers, id, patch, ['PIN']);
+  clearAuthUsersCache_();
   return { ok: true };
 }
 
@@ -817,6 +999,7 @@ function deleteChecker(id) {
     throw new Error('Can\'t delete ' + current.Name + ' - they\'re the only active Admin. Make someone else Admin first.');
   }
   deleteRowById_(getSheet_(SHEET_NAMES.CHECKERS), id);
+  clearAuthUsersCache_();
   return { ok: true };
 }
 

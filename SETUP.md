@@ -774,6 +774,35 @@ list further, the same way the search and date work together. Clearing
 either the text or the date (or tapping **Clear**) goes back to searching
 every day at once, same as before this was added.
 
+## Access control: every request is checked (build-2026-11-06-01)
+
+The Web App URL is public (it's in `index.html`), so the server can't trust
+anything the screens hide. Every API call except `authenticateUser` now
+carries the signed-in user's name + PIN, and `handleApiRequest_` in
+`Code.gs` re-checks them against the Checkers ("Users") sheet and then
+checks the user's Role against `ACTION_ROLES` before running the action:
+
+| Role | Allowed actions |
+|---|---|
+| Customer Care | `findOrderAcrossTrucks` only |
+| Checker | truck flow, including the Trucks board (Checkers drag orders onto trucks) |
+| Dispatch Manager | truck flow + Dashboard, History, issues, collected orders |
+| Admin | everything, including Users, Trucks, Drivers, Data Source |
+
+- An action missing from `ACTION_ROLES` is refused. **When you add a new
+  action to `API_ACTIONS`, also add it to `buildActionRoles_`**, or nobody
+  can call it.
+- The user list is cached for 60 seconds. Changes made in Admin > Users
+  apply straight away; a change typed directly into the sheet can take up
+  to a minute.
+- PINs are never sent to the browser. The Users screen has a blank
+  "New PIN" box per user. Leave it blank to keep the current PIN. New PINs
+  must be at least 4 digits.
+- 10 wrong PINs for one name locks that name for 15 minutes.
+- If the server stops accepting a login mid-session (PIN changed, user
+  deactivated or deleted), the app goes back to the login screen and shows
+  the reason.
+
 ## 5. GitHub repo + Pages + domain
 
 Same as the other two systems:

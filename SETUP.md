@@ -774,6 +774,25 @@ list further, the same way the search and date work together. Clearing
 either the text or the date (or tapping **Clear**) goes back to searching
 every day at once, same as before this was added.
 
+## Late dispatch reasons (build-2026-11-09-01)
+
+When a truck's **first trip of the day** is marked dispatched **after
+07:00**, the checker has to pick a reason before it goes. This is the same
+"late" rule as the red "Late leaving" badge and the Trucks Leaving Late
+card. Trip 2+ is never asked. The time is the server's clock, not the
+phone's.
+
+- Admins manage the list in **Admin > Settings > Late Reasons** (add,
+  rename, untick Active, delete).
+- If there are no active reasons, nobody is asked. Set the list up first.
+- The chosen reason is saved on the trip (`TruckSessions.LateReason`) as
+  text, so renaming or deleting a reason later doesn't change past records.
+- It shows on the Dashboard truck card, in the Dispatch Timeline, and as a
+  per-reason count on the Trucks Leaving Late card.
+- The `LateReasons` tab and the `LateReason` column are created
+  automatically the first time they're needed; no need to re-run
+  `setupSpreadsheet()`.
+
 ## Access control: every request is checked (build-2026-11-06-01)
 
 The Web App URL is public (it's in `index.html`), so the server can't trust

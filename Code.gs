@@ -25,7 +25,8 @@ var SHEET_NAMES = {
   COLLECTED_ORDERS: 'CollectedOrders',
   JOBS: 'Jobs',
   PACKING_ISSUES: 'PackingIssues',
-  TRUCK_ISSUES: 'TruckIssues'
+  TRUCK_ISSUES: 'TruckIssues',
+  LATE_REASONS: 'LateReasons'
 };
 
 var SESSION_STATUS = { IN_PROGRESS: 'In Progress', DISPATCHED: 'Dispatched' };
@@ -97,7 +98,7 @@ var SHEET_HEADERS = {
   // reportTruckIssues once the checker answers it, so the prompt fires
   // once per new trip, not every time the truck is opened/resumed (Shane's
   // request, 2026-09-16 - see the TRUCK ISSUES section further down).
-  TruckSessions: ['ID', 'Date', 'TruckID', 'TruckName', 'CheckerID', 'CheckerName', 'StartedAt', 'TrayCount', 'TrayCountUpdatedAt', 'Status', 'DispatchedAt', 'DispatchedBy', 'Driver', 'DispatchedWithWarnings', 'DispatchWarningsText', 'Route', 'TraySmall', 'TrayMedium', 'TrayLarge', 'TrayOther', 'DriverContacts', 'NoTraysOnTrip', 'TruckIssuesPrompted'],
+  TruckSessions: ['ID', 'Date', 'TruckID', 'TruckName', 'CheckerID', 'CheckerName', 'StartedAt', 'TrayCount', 'TrayCountUpdatedAt', 'Status', 'DispatchedAt', 'DispatchedBy', 'Driver', 'DispatchedWithWarnings', 'DispatchWarningsText', 'Route', 'TraySmall', 'TrayMedium', 'TrayLarge', 'TrayOther', 'DriverContacts', 'NoTraysOnTrip', 'TruckIssuesPrompted', 'LateReason'],
   // RequiresCoa/CoaConfirmed(By/At) appended at the end (see the comment on
   // TruckSessions above re: column order never shifting on a live sheet) -
   // RequiresCoa is a snapshot of the order's Packing & Production flag at
@@ -151,7 +152,15 @@ var SHEET_HEADERS = {
   // (see TruckSessions.TruckIssuesPrompted above) - Shane's request
   // (2026-09-16). Also non-blocking, same reasoning as PackingIssues above -
   // just a checklist for Dispatch Managers to work through on the Dashboard.
-  TruckIssues: ['ID', 'TruckSessionID', 'TruckID', 'TruckName', 'Date', 'Note', 'Status', 'ReportedByID', 'ReportedByName', 'ReportedAt', 'ResolvedByName', 'ResolvedAt']
+  TruckIssues: ['ID', 'TruckSessionID', 'TruckID', 'TruckName', 'Date', 'Note', 'Status', 'ReportedByID', 'ReportedByName', 'ReportedAt', 'ResolvedByName', 'ResolvedAt'],
+  // The list a checker picks from when a truck's first trip of the day is
+  // dispatched late (build-2026-11-09-01, Shane's request) - managed in
+  // Admin > Settings > Late Reasons, same shape as the Drivers list. The
+  // chosen reason's text is snapshotted onto TruckSessions.LateReason
+  // (appended at the end of that sheet, same non-destructive-migration
+  // rule as every other added column), so renaming or deleting a reason
+  // here later never rewrites what was recorded against a past dispatch.
+  LateReasons: ['ID', 'Name', 'Active', 'CreatedAt']
 };
 
 // ---------------------------------------------------------------------------
@@ -239,7 +248,11 @@ var API_ACTIONS = {
   reportTruckIssues: reportTruckIssues,
   listTruckIssuesForDate: listTruckIssuesForDate,
   listOpenTruckIssues: listOpenTruckIssues,
-  setTruckIssueStatus: setTruckIssueStatus
+  setTruckIssueStatus: setTruckIssueStatus,
+  listLateReasons: listLateReasons,
+  addLateReason: addLateReason,
+  updateLateReason: updateLateReason,
+  deleteLateReason: deleteLateReason
 };
 
 // ---------------------------------------------------------------------------
@@ -303,6 +316,7 @@ function buildActionRoles_() {
       'listCheckers', 'addChecker', 'updateChecker', 'deleteChecker',
       'listTrucks', 'addTruck', 'updateTruck', 'deleteTruck',
       'addDriver', 'updateDriver', 'deleteDriver',
+      'listLateReasons', 'addLateReason', 'updateLateReason', 'deleteLateReason',
       'getAdminSettings', 'probeSpreadsheet', 'saveDataSourceConfig'
     ]]
   ];
@@ -2398,6 +2412,7 @@ function buildDispatchTimelineAndScorecard_(sessionsToday, orderChecksToday, job
         truckSessionId: s.ID, truckId: s.TruckID, truckName: s.TruckName,
         tripNumber: tripNumberBySessionId[s.ID] || 1,
         dispatchedAt: s.DispatchedAt, dispatchedBy: s.DispatchedBy || '',
+        lateReason: s.LateReason || '',
         packToDispatchSeconds: packToDispatchSeconds
       };
     })
@@ -3099,7 +3114,11 @@ function withOrderStatusLock_(orderCheckId, fn) {
  * Dashboard as dispatched-with-warnings, since those are judgment calls a
  * checker can reasonably make in a genuine rush.
  */
-function markTruckDispatched(sessionId, checkerName, force) {
+function markTruckDispatched(sessionId, checkerName, force, lateReason) {
+  // Makes sure the LateReasons tab and TruckSessions.LateReason header
+  // exist before anything below reads or writes them - see
+  // ensureLateReasonSchema_ for why this isn't left to setupSpreadsheet.
+  ensureLateReasonSchema_();
   var state = getTruckSessionState(sessionId);
 
   // A retry of an already-successful dispatch - the frontend's own
@@ -3196,6 +3215,33 @@ function markTruckDispatched(sessionId, checkerName, force) {
     };
   }
 
+  // Late dispatch (build-2026-11-09-01, Shane's request): a truck's FIRST
+  // trip of the day leaving after 07:00 must have a reason picked from
+  // Admin > Settings > Late Reasons before it can be marked dispatched.
+  // Same "late" rule as the Dashboard's red "Late leaving" badge and the
+  // Trucks Leaving Late card (see isLateDispatchNow_). Asked BEFORE the
+  // driver/route/tray warnings, so the frontend can collect the reason
+  // first and then pass it along on every later call for this dispatch,
+  // including the force=true confirm. If no reasons have been set up yet,
+  // this step is skipped rather than blocking every late truck.
+  var recordedLateReason = '';
+  if (isLateDispatchNow_(state.session)) {
+    var activeReasons = listLateReasons(true).map(function (r) { return String(r.Name).trim(); }).filter(Boolean);
+    if (activeReasons.length > 0) {
+      var chosen = String(lateReason || '').trim();
+      var match = activeReasons.filter(function (r) { return r.toLowerCase() === chosen.toLowerCase(); })[0];
+      if (!match) {
+        return {
+          ok: false,
+          lateReasonRequired: true,
+          cutoff: formatMinutesOfDay_(LATE_TRUCK_CUTOFF_MINUTES),
+          lateReasons: activeReasons
+        };
+      }
+      recordedLateReason = match;
+    }
+  }
+
   var warnings = [];
   if (!state.session.Driver) warnings.push('Driver name has not been entered.');
   if (!state.session.Route) warnings.push('Route has not been entered.');
@@ -3213,8 +3259,111 @@ function markTruckDispatched(sessionId, checkerName, force) {
 
   updateRowById_(getSheet_(SHEET_NAMES.SESSIONS), SHEET_HEADERS.TruckSessions, sessionId, {
     Status: SESSION_STATUS.DISPATCHED, DispatchedAt: nowIso_(), DispatchedBy: checkerName,
-    DispatchedWithWarnings: warnings.length > 0, DispatchWarningsText: warnings.join('; ')
+    DispatchedWithWarnings: warnings.length > 0, DispatchWarningsText: warnings.join('; '),
+    LateReason: recordedLateReason
   });
+  return { ok: true };
+}
+
+/**
+ * True if dispatching this session RIGHT NOW counts as late: it's the
+ * truck's first trip today (trip 2+ has no leave-by target, same rule as
+ * getLateTruckLeaderboard and the frontend's onTimeBadge_) and the current
+ * time in the script's timezone is past LATE_TRUCK_CUTOFF_MINUTES (07:00).
+ * Uses the server's clock, not the phone's, so a checker's device clock
+ * can't decide whether a reason is needed.
+ */
+function isLateDispatchNow_(session) {
+  var tz = Session.getScriptTimeZone() || 'Africa/Johannesburg';
+  var hm = Utilities.formatDate(new Date(), tz, 'HH:mm').split(':');
+  var minutesOfDay = Number(hm[0]) * 60 + Number(hm[1]);
+  if (minutesOfDay <= LATE_TRUCK_CUTOFF_MINUTES) return false;
+
+  var day = normalizeDateStr_(session.Date);
+  var earlierTripToday = sheetToObjects_(getSheet_(SHEET_NAMES.SESSIONS)).some(function (s) {
+    return s.TruckID === session.TruckID && s.ID !== session.ID && normalizeDateStr_(s.Date) === day &&
+      String(s.StartedAt) < String(session.StartedAt);
+  });
+  return !earlierTripToday;
+}
+
+function formatMinutesOfDay_(minutes) {
+  var h = Math.floor(minutes / 60), m = minutes % 60;
+  return (h < 10 ? '0' : '') + h + ':' + (m < 10 ? '0' : '') + m;
+}
+
+// ---------------------------------------------------------------------------
+// LATE REASONS (Admin > Settings > Late Reasons)
+// ---------------------------------------------------------------------------
+
+/**
+ * Creates the LateReasons tab and adds the LateReason header to
+ * TruckSessions if either is missing, so this feature works on the live
+ * sheet straight after a new deployment, without anyone having to re-run
+ * setupSpreadsheet() first (which would also work, and is still safe to
+ * run). Only checks once every 6 hours (CacheService flag), so it costs
+ * nothing on normal calls.
+ */
+function ensureLateReasonSchema_() {
+  var cache = CacheService.getScriptCache();
+  var flagKey = 'lateReasonSchemaOk_v1';
+  if (cache.get(flagKey)) return;
+
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var reasonsSheet = ss.getSheetByName(SHEET_NAMES.LATE_REASONS);
+  if (!reasonsSheet) {
+    reasonsSheet = ss.insertSheet(SHEET_NAMES.LATE_REASONS);
+    reasonsSheet.getRange(1, 1, 1, SHEET_HEADERS.LateReasons.length).setValues([SHEET_HEADERS.LateReasons]);
+    reasonsSheet.setFrozenRows(1);
+  }
+
+  var sessionsSheet = getSheet_(SHEET_NAMES.SESSIONS);
+  var colIdx = SHEET_HEADERS.TruckSessions.indexOf('LateReason') + 1;
+  if (sessionsSheet.getMaxColumns() < colIdx) {
+    sessionsSheet.insertColumnsAfter(sessionsSheet.getMaxColumns(), colIdx - sessionsSheet.getMaxColumns());
+  }
+  var headerCell = sessionsSheet.getRange(1, colIdx);
+  if (headerCell.getValue() !== 'LateReason') headerCell.setValue('LateReason');
+
+  try { cache.put(flagKey, '1', 6 * 60 * 60); } catch (e) { /* best-effort */ }
+}
+
+function listLateReasons(activeOnly) {
+  ensureLateReasonSchema_();
+  var reasons = sheetToObjects_(getSheet_(SHEET_NAMES.LATE_REASONS));
+  if (activeOnly) reasons = reasons.filter(function (r) { return r.Active === true; });
+  reasons.sort(function (a, b) { return String(a.Name).localeCompare(String(b.Name)); });
+  return reasons;
+}
+
+function addLateReason(name) {
+  ensureLateReasonSchema_();
+  name = String(name || '').trim();
+  if (!name) throw new Error('Enter a reason.');
+  var exists = listLateReasons(false).some(function (r) { return String(r.Name).trim().toLowerCase() === name.toLowerCase(); });
+  if (exists) throw new Error('"' + name + '" is already on the list.');
+  var id = Utilities.getUuid();
+  appendObject_(getSheet_(SHEET_NAMES.LATE_REASONS), SHEET_HEADERS.LateReasons, {
+    ID: id, Name: name, Active: true, CreatedAt: nowIso_()
+  });
+  return { id: id };
+}
+
+function updateLateReason(id, patch) {
+  ensureLateReasonSchema_();
+  patch = patch || {};
+  if ('ID' in patch) delete patch.ID;
+  if ('Name' in patch) {
+    patch.Name = String(patch.Name || '').trim();
+    if (!patch.Name) throw new Error('A reason can\'t be blank.');
+  }
+  updateRowById_(getSheet_(SHEET_NAMES.LATE_REASONS), SHEET_HEADERS.LateReasons, id, patch);
+  return { ok: true };
+}
+
+function deleteLateReason(id) {
+  ensureLateReasonSchema_();
+  deleteRowById_(getSheet_(SHEET_NAMES.LATE_REASONS), id);
   return { ok: true };
 }
 
@@ -3315,6 +3464,7 @@ function getDashboardForDate(dateStr) {
       durationMinutes: durationMinutes,
       dispatchedWithWarnings: session.DispatchedWithWarnings === true,
       dispatchWarningsText: session.DispatchWarningsText || '',
+      lateReason: session.LateReason || '',
       orderCount: orders.length,
       noStockTotal: orders.reduce(function (sum, o) { return sum + o.noStockCount; }, 0),
       shortPackedTotal: orders.reduce(function (sum, o) { return sum + o.shortPackedCount; }, 0),
@@ -3397,20 +3547,31 @@ function getLateTruckLeaderboard() {
     group.forEach(function (s, i) { tripNumberBySessionId[s.ID] = i + 1; });
   });
 
-  var statsByTruck = {}; // truckName -> { lateCount, trip1Count }
+  var statsByTruck = {}; // truckName -> { lateCount, trip1Count, reasonCounts }
   sessionsInWindow.forEach(function (s) {
     if (tripNumberBySessionId[s.ID] !== 1) return; // only trip 1 is held to the leave-by target
     var hm = Utilities.formatDate(new Date(s.DispatchedAt), tz, 'HH:mm').split(':');
     var minutesOfDay = Number(hm[0]) * 60 + Number(hm[1]);
     var truckName = s.TruckName;
-    if (!statsByTruck[truckName]) statsByTruck[truckName] = { lateCount: 0, trip1Count: 0 };
+    if (!statsByTruck[truckName]) statsByTruck[truckName] = { lateCount: 0, trip1Count: 0, reasonCounts: {} };
     statsByTruck[truckName].trip1Count++;
-    if (minutesOfDay > LATE_TRUCK_CUTOFF_MINUTES) statsByTruck[truckName].lateCount++;
+    if (minutesOfDay > LATE_TRUCK_CUTOFF_MINUTES) {
+      statsByTruck[truckName].lateCount++;
+      var reason = String(s.LateReason || '').trim() || 'No reason recorded';
+      statsByTruck[truckName].reasonCounts[reason] = (statsByTruck[truckName].reasonCounts[reason] || 0) + 1;
+    }
   });
 
   var trucks = Object.keys(statsByTruck)
     .map(function (truckName) {
-      return { truckName: truckName, lateCount: statsByTruck[truckName].lateCount, trip1Count: statsByTruck[truckName].trip1Count };
+      var counts = statsByTruck[truckName].reasonCounts;
+      return {
+        truckName: truckName, lateCount: statsByTruck[truckName].lateCount, trip1Count: statsByTruck[truckName].trip1Count,
+        // Most common reason first - what Shane needs to see to act on a
+        // truck that keeps leaving late.
+        reasons: Object.keys(counts).map(function (r) { return { reason: r, count: counts[r] }; })
+          .sort(function (a, b) { return b.count - a.count; })
+      };
     })
     .filter(function (row) { return row.lateCount >= LATE_TRUCK_MIN_LATE_COUNT; })
     .sort(function (a, b) { return b.lateCount - a.lateCount; });

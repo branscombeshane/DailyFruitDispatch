@@ -350,6 +350,7 @@
     .dash-truck-summary { font-size: 13px; color: var(--grey); margin-top: 6px; }
     .dash-truck-arrow { font-size: 11px; color: var(--grey); margin-left: 8px; }
     .dash-warning-line { color: var(--red); font-size: 13px; font-weight: 600; margin-top: 6px; }
+    .late-reason-line { color: var(--red); font-size: 13px; margin-top: 4px; }
     .dash-order-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-top: 1px solid var(--border); font-size: 14px; }
     .dash-nostock-detail { font-size: 12px; color: var(--red); margin-top: 2px; }
     .dash-shortpacked-detail { font-size: 12px; color: var(--amber); margin-top: 2px; }
@@ -671,7 +672,7 @@
       </div>
 
       <div class="card" style="margin-top:20px;">
-        <button class="btn btn-danger btn-block" onclick="attemptDispatch()">Mark truck as Dispatched</button>
+        <button class="btn btn-danger btn-block" onclick="startDispatch()">Mark truck as Dispatched</button>
       </div>
     </div>
   </div>
@@ -827,6 +828,20 @@
   </div>
 
   <!-- Dispatch confirmation -->
+  <!-- Late dispatch reason (build-2026-11-09-01) - shown when the server
+       says this truck's first trip of the day is leaving after 07:00. The
+       choices come from Admin > Settings > Late Reasons. -->
+  <div class="modal-backdrop" id="late-reason-modal">
+    <div class="modal">
+      <h3 style="margin-top:0;">This truck is leaving late</h3>
+      <p class="hint" id="late-reason-intro">Its first trip of the day is leaving after 07:00. Pick the reason before dispatching.</p>
+      <select id="late-reason-select" style="width:100%; padding:10px; font-size:15px; border:1px solid var(--border); border-radius:8px; margin-bottom:6px;"></select>
+      <div class="error" id="late-reason-error"></div>
+      <button class="btn btn-primary btn-block" style="margin:10px 0;" onclick="submitLateReason()">Continue</button>
+      <button class="btn btn-secondary btn-block" onclick="closeLateReasonModal()">Cancel</button>
+    </div>
+  </div>
+
   <div class="modal-backdrop" id="dispatch-modal">
     <div class="modal">
       <h3 style="margin-top:0;">Dispatch this truck?</h3>
@@ -923,6 +938,7 @@
         <button data-pane="users" onclick="showAdminPane('users', this)">Users</button>
         <button data-pane="trucks" onclick="showAdminPane('trucks', this)">Trucks</button>
         <button data-pane="drivers" onclick="showAdminPane('drivers', this)">Drivers</button>
+        <button data-pane="latereasons" onclick="showAdminPane('latereasons', this)">Late Reasons</button>
         <button data-pane="datasource" onclick="showAdminPane('datasource', this)">Data Source</button>
       </div>
 
@@ -1072,6 +1088,18 @@
         <div class="card"><p class="hint">Click any field below to edit it - changes save automatically.</p><table id="drivers-table"></table></div>
       </div>
 
+      <div class="admin-pane" id="admin-latereasons" style="display:none;">
+        <div class="card">
+          <h3 style="margin-top:0;">Add late reason</h3>
+          <p class="hint">When a truck's first trip of the day is dispatched after 07:00, the checker must pick one of the active reasons below before it can go. If there are no active reasons, nobody is asked.</p>
+          <div class="row-inline">
+            <input type="text" id="new-late-reason" placeholder="e.g. Waiting on production">
+            <button class="btn btn-primary" onclick="addLateReasonUi()">Add</button>
+          </div>
+        </div>
+        <div class="card"><p class="hint">Click a reason to rename it - changes save automatically. Untick Active to stop offering it without losing it from past records.</p><table id="late-reasons-table"></table></div>
+      </div>
+
       <div class="admin-pane" id="admin-datasource" style="display:none;">
         <div class="card">
           <h3 style="margin-top:0;">Packing & Production connection</h3>
@@ -1107,7 +1135,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-11-06-01';
+  var BUILD_VERSION = 'build-2026-11-09-01';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -1435,6 +1463,7 @@
     currentOrder: null,   // { orderCheck, items }
     pendingQtyItemId: null,
     pendingFlagItemId: null,
+    dispatchLateReason: '', // late reason picked for the dispatch in progress - see showLateReasonModal
     auth: null,           // { name, pin } - sent with every API call (see callApiAttempt_); memory only, never stored
     adminRole: null,      // null | 'admin' | 'dispatchManager' - which role got them into screen-admin
     role: null            // the signed-in user's actual role: 'Admin' | 'Dispatch Manager' | 'Checker'
@@ -2196,6 +2225,7 @@
           '<div class="timeline-main">' +
             '<div class="timeline-truck">' + escapeHtml(entry.truckName) + tripSuffix + '</div>' +
             '<div class="timeline-who">' + formatTime(entry.dispatchedAt) + (entry.dispatchedBy ? ' by ' + escapeHtml(entry.dispatchedBy) : '') + '</div>' +
+            (entry.lateReason ? '<div class="late-reason-line">Late reason: ' + escapeHtml(entry.lateReason) + '</div>' : '') +
           '</div>' +
           '<div class="timeline-badges">' +
             '<span class="gap-badge ' + gapBadgeClass(entry.packToDispatchSeconds) + '">' + gapText + '</span>' +
@@ -2229,6 +2259,9 @@
         '<div class="timeline-main">' +
           '<div class="timeline-truck">' + escapeHtml(row.truckName) + '</div>' +
           '<div class="timeline-who">' + row.lateCount + ' of ' + row.trip1Count + ' first trips left after 07:00, last 30 days</div>' +
+          ((row.reasons && row.reasons.length)
+            ? '<div class="late-reason-line">Reasons: ' + row.reasons.map(function (r) { return escapeHtml(r.reason) + ' (' + r.count + ')'; }).join(', ') + '</div>'
+            : '') +
         '</div>' +
         '<span class="ontime-badge ontime-red">' + row.lateCount + 'x late</span>' +
       '</div>';
@@ -3433,9 +3466,47 @@
   // ------------------------------------------------------------------
   // DISPATCH
   // ------------------------------------------------------------------
+  // The "Mark truck as Dispatched" button. Starts a fresh dispatch attempt,
+  // forgetting any late reason picked during an earlier, cancelled attempt.
+  function startDispatch() {
+    state.dispatchLateReason = '';
+    attemptDispatch();
+  }
+
+  // Late dispatch reason (build-2026-11-09-01). markTruckDispatched answers
+  // lateReasonRequired when this truck's first trip of the day is leaving
+  // after 07:00 and no reason has been given yet. The picked reason is kept
+  // in state.dispatchLateReason and sent with every later call for this
+  // same dispatch (the retry after removing a blocked order, and the
+  // "dispatch anyway" confirm), so the checker is only asked once.
+  function showLateReasonModal(res) {
+    var select = document.getElementById('late-reason-select');
+    select.innerHTML = '<option value="">- Pick a reason -</option>' + (res.lateReasons || []).map(function (r) {
+      return '<option value="' + escapeHtml(r) + '">' + escapeHtml(r) + '</option>';
+    }).join('');
+    document.getElementById('late-reason-intro').textContent =
+      'Its first trip of the day is leaving after ' + (res.cutoff || '07:00') + '. Pick the reason before dispatching.';
+    document.getElementById('late-reason-error').textContent = '';
+    document.getElementById('late-reason-modal').classList.add('active');
+  }
+
+  function submitLateReason() {
+    var reason = document.getElementById('late-reason-select').value;
+    if (!reason) {
+      document.getElementById('late-reason-error').textContent = 'Pick a reason first.';
+      return;
+    }
+    state.dispatchLateReason = reason;
+    closeLateReasonModal();
+    attemptDispatch();
+  }
+
+  function closeLateReasonModal() { document.getElementById('late-reason-modal').classList.remove('active'); }
+
   function attemptDispatch() {
-    callApi('markTruckDispatched', [state.session.ID, state.checker.name, false]).then(function (res) {
+    callApi('markTruckDispatched', [state.session.ID, state.checker.name, false, state.dispatchLateReason || '']).then(function (res) {
       if (res.ok) { onDispatched(); return; }
+      if (res.lateReasonRequired) { showLateReasonModal(res); return; }
       // Incomplete orders are a hard block - no "dispatch anyway" option,
       // unlike the driver/route/tray-count warnings below. The way past a
       // genuinely stuck order is to remove it from the truck right here
@@ -3509,13 +3580,19 @@
 
   function confirmDispatch() {
     closeDispatchModal();
-    callApi('markTruckDispatched', [state.session.ID, state.checker.name, true]).then(onDispatched).catch(showFatalError);
+    callApi('markTruckDispatched', [state.session.ID, state.checker.name, true, state.dispatchLateReason || '']).then(function (res) {
+      // Only happens if the reason list changed between picking one and
+      // confirming (e.g. an Admin deactivated it) - ask again.
+      if (res && res.lateReasonRequired) { showLateReasonModal(res); return; }
+      onDispatched();
+    }).catch(showFatalError);
   }
 
   function closeDispatchModal() { document.getElementById('dispatch-modal').classList.remove('active'); }
   function closeDispatchBlockedModal() { document.getElementById('dispatch-blocked-modal').classList.remove('active'); }
 
   function onDispatched() {
+    state.dispatchLateReason = '';
     alert('Truck marked as dispatched.');
     goToTrucks();
   }
@@ -3591,6 +3668,7 @@
     if (name === 'users') loadUsers();
     if (name === 'trucks') loadTrucks();
     if (name === 'drivers') loadDrivers();
+    if (name === 'latereasons') loadLateReasons();
     if (name === 'datasource') loadDataSource();
     if (name === 'overview') loadDashboard();
     if (name === 'history') loadHistory();
@@ -3709,6 +3787,52 @@
     callApi('deleteTruck', [id]).then(function () {
       loadTrucks();
     }).catch(showFatalError);
+  }
+
+  function loadLateReasons() {
+    callApi('listLateReasons', [false]).then(function (reasons) {
+      var table = document.getElementById('late-reasons-table');
+      if (reasons.length === 0) {
+        table.innerHTML = '<tr><td class="hint">No late reasons yet - add one above.</td></tr>';
+        return;
+      }
+      table.innerHTML =
+        '<tr><th>Reason</th><th>Active</th><th></th></tr>' +
+        reasons.map(function (r) {
+          return '<tr>' +
+            '<td><input type="text" style="' + TRUCK_FIELD_STYLE + '" value="' + escapeHtml(r.Name) + '" onchange="updateLateReasonField(\'' + r.ID + '\', \'Name\', this.value)"></td>' +
+            '<td><label class="switch-label"><input type="checkbox" ' + (r.Active ? 'checked' : '') +
+            ' onchange="updateLateReasonField(\'' + r.ID + '\', \'Active\', this.checked)"> Active</label></td>' +
+            '<td><button class="btn btn-danger" onclick="deleteLateReasonUi(\'' + r.ID + '\', ' + jsStrAttr_(r.Name) + ')">Delete</button></td>' +
+            '</tr>';
+        }).join('');
+    }).catch(showFatalError);
+  }
+
+  function addLateReasonUi() {
+    var input = document.getElementById('new-late-reason');
+    var name = input.value.trim();
+    if (!name) return;
+    callApi('addLateReason', [name]).then(function () {
+      input.value = '';
+      loadLateReasons();
+    }).catch(showFatalError);
+  }
+
+  function updateLateReasonField(id, field, value) {
+    var patch = {};
+    patch[field] = value;
+    // Reload on failure too (e.g. a blank name) so the table never shows a
+    // value the server didn't save.
+    callApi('updateLateReason', [id, patch]).catch(function (err) {
+      showFatalError(err);
+      loadLateReasons();
+    });
+  }
+
+  function deleteLateReasonUi(id, name) {
+    if (!confirm('Delete late reason "' + name + '"? Past dispatches keep the reason they were given.')) return;
+    callApi('deleteLateReason', [id]).then(loadLateReasons).catch(showFatalError);
   }
 
   function loadDrivers() {
@@ -4319,9 +4443,10 @@
       ];
       if (t.dispatchedAt) metaParts.push('Dispatched ' + formatTime(t.dispatchedAt) + (durationText ? ' (' + durationText + ')' : ''));
 
-      var warningLine = t.dispatchedWithWarnings
+      var warningLine = (t.dispatchedWithWarnings
         ? '<div class="dash-warning-line">Dispatched despite: ' + escapeHtml(t.dispatchWarningsText) + '</div>'
-        : '';
+        : '') +
+        (t.lateReason ? '<div class="late-reason-line">Late reason: ' + escapeHtml(t.lateReason) + '</div>' : '');
 
       // Only the two item-level tiles (noStock/shortPacked) narrow which of
       // THIS truck's own orders are shown - every other tile filters which

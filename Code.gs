@@ -98,7 +98,7 @@ var SHEET_HEADERS = {
   // reportTruckIssues once the checker answers it, so the prompt fires
   // once per new trip, not every time the truck is opened/resumed (Shane's
   // request, 2026-09-16 - see the TRUCK ISSUES section further down).
-  TruckSessions: ['ID', 'Date', 'TruckID', 'TruckName', 'CheckerID', 'CheckerName', 'StartedAt', 'TrayCount', 'TrayCountUpdatedAt', 'Status', 'DispatchedAt', 'DispatchedBy', 'Driver', 'DispatchedWithWarnings', 'DispatchWarningsText', 'Route', 'TraySmall', 'TrayMedium', 'TrayLarge', 'TrayOther', 'DriverContacts', 'NoTraysOnTrip', 'TruckIssuesPrompted', 'LateReason'],
+  TruckSessions: ['ID', 'Date', 'TruckID', 'TruckName', 'CheckerID', 'CheckerName', 'StartedAt', 'TrayCount', 'TrayCountUpdatedAt', 'Status', 'DispatchedAt', 'DispatchedBy', 'Driver', 'DispatchedWithWarnings', 'DispatchWarningsText', 'Route', 'TraySmall', 'TrayMedium', 'TrayLarge', 'TrayOther', 'DriverContacts', 'NoTraysOnTrip', 'TruckIssuesPrompted', 'LateReason', 'LateReasonOrders'],
   // RequiresCoa/CoaConfirmed(By/At) appended at the end (see the comment on
   // TruckSessions above re: column order never shifting on a live sheet) -
   // RequiresCoa is a snapshot of the order's Packing & Production flag at
@@ -160,7 +160,15 @@ var SHEET_HEADERS = {
   // (appended at the end of that sheet, same non-destructive-migration
   // rule as every other added column), so renaming or deleting a reason
   // here later never rewrites what was recorded against a past dispatch.
-  LateReasons: ['ID', 'Name', 'Active', 'CreatedAt']
+  //
+  // RequiresOrder (appended build-2026-11-09-02, Shane's request): a reason
+  // like "Order not packed by night shift" is only useful if management
+  // knows WHICH order, so with this ticked the checker must also pick the
+  // order(s) on the truck it applies to. Those are saved on
+  // TruckSessions.LateReasonOrders (order numbers) and each one is raised
+  // as an open item on the Dashboard's Flagged Packing Issues checklist,
+  // for management to resolve with night shift.
+  LateReasons: ['ID', 'Name', 'Active', 'CreatedAt', 'RequiresOrder']
 };
 
 // ---------------------------------------------------------------------------
@@ -2413,6 +2421,7 @@ function buildDispatchTimelineAndScorecard_(sessionsToday, orderChecksToday, job
         tripNumber: tripNumberBySessionId[s.ID] || 1,
         dispatchedAt: s.DispatchedAt, dispatchedBy: s.DispatchedBy || '',
         lateReason: s.LateReason || '',
+        lateReasonOrders: s.LateReasonOrders || '',
         packToDispatchSeconds: packToDispatchSeconds
       };
     })
@@ -3114,7 +3123,7 @@ function withOrderStatusLock_(orderCheckId, fn) {
  * Dashboard as dispatched-with-warnings, since those are judgment calls a
  * checker can reasonably make in a genuine rush.
  */
-function markTruckDispatched(sessionId, checkerName, force, lateReason) {
+function markTruckDispatched(sessionId, checkerName, force, lateReason, lateReasonOrderIds) {
   // Makes sure the LateReasons tab and TruckSessions.LateReason header
   // exist before anything below reads or writes them - see
   // ensureLateReasonSchema_ for why this isn't left to setupSpreadsheet.
@@ -3225,20 +3234,36 @@ function markTruckDispatched(sessionId, checkerName, force, lateReason) {
   // including the force=true confirm. If no reasons have been set up yet,
   // this step is skipped rather than blocking every late truck.
   var recordedLateReason = '';
+  var lateReasonOrders = []; // OrderChecks rows picked for a RequiresOrder reason
   if (isLateDispatchNow_(state.session)) {
-    var activeReasons = listLateReasons(true).map(function (r) { return String(r.Name).trim(); }).filter(Boolean);
+    var activeReasons = listLateReasons(true).filter(function (r) { return String(r.Name).trim(); });
     if (activeReasons.length > 0) {
-      var chosen = String(lateReason || '').trim();
-      var match = activeReasons.filter(function (r) { return r.toLowerCase() === chosen.toLowerCase(); })[0];
-      if (!match) {
+      var chosen = String(lateReason || '').trim().toLowerCase();
+      var match = activeReasons.filter(function (r) { return String(r.Name).trim().toLowerCase() === chosen; })[0];
+      // Orders the checker can pick from: everything on this trip. A trip
+      // with no orders at all (trays/Jobs only) can't name one, so a
+      // RequiresOrder reason is accepted without any there.
+      var tripOrders = state.orderChecks.map(function (c) {
+        return { orderId: String(c.OrderID), orderNumber: c.OrderNumber, customer: c.Customer };
+      });
+      var pickedKeys = {};
+      (Array.isArray(lateReasonOrderIds) ? lateReasonOrderIds : []).forEach(function (id) { pickedKeys[orderIdKey_(id)] = true; });
+      var picked = state.orderChecks.filter(function (c) { return pickedKeys[orderIdKey_(c.OrderID)]; });
+      var needsOrders = match && isTrueCell_(match.RequiresOrder) && tripOrders.length > 0;
+      if (!match || (needsOrders && picked.length === 0)) {
         return {
           ok: false,
           lateReasonRequired: true,
           cutoff: formatMinutesOfDay_(LATE_TRUCK_CUTOFF_MINUTES),
-          lateReasons: activeReasons
+          lateReasons: activeReasons.map(function (r) {
+            return { name: String(r.Name).trim(), requiresOrder: isTrueCell_(r.RequiresOrder) };
+          }),
+          orders: tripOrders,
+          error: match ? 'Pick the order(s) this applies to.' : ''
         };
       }
-      recordedLateReason = match;
+      recordedLateReason = String(match.Name).trim();
+      if (needsOrders) lateReasonOrders = picked;
     }
   }
 
@@ -3257,12 +3282,39 @@ function markTruckDispatched(sessionId, checkerName, force, lateReason) {
     return { ok: false, warnings: warnings };
   }
 
+  // Each order named for a RequiresOrder late reason becomes an open item
+  // on the Dashboard's Flagged Packing Issues checklist, which management
+  // already works through and resolves. Written BEFORE the session is
+  // marked dispatched: if the dispatch write then fails, a retry could add
+  // a duplicate item, which is better than a dispatched truck whose
+  // follow-up was silently lost.
+  if (lateReasonOrders.length > 0) {
+    appendObjects_(getSheet_(SHEET_NAMES.PACKING_ISSUES), SHEET_HEADERS.PackingIssues, lateReasonOrders.map(function (c) {
+      return {
+        ID: Utilities.getUuid(), TruckSessionID: sessionId, OrderCheckID: c.ID, ItemCheckID: '',
+        Date: todayString_(), TruckName: state.session.TruckName,
+        OrderNumber: c.OrderNumber, Customer: c.Customer,
+        ProductDescription: 'Whole order - truck left late',
+        Note: 'Late reason: ' + recordedLateReason, Status: ISSUE_STATUS.OPEN,
+        FlaggedByID: '', FlaggedByName: checkerName || '', FlaggedAt: nowIso_(),
+        ResolvedByName: '', ResolvedAt: ''
+      };
+    }));
+  }
+
   updateRowById_(getSheet_(SHEET_NAMES.SESSIONS), SHEET_HEADERS.TruckSessions, sessionId, {
     Status: SESSION_STATUS.DISPATCHED, DispatchedAt: nowIso_(), DispatchedBy: checkerName,
     DispatchedWithWarnings: warnings.length > 0, DispatchWarningsText: warnings.join('; '),
-    LateReason: recordedLateReason
+    LateReason: recordedLateReason,
+    LateReasonOrders: lateReasonOrders.map(function (c) { return c.OrderNumber; }).join(', ')
   });
   return { ok: true };
+}
+
+// Sheets checkbox cells come back as real booleans, but a value typed by
+// hand may be the text "TRUE".
+function isTrueCell_(value) {
+  return value === true || String(value).trim().toUpperCase() === 'TRUE';
 }
 
 /**
@@ -3306,26 +3358,33 @@ function formatMinutesOfDay_(minutes) {
  */
 function ensureLateReasonSchema_() {
   var cache = CacheService.getScriptCache();
-  var flagKey = 'lateReasonSchemaOk_v1';
+  var flagKey = 'lateReasonSchemaOk_v2';
   if (cache.get(flagKey)) return;
 
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var reasonsSheet = ss.getSheetByName(SHEET_NAMES.LATE_REASONS);
   if (!reasonsSheet) {
     reasonsSheet = ss.insertSheet(SHEET_NAMES.LATE_REASONS);
-    reasonsSheet.getRange(1, 1, 1, SHEET_HEADERS.LateReasons.length).setValues([SHEET_HEADERS.LateReasons]);
     reasonsSheet.setFrozenRows(1);
   }
-
-  var sessionsSheet = getSheet_(SHEET_NAMES.SESSIONS);
-  var colIdx = SHEET_HEADERS.TruckSessions.indexOf('LateReason') + 1;
-  if (sessionsSheet.getMaxColumns() < colIdx) {
-    sessionsSheet.insertColumnsAfter(sessionsSheet.getMaxColumns(), colIdx - sessionsSheet.getMaxColumns());
-  }
-  var headerCell = sessionsSheet.getRange(1, colIdx);
-  if (headerCell.getValue() !== 'LateReason') headerCell.setValue('LateReason');
+  ensureHeaderCells_(reasonsSheet, SHEET_HEADERS.LateReasons, ['ID', 'Name', 'Active', 'CreatedAt', 'RequiresOrder']);
+  ensureHeaderCells_(getSheet_(SHEET_NAMES.SESSIONS), SHEET_HEADERS.TruckSessions, ['LateReason', 'LateReasonOrders']);
 
   try { cache.put(flagKey, '1', 6 * 60 * 60); } catch (e) { /* best-effort */ }
+}
+
+// Writes any of the named header cells that are missing from row 1, at the
+// position SHEET_HEADERS says they belong (adding columns if the sheet is
+// too narrow). Never moves or overwrites a header that's already right.
+function ensureHeaderCells_(sheet, headers, names) {
+  names.forEach(function (name) {
+    var colIdx = headers.indexOf(name) + 1;
+    if (sheet.getMaxColumns() < colIdx) {
+      sheet.insertColumnsAfter(sheet.getMaxColumns(), colIdx - sheet.getMaxColumns());
+    }
+    var cell = sheet.getRange(1, colIdx);
+    if (cell.getValue() !== name) cell.setValue(name);
+  });
 }
 
 function listLateReasons(activeOnly) {
@@ -3344,7 +3403,7 @@ function addLateReason(name) {
   if (exists) throw new Error('"' + name + '" is already on the list.');
   var id = Utilities.getUuid();
   appendObject_(getSheet_(SHEET_NAMES.LATE_REASONS), SHEET_HEADERS.LateReasons, {
-    ID: id, Name: name, Active: true, CreatedAt: nowIso_()
+    ID: id, Name: name, Active: true, CreatedAt: nowIso_(), RequiresOrder: false
   });
   return { id: id };
 }
@@ -3465,6 +3524,7 @@ function getDashboardForDate(dateStr) {
       dispatchedWithWarnings: session.DispatchedWithWarnings === true,
       dispatchWarningsText: session.DispatchWarningsText || '',
       lateReason: session.LateReason || '',
+      lateReasonOrders: session.LateReasonOrders || '',
       orderCount: orders.length,
       noStockTotal: orders.reduce(function (sum, o) { return sum + o.noStockCount; }, 0),
       shortPackedTotal: orders.reduce(function (sum, o) { return sum + o.shortPackedCount; }, 0),

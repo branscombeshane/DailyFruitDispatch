@@ -789,6 +789,13 @@ phone's.
   text, so renaming or deleting a reason later doesn't change past records.
 - It shows on the Dashboard truck card, in the Dispatch Timeline, and as a
   per-reason count on the Trucks Leaving Late card.
+- **Pick order(s)** (build-2026-11-09-02): tick this on a reason (e.g. the
+  night-shift ones) and the checker must also tick which order(s) on the
+  truck it applies to. The order numbers are saved on the trip
+  (`TruckSessions.LateReasonOrders`), shown next to the reason, and each
+  order is added to the Dashboard's **Flagged Packing Issues** list as
+  "Whole order - truck left late", where management resolves it. A trip
+  with no orders on it isn't asked to pick one.
 - The `LateReasons` tab and the `LateReason` column are created
   automatically the first time they're needed; no need to re-run
   `setupSpreadsheet()`.

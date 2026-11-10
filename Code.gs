@@ -2556,6 +2556,9 @@ function buildDispatchTimelineAndScorecard_(sessionsToday, orderChecksToday, job
         dispatchedAt: s.DispatchedAt, dispatchedBy: s.DispatchedBy || '',
         lateReason: s.LateReason || '',
         lateReasonOrders: s.LateReasonOrders || '',
+        // Who drove the trip (build-2026-11-10-06) - up to 4 comma-separated
+        // names, as set in the trip modal.
+        driver: s.Driver || '',
         packToDispatchSeconds: packToDispatchSeconds
       };
     })

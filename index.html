@@ -1191,7 +1191,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-11-10-05';
+  var BUILD_VERSION = 'build-2026-11-10-06';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -2435,6 +2435,9 @@
           '<div class="timeline-main">' +
             '<div class="timeline-truck">' + escapeHtml(entry.truckName) + tripSuffix + '</div>' +
             '<div class="timeline-who">' + formatTime(entry.dispatchedAt) + (entry.dispatchedBy ? ' by ' + escapeHtml(entry.dispatchedBy) : '') + '</div>' +
+            // 'driver' only exists from build-2026-11-10-06's Code.gs on;
+            // before that, show nothing rather than a false "not entered".
+            ('driver' in entry ? '<div class="timeline-who">Driver: ' + (entry.driver ? escapeHtml(entry.driver) : '<span style="opacity:0.7;">not entered</span>') + '</div>' : '') +
             (entry.lateReason ? '<div class="late-reason-line">Late reason: ' + escapeHtml(entry.lateReason) +
               (entry.lateReasonOrders ? ' (' + escapeHtml(entry.lateReasonOrders) + ')' : '') + '</div>' : '') +
           '</div>' +

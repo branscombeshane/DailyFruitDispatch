@@ -1751,10 +1751,17 @@ it, same as everything else on this list.
 **One-time setup step:** this only deletes anything when it's actually run,
 and it needs to run automatically for the 2-week limit to actually hold -
 otherwise it just sits there unused. In the Apps Script editor: click the
-clock icon (**Triggers**) in the left sidebar > **+ Add Trigger** > choose
-function `pruneOldRecords`, event source **Time-driven**, type **Day
-timer**, pick any time (the middle of the night is usual) > **Save**. It
-only needs to be set up once - it then keeps running on its own every day.
+function dropdown > `setupDailyPruneTrigger` > **Run** (build-2026-11-10-04;
+it installs a nightly run around 02:00 and replaces any older one, so it's
+safe to run again). It then keeps running on its own every day. Check it's
+there under the clock icon (**Triggers**) in the left sidebar.
+
+Since build-2026-11-10-04 old rows are deleted in blocks rather than one at
+a time. One-at-a-time deletes could hit Apps Script's 6-minute limit on a
+big backlog, which is how the sheets grew to ~6 weeks of data in Nov 2026
+and slowed the whole app. Run a big catch-up prune when nobody is using the
+app: deleting rows shifts the rows below them, and a save landing at that
+exact moment could hit the wrong row.
 You can also run `pruneOldRecords` manually any time from the function
 dropdown at the top of the Apps Script editor, the same way `setupSpreadsheet`
 is run - it's safe to run as often as you like, since it only ever deletes

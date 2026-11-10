@@ -761,9 +761,20 @@ function deleteRowById_(sheet, id) {
 function deleteRowsWhere_(sheet, matchFn) {
   var data = sheet.getDataRange().getValues();
   var headers = data[0];
+  // Deletes in contiguous blocks with ONE deleteRows call per block
+  // (build-2026-11-10-04), still bottom-to-top. It used to call deleteRow
+  // once per matching row: fine for an order's handful of ItemChecks, but
+  // pruneOldRecords can match tens of thousands of old rows (which sit
+  // together at the top, oldest first), and one-at-a-time deletes ran into
+  // Apps Script's 6-minute limit long before finishing - so the sheets kept
+  // growing and the whole app slowed down with them.
+  var runEnd = -1; // sheet row number (1-based) of the bottom of the current block
   for (var i = data.length - 1; i >= 1; i--) {
-    if (matchFn(data[i], headers)) sheet.deleteRow(i + 1);
+    var match = matchFn(data[i], headers);
+    if (match && runEnd === -1) runEnd = i + 1;
+    if (!match && runEnd !== -1) { sheet.deleteRows(i + 2, runEnd - (i + 1)); runEnd = -1; }
   }
+  if (runEnd !== -1) sheet.deleteRows(2, runEnd - 1);
 }
 
 /**
@@ -882,6 +893,17 @@ var RETENTION_DAYS = 14;
 // overdue" calc and the number sent to the frontend, so changing the
 // target later only means editing this one line.
 var PACK_WARNING_THRESHOLD_MINUTES = 30;
+
+/**
+ * ONE-TIME (build-2026-11-10-04): installs the nightly pruneOldRecords run
+ * at about 02:00, replacing any existing one - instead of setting the
+ * trigger up by hand in the Triggers screen. Run from the editor.
+ */
+function setupDailyPruneTrigger() {
+  ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === 'pruneOldRecords') ScriptApp.deleteTrigger(t); });
+  ScriptApp.newTrigger('pruneOldRecords').timeBased().everyDays(1).atHour(2).create();
+  Logger.log('Installed: pruneOldRecords runs every night around 02:00 and keeps the last ' + RETENTION_DAYS + ' days.');
+}
 
 /**
  * Deletes TruckSessions, OrderChecks, ItemChecks, and CollectedOrders rows

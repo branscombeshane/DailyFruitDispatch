@@ -150,7 +150,10 @@ var SHEET_HEADERS = {
   // Orders the customer collected directly instead of going out on a truck -
   // tracked so the end-of-day dispatch overview doesn't flag them as
   // outstanding/overdue just because no truck ever carried them.
-  CollectedOrders: ['OrderID', 'OrderNumber', 'Customer', 'CollectedAt', 'CollectedBy'],
+  // ItemsHandedOver/ItemsNotHandedOver appended build-2026-11-10-07: a
+  // collection done through the item checklist (collectOrder) records what
+  // the customer actually got. Blank for a quick "Mark Collected".
+  CollectedOrders: ['OrderID', 'OrderNumber', 'Customer', 'CollectedAt', 'CollectedBy', 'ItemsHandedOver', 'ItemsNotHandedOver'],
   // A non-order instruction added to a truck's CURRENT trip - "collect
   // crates from ABC Farms", "drop off pallets at the depot", and so on -
   // for something that isn't a real Packing & Production order but still
@@ -304,6 +307,8 @@ var API_ACTIONS = {
   getZohoTraySettings: getZohoTraySettings,
   refreshTrayStops: refreshTrayStops,
   driverMarkTrayDelivered: driverMarkTrayDelivered,
+  getOrderForCollection: getOrderForCollection,
+  collectOrder: collectOrder,
   getMyDriverTrips: getMyDriverTrips,
   driverMarkDelivered: driverMarkDelivered,
   driverReport: driverReport,
@@ -361,7 +366,8 @@ function buildActionRoles_() {
       'getTruckPackTimerInfo', 'getOrderForChecking', 'unallocateOrder',
       'setItemStatus', 'setOrderCoaConfirmed', 'markTruckDispatched',
       'getJobsForSession', 'addJobToTruck', 'setJobStatus', 'removeJob',
-      'flagPackingIssue', 'reportTruckIssues', 'getTrayStopsForTruck'
+      'flagPackingIssue', 'reportTruckIssues', 'getTrayStopsForTruck',
+      'getOrderForCollection', 'collectOrder'
     ]],
     // Dashboard / History / issues checklists / collected orders.
     [MANAGERS, [
@@ -2769,8 +2775,14 @@ function getTruckAssignmentBoardUncached_() {
     }
   });
 
+  // Collected orders (build-2026-11-10-07) leave Unassigned too - before
+  // this, marking an order collected left it sitting there all day.
+  var collectedLookups = getCollectedLookups_();
   var unassignedOrders = todaysOrders
     .filter(function (o) { return !checksByOrderId[orderIdKey_(o.orderId)]; })
+    .filter(function (o) {
+      return !collectedLookups.byId[orderIdKey_(o.orderId)] && !collectedLookups.byNumber[String(o.orderNumber || '').trim()];
+    })
     .filter(function (o) { return !dispatchedOrderNumbersToday[String(o.orderNumber || '').trim()]; })
     .map(function (o) {
       return {
@@ -2789,7 +2801,10 @@ function getTruckAssignmentBoardUncached_() {
   return {
     trucks: boardTrucks, unassignedOrders: unassignedOrders,
     scorecard: timelineAndScorecard.scorecard,
-    packWarningThresholdMinutes: PACK_WARNING_THRESHOLD_MINUTES
+    packWarningThresholdMinutes: PACK_WARNING_THRESHOLD_MINUTES,
+    // Tells the page this server has collectOrder (build-2026-11-10-07), so
+    // the Collect button never shows against an older deployment.
+    canCollect: true
   };
 }
 
@@ -3836,15 +3851,115 @@ function getCollectedOrderIds_() {
   return ids;
 }
 
+/**
+ * Collected orders keyed by OrderID AND by order number (build-2026-11-10-07)
+ * - an order amended in Sage after it was collected comes back under a new
+ * OrderID with the same number (same reason the Trucks board matches
+ * dispatched orders by number), and shouldn't reappear as outstanding.
+ * Each value is { at, by, notHanded } for the Dashboard's Collected list.
+ */
+function getCollectedLookups_() {
+  var byId = {}, byNumber = {};
+  sheetToObjects_(getSheet_(SHEET_NAMES.COLLECTED_ORDERS)).forEach(function (r) {
+    var info = { at: r.CollectedAt, by: r.CollectedBy, notHanded: r.ItemsNotHandedOver || '' };
+    byId[orderIdKey_(r.OrderID)] = info;
+    var num = String(r.OrderNumber || '').trim();
+    if (num) byNumber[num] = info;
+  });
+  return { byId: byId, byNumber: byNumber };
+}
+
 /** Marks an order as collected by the customer directly, instead of going out on a truck. Safe to call twice - no duplicate rows. */
 function markOrderCollected(orderId, orderNumber, customer, collectedBy) {
+  // The signed-in person's name, not the generic "Admin"/"Dispatch
+  // Manager" label the page used to send (build-2026-11-10-07).
+  if (CURRENT_USER_ && CURRENT_USER_.name) collectedBy = CURRENT_USER_.name;
   var sheet = getSheet_(SHEET_NAMES.COLLECTED_ORDERS);
   var alreadyCollected = sheetToObjects_(sheet).some(function (r) { return orderIdKey_(r.OrderID) === orderIdKey_(orderId); });
   if (alreadyCollected) return { ok: true };
   appendObject_(sheet, SHEET_HEADERS.CollectedOrders, {
     OrderID: orderId, OrderNumber: orderNumber, Customer: customer, CollectedAt: nowIso_(), CollectedBy: collectedBy
   });
+  // So the order leaves the Trucks board's Unassigned list straight away.
+  try { CacheService.getScriptCache().remove('truckBoard'); } catch (e) { /* best-effort */ }
   return { ok: true };
+}
+
+// ---------------------------------------------------------------------------
+// CUSTOMER COLLECTION WITH AN ITEM CHECKLIST (build-2026-11-10-07)
+//
+// From the Trucks board's Unassigned list, a dispatcher opens an order the
+// customer is collecting, ticks each item as it's handed over (or marks it
+// not available), and then marks it collected. Recorded on CollectedOrders
+// with what was and wasn't handed over and who did it (from the login).
+// ---------------------------------------------------------------------------
+
+function packingOrderById_(orderId) {
+  var key = orderIdKey_(orderId);
+  return fetchAllOrdersFromPacking_().filter(function (o) { return orderIdKey_(o.orderId) === key; })[0] || null;
+}
+
+/** Where the order is today: { truckName, dispatched } if it's on a truck, else null. */
+function orderTruckToday_(orderId) {
+  var today = todayString_(), key = orderIdKey_(orderId);
+  var check = sheetToObjects_(getSheet_(SHEET_NAMES.ORDER_CHECKS))
+    .filter(function (c) { return orderIdKey_(c.OrderID) === key && normalizeDateStr_(c.Date) === today; })[0];
+  if (!check) return null;
+  var session = sheetToObjects_(getSheet_(SHEET_NAMES.SESSIONS)).filter(function (s) { return s.ID === check.TruckSessionID; })[0];
+  return { truckName: session ? session.TruckName : '(unknown truck)', dispatched: !!(session && session.Status === SESSION_STATUS.DISPATCHED) };
+}
+
+function getOrderForCollection(orderId) {
+  var order = packingOrderById_(orderId);
+  if (!order) throw new Error('Order not found in Packing & Production any more. Refresh the board.');
+  var onTruck = orderTruckToday_(orderId);
+  var collected = getCollectedLookups_();
+  return {
+    orderId: order.orderId, orderNumber: order.orderNumber, customer: order.customer, deliveryDate: order.deliveryDate,
+    items: order.items.map(function (i) { return { key: i.itemKey, description: i.description, qty: i.qty, unit: i.unit }; }),
+    onTruck: onTruck ? onTruck.truckName : '', truckDispatched: onTruck ? onTruck.dispatched : false,
+    alreadyCollected: !!(collected.byId[orderIdKey_(order.orderId)] || collected.byNumber[String(order.orderNumber || '').trim()])
+  };
+}
+
+/**
+ * Records the collection. handedOverKeys/notAvailableKeys are item keys
+ * from getOrderForCollection; every item must be in one of them. Safe to
+ * repeat (an order already collected is left as it is).
+ */
+function collectOrder(orderId, handedOverKeys, notAvailableKeys) {
+  var who = (CURRENT_USER_ && CURRENT_USER_.name) || '';
+  var order = packingOrderById_(orderId);
+  if (!order) throw new Error('Order not found in Packing & Production any more. Refresh the board.');
+  var onTruck = orderTruckToday_(orderId);
+  if (onTruck && onTruck.dispatched) throw new Error('This order already went out on ' + onTruck.truckName + '.');
+  if (onTruck) throw new Error('This order is on ' + onTruck.truckName + '. Drag it back to Unassigned first, then collect it.');
+
+  var handed = {}, missing = {};
+  (handedOverKeys || []).forEach(function (k) { handed[String(k)] = true; });
+  (notAvailableKeys || []).forEach(function (k) { missing[String(k)] = true; });
+  var describe = function (i) { return i.description + ' ' + i.qty + (i.unit ? ' ' + i.unit : ''); };
+  var notDone = order.items.filter(function (i) { return !handed[i.itemKey] && !missing[i.itemKey]; });
+  if (notDone.length > 0) throw new Error('Tick every item first - ' + notDone.length + ' still to go.');
+  if (order.items.length > 0 && order.items.every(function (i) { return missing[i.itemKey] && !handed[i.itemKey]; })) {
+    throw new Error('Nothing was handed over, so this isn\'t a collection.');
+  }
+
+  return withNamedLock_('collectOrder_' + orderIdKey_(orderId), function () {
+    var sheet = getSheet_(SHEET_NAMES.COLLECTED_ORDERS);
+    ensureHeaderCells_(sheet, SHEET_HEADERS.CollectedOrders, ['ItemsHandedOver', 'ItemsNotHandedOver']);
+    var collected = getCollectedLookups_();
+    if (collected.byId[orderIdKey_(order.orderId)] || collected.byNumber[String(order.orderNumber || '').trim()]) {
+      return { ok: true, alreadyCollected: true };
+    }
+    appendObject_(sheet, SHEET_HEADERS.CollectedOrders, {
+      OrderID: order.orderId, OrderNumber: order.orderNumber, Customer: order.customer, CollectedAt: nowIso_(), CollectedBy: who,
+      ItemsHandedOver: order.items.filter(function (i) { return handed[i.itemKey]; }).map(describe).join('; '),
+      ItemsNotHandedOver: order.items.filter(function (i) { return !handed[i.itemKey]; }).map(describe).join('; ')
+    });
+    try { CacheService.getScriptCache().remove('truckBoard'); } catch (e) { /* best-effort */ }
+    return { ok: true, alreadyCollected: false };
+  });
 }
 
 /** Undoes markOrderCollected - e.g. it was marked by mistake. */
@@ -4177,6 +4292,32 @@ function setTruckIssueStatus(issueId, status, checkerName) {
  * Dashboard's own "Today's trucks" card (which groups by TruckSessionID
  * only, never by OrderID) - exactly that split symptom.
  */
+/**
+ * One pass over TruckSessions + OrderChecks (build-2026-11-10-07) for the
+ * Dashboard's fulfillment overview: which orders went out on a dispatched
+ * truck (by OrderID and, for orders amended in Sage after dispatch, by
+ * order number), and which are sitting on a truck whose trip hasn't been
+ * dispatched yet - the reason an order can be Outstanding without being in
+ * the Trucks board's Unassigned list.
+ */
+function getDispatchLookups_() {
+  var sessionsById = {};
+  sheetToObjects_(getSheet_(SHEET_NAMES.SESSIONS)).forEach(function (s) { sessionsById[s.ID] = s; });
+  var ids = {}, numbers = {}, openTruck = {};
+  sheetToObjects_(getSheet_(SHEET_NAMES.ORDER_CHECKS)).forEach(function (c) {
+    var session = sessionsById[c.TruckSessionID];
+    if (!session) return;
+    if (session.Status === SESSION_STATUS.DISPATCHED) {
+      ids[orderIdKey_(c.OrderID)] = true;
+      var num = String(c.OrderNumber || '').trim();
+      if (num) numbers[num] = true;
+    } else {
+      openTruck[orderIdKey_(c.OrderID)] = session.TruckName;
+    }
+  });
+  return { ids: ids, numbers: numbers, openTruck: openTruck };
+}
+
 function getDispatchedOrderIds_() {
   var sessionsById = {};
   sheetToObjects_(getSheet_(SHEET_NAMES.SESSIONS)).forEach(function (s) { sessionsById[s.ID] = s; });
@@ -4199,13 +4340,20 @@ function getDispatchedOrderIds_() {
  * OrderChecks and CollectedOrders from scratch would double 3 full-sheet
  * reads on every single load for identical answers both times.
  */
-function buildOrderFulfillmentSummary_(orders, dispatchedOrderIds, collectedOrderIds) {
+function buildOrderFulfillmentSummary_(orders, dispatch, collectedLookups) {
   var withStatus = orders.map(function (o) {
-    var dispatched = !!dispatchedOrderIds[orderIdKey_(o.orderId)];
-    var collected = !!collectedOrderIds[orderIdKey_(o.orderId)];
+    var key = orderIdKey_(o.orderId), num = String(o.orderNumber || '').trim();
+    var dispatched = !!(dispatch.ids[key] || (num && dispatch.numbers[num]));
+    var collectedInfo = collectedLookups.byId[key] || (num && collectedLookups.byNumber[num]) || null;
+    var collected = !!collectedInfo;
     return {
       orderId: o.orderId, orderNumber: o.orderNumber, customer: o.customer, deliveryDate: o.deliveryDate,
-      dispatched: dispatched, collected: collected, outstanding: !dispatched && !collected
+      dispatched: dispatched, collected: collected, outstanding: !dispatched && !collected,
+      // Where an outstanding order is (build-2026-11-10-07): the truck it's
+      // on if that trip hasn't been dispatched yet, else '' (not on a truck).
+      onTruck: (!dispatched && !collected && dispatch.openTruck[key]) || '',
+      collectedAt: collectedInfo ? collectedInfo.at : '', collectedBy: collectedInfo ? collectedInfo.by : '',
+      notHandedOver: collectedInfo ? collectedInfo.notHanded : ''
     };
   });
 
@@ -4244,10 +4392,10 @@ function getOrderFulfillmentOverview(referenceDate) {
   // Same sharing principle as allOrders above, one level down: both summary
   // calls below need the same dispatched/collected lookups, so compute each
   // once here instead of having buildOrderFulfillmentSummary_ redo it twice.
-  var dispatchedOrderIds = getDispatchedOrderIds_();
-  var collectedOrderIds = getCollectedOrderIds_();
-  var todaySummary = buildOrderFulfillmentSummary_(readTodaysOrdersFromPacking_(date, allOrders), dispatchedOrderIds, collectedOrderIds);
-  var overdue = buildOrderFulfillmentSummary_(readOverdueOrdersFromPacking_(date, allOrders), dispatchedOrderIds, collectedOrderIds);
+  var dispatch = getDispatchLookups_();
+  var collected = getCollectedLookups_();
+  var todaySummary = buildOrderFulfillmentSummary_(readTodaysOrdersFromPacking_(date, allOrders), dispatch, collected);
+  var overdue = buildOrderFulfillmentSummary_(readOverdueOrdersFromPacking_(date, allOrders), dispatch, collected);
   return {
     date: date,
     today: todaySummary,

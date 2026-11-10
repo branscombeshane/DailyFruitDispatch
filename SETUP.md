@@ -774,6 +774,30 @@ list further, the same way the search and date work together. Clearing
 either the text or the date (or tapping **Clear**) goes back to searching
 every day at once, same as before this was added.
 
+## Customer collections with an item checklist (build-2026-11-10-07)
+
+- **Collect button:** every order in the Trucks board's **Unassigned**
+  list has a **Collect** button (checkers, Dispatch Managers and Admins).
+  It shows the order's items from Packing & Production. Tap **Handed
+  over** or **Not available** on each item; **Mark collected** unlocks
+  when every item is done. At least one item must be handed over.
+- **What's saved:** `CollectedOrders` gets who did it (from their login)
+  and which items were and weren't handed over. The two new columns are
+  added to the sheet automatically. The Dashboard's Collected list shows
+  who collected it, when, and anything not handed over.
+- **Orders on a truck:** an order already on a truck can't be collected.
+  Drag it back to Unassigned first.
+- **Unassigned list:** collected orders now leave it straight away.
+  Before, they stayed there all day.
+- **Dashboard Outstanding list:** each order now says where it is: "On
+  Truck 5 - not dispatched yet" or "Not on a truck". That's why
+  Outstanding can be bigger than Unassigned: it also counts orders on
+  trucks that haven't been dispatched yet. The quick **Mark Collected**
+  there stays for end-of-day tidying, and now records the person's name.
+- **Amended orders:** an order amended in Sage after it was dispatched or
+  collected (new OrderID, same order number) no longer shows as
+  Outstanding.
+
 ## Fruit trays from Zoho Creator (build-2026-11-10-02)
 
 Tray clients from Zoho Creator's Delivery Schedule ("Orders Due" page, Jhb

@@ -456,6 +456,14 @@
        truck you still need to see (e.g. to drag a different, unassigned
        order onto). */
     .board-order-chip.chip-match { border-color: var(--green); background: #eef5ef; box-shadow: 0 0 0 2px var(--green) inset; }
+    /* Collect button on Unassigned orders (build-2026-11-10-07). */
+    .chip-collect-btn { margin-left: auto; flex-shrink: 0; padding: 4px 10px; font-size: 12px; border: 1px solid var(--border); border-radius: 6px; background: #fff; cursor: pointer; }
+    .collect-item { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 10px 0; border-top: 1px solid var(--border); }
+    .collect-item .desc { font-size: 15px; }
+    .collect-item-actions { display: flex; gap: 6px; flex-shrink: 0; }
+    .collect-item-actions button { padding: 8px 10px; font-size: 13px; border: 1px solid var(--border); border-radius: 8px; background: #fff; cursor: pointer; }
+    .collect-item-actions button.on-handed { background: var(--green); color: #fff; border-color: var(--green); }
+    .collect-item-actions button.on-missing { background: var(--red); color: #fff; border-color: var(--red); }
     .board-drag-ghost { position: fixed; z-index: 9999; box-shadow: 0 6px 16px rgba(0,0,0,0.28); pointer-events: none; opacity: 0.92; margin: 0 !important; }
     /* Shane's 2026-09-16 request: flag an order right here in Dispatch when
        Production hasn't actually finished the work for it yet (see
@@ -593,6 +601,22 @@
        so a stuck order can be pulled off this truck right here - no longer
        requires a Dispatch Manager/Admin to drag it off on the separate
        Trucks board. -->
+  <!-- Customer collection (build-2026-11-10-07): tick each item as it's
+       handed to the customer, then mark the order collected. Opened from
+       the Collect button on an Unassigned order on the Trucks board. -->
+  <div class="modal-backdrop" id="collect-modal">
+    <div class="modal">
+      <h3 style="margin-top:0;">Customer collection</h3>
+      <div id="collect-order-title" style="font-weight:600;"></div>
+      <p class="hint" style="margin-top:4px;">Tap <strong>Handed over</strong> for each item as you give it to the customer, or <strong>Not available</strong> if it can't be given.</p>
+      <div id="collect-items" style="max-height:50vh; overflow-y:auto;"></div>
+      <div class="hint" id="collect-progress" style="margin-top:8px;"></div>
+      <div class="error" id="collect-error"></div>
+      <button class="btn btn-primary btn-block" id="collect-submit-btn" style="margin:10px 0;" onclick="submitCollection()">Mark collected</button>
+      <button class="btn btn-secondary btn-block" onclick="closeCollectModal()">Cancel</button>
+    </div>
+  </div>
+
   <div class="modal-backdrop" id="dispatch-blocked-modal">
     <div class="modal">
       <h3 style="margin-top:0; color:var(--red);">Can't dispatch yet</h3>
@@ -1191,7 +1215,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-11-10-06';
+  var BUILD_VERSION = 'build-2026-11-10-07';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -1368,6 +1392,9 @@
     // Fruit trays from Zoho (build-2026-11-10-02): reads, a keep-first-time
     // delivered tick, and a pull that replaces the same rows each time.
     getTrayStopsForTruck: true, getZohoTraySettings: true, driverMarkTrayDelivered: true, refreshTrayStops: true,
+    // Collection (build-2026-11-10-07): collectOrder leaves an already
+    // collected order as it is, so a retry can't double it up.
+    getOrderForCollection: true, collectOrder: true,
     listOpenDriverReports: true, listDriverReportsForDate: true, setDriverReportStatus: true
   };
   // Delays before each automatic retry (~0.8s, then ~2s later) - short
@@ -1698,6 +1725,80 @@
       '</div>';
     }).join('');
   }
+
+  // ------------------------------------------------------------------
+  // CUSTOMER COLLECTION (build-2026-11-10-07)
+  // ------------------------------------------------------------------
+  var collectData = null;   // getOrderForCollection answer
+  var collectState = {};    // item key -> 'handed' | 'missing'
+
+  function openCollection(orderId) {
+    callApi('getOrderForCollection', [orderId]).then(function (data) {
+      if (data.alreadyCollected) { alert(data.orderNumber + ' is already marked collected.'); loadTruckBoard(); return; }
+      if (data.onTruck) {
+        alert(data.truckDispatched
+          ? data.orderNumber + ' already went out on ' + data.onTruck + '.'
+          : data.orderNumber + ' is on ' + data.onTruck + '. Drag it back to Unassigned first, then collect it.');
+        loadTruckBoard();
+        return;
+      }
+      collectData = data;
+      collectState = {};
+      document.getElementById('collect-order-title').textContent = data.orderNumber + ' - ' + data.customer;
+      document.getElementById('collect-error').textContent = '';
+      renderCollection();
+      document.getElementById('collect-modal').classList.add('active');
+    }).catch(showFatalError);
+  }
+
+  function renderCollection() {
+    var items = collectData.items;
+    document.getElementById('collect-items').innerHTML = items.length === 0
+      ? '<div class="hint">This order has no items listed in Packing &amp; Production.</div>'
+      : items.map(function (it) {
+          var st = collectState[it.key];
+          return '<div class="collect-item"><div class="desc">' + escapeHtml(it.description) +
+            ' <span class="hint">' + escapeHtml(String(it.qty)) + (it.unit ? ' ' + escapeHtml(it.unit) : '') + '</span></div>' +
+            '<div class="collect-item-actions">' +
+              '<button class="' + (st === 'handed' ? 'on-handed' : '') + '" onclick="setCollectItem(' + jsStrAttr_(it.key) + ', \'handed\')">Handed over</button>' +
+              '<button class="' + (st === 'missing' ? 'on-missing' : '') + '" onclick="setCollectItem(' + jsStrAttr_(it.key) + ', \'missing\')">Not available</button>' +
+            '</div></div>';
+        }).join('');
+    var done = items.filter(function (it) { return collectState[it.key]; }).length;
+    var missing = items.filter(function (it) { return collectState[it.key] === 'missing'; }).length;
+    document.getElementById('collect-progress').textContent = done + ' of ' + items.length + ' items done' +
+      (missing ? ' (' + missing + ' not available)' : '');
+    var btn = document.getElementById('collect-submit-btn');
+    btn.disabled = done < items.length;
+    btn.style.opacity = btn.disabled ? '0.5' : '';
+  }
+
+  // Tapping the same choice again clears it.
+  function setCollectItem(key, value) {
+    collectState[key] = collectState[key] === value ? undefined : value;
+    document.getElementById('collect-error').textContent = '';
+    renderCollection();
+  }
+
+  function submitCollection() {
+    var items = collectData.items;
+    if (items.some(function (it) { return !collectState[it.key]; })) {
+      document.getElementById('collect-error').textContent = 'Tap Handed over or Not available for every item first.';
+      return;
+    }
+    var handed = items.filter(function (it) { return collectState[it.key] === 'handed'; }).map(function (it) { return it.key; });
+    var missing = items.filter(function (it) { return collectState[it.key] === 'missing'; }).map(function (it) { return it.key; });
+    var orderNumber = collectData.orderNumber;
+    callApi('collectOrder', [collectData.orderId, handed, missing]).then(function () {
+      closeCollectModal();
+      alert(orderNumber + ' marked collected.');
+      loadTruckBoard();
+    }).catch(function (err) {
+      document.getElementById('collect-error').textContent = err.message || String(err);
+    });
+  }
+
+  function closeCollectModal() { document.getElementById('collect-modal').classList.remove('active'); }
 
   // ------------------------------------------------------------------
   // DRIVER (build-2026-11-10-01)
@@ -2107,7 +2208,7 @@
     }
   }
 
-  function renderBoardOrderChip(o, isSearchMatch) {
+  function renderBoardOrderChip(o, isSearchMatch, showCollect) {
     var locked = !!o.truckDispatched;
     var saving = !!savingOrderIds[o.orderId];
     var draggable = !locked && !saving;
@@ -2121,6 +2222,7 @@
       dot + '<span>' + escapeHtml(o.orderNumber) + ' - ' + escapeHtml(o.customer) +
       (locked ? ' <span class="hint">(dispatched)</span>' : (saving ? ' <span class="hint">saving...</span>' : '')) +
       productionWarningBadge(o) + '</span>' +
+      (showCollect && !saving ? '<button class="chip-collect-btn" onclick="openCollection(' + jsStrAttr_(o.orderId) + ')">Collect</button>' : '') +
       '</div>';
   }
 
@@ -2342,7 +2444,7 @@
       // this exact symptom - all but the first order highlighted). This
       // wrapper is what the 2 truck-chip call sites above already do
       // correctly; this one was missed.
-      unassignedEl.innerHTML = unassignedToShow.map(function (o) { return renderBoardOrderChip(o); }).join('');
+      unassignedEl.innerHTML = unassignedToShow.map(function (o) { return renderBoardOrderChip(o, false, !!boardData.canCollect); }).join('');
     } else if (boardData.unassignedOrders.length === 0) {
       unassignedEl.innerHTML = '<div class="empty">Nothing left to assign.</div>';
     } else {
@@ -2573,6 +2675,9 @@
   }
 
   function startBoardDrag(e, chip) {
+    // The Collect button sits inside a draggable chip - let its tap through
+    // as a normal click instead of starting a drag.
+    if (e.target && e.target.closest && e.target.closest('.chip-collect-btn')) return;
     e.preventDefault();
     var rect = chip.getBoundingClientRect();
     var ghost = chip.cloneNode(true);
@@ -4627,21 +4732,33 @@
               var badge = o.dispatched ? '<span class="badge badge-dispatched">Dispatched</span>' :
                 o.collected ? '<span class="badge badge-complete">Collected</span>' :
                 '<span class="badge badge-pending">Outstanding</span>';
-              return '<div class="dash-order-row"><div>' + escapeHtml(o.orderNumber) + ' - ' + escapeHtml(o.customer) + '</div><div>' + badge + '</div></div>';
+              var collectedLine = o.collected && o.collectedAt
+                ? '<div class="hint">Collected ' + formatTime(o.collectedAt) + (o.collectedBy ? ' by ' + escapeHtml(o.collectedBy) : '') + '</div>' +
+                  (o.notHandedOver ? '<div class="late-reason-line">Not handed over: ' + escapeHtml(o.notHandedOver) + '</div>' : '')
+                : '';
+              return '<div class="dash-order-row"><div>' + escapeHtml(o.orderNumber) + ' - ' + escapeHtml(o.customer) + collectedLine + '</div><div>' + badge + '</div></div>';
             }).join('') + '</div>')) +
       '</div>';
   }
 
   function fulfillmentOrderRow(o, showDate, idSuffix) {
+    // Where it is (build-2026-11-10-07) - an order on a truck that hasn't
+    // been dispatched yet is Outstanding too, but isn't in the Trucks
+    // board's Unassigned list; this says which is which.
+    var whereLine = ('onTruck' in o)
+      ? '<div class="hint">' + (o.onTruck ? 'On ' + escapeHtml(o.onTruck) + ' - not dispatched yet' : 'Not on a truck') + '</div>'
+      : '';
     return '<div class="dash-order-row"><div>' + escapeHtml(o.orderNumber) + ' - ' + escapeHtml(o.customer) +
-      (showDate ? ' <span class="hint">(due ' + escapeHtml(o.deliveryDate) + ')</span>' : '') + '</div>' +
+      (showDate ? ' <span class="hint">(due ' + escapeHtml(o.deliveryDate) + ')</span>' : '') + whereLine + '</div>' +
       '<div><button class="btn btn-secondary" style="padding:6px 10px; font-size:13px;" onclick="collectOrderUi(\'' + o.orderId + '\', \'' + idSuffix + '\')">Mark Collected</button></div></div>';
   }
 
   function collectOrderUi(orderId, idSuffix) {
     var o = fulfillmentOrdersById[idSuffix][orderId];
     if (!o) return;
-    var collectedBy = state.adminRole === 'dispatchManager' ? 'Dispatch Manager' : 'Admin';
+    // The server records the signed-in person's name (build-2026-11-10-07);
+    // this is only what an older server would store.
+    var collectedBy = (state.checker && state.checker.name) || (state.adminRole === 'dispatchManager' ? 'Dispatch Manager' : 'Admin');
     callApi('markOrderCollected', [o.orderId, o.orderNumber, o.customer, collectedBy]).then(function () {
       if (idSuffix === '-history') loadHistory(); else loadDashboard();
     }).catch(showFatalError);

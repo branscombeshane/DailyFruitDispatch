@@ -1191,7 +1191,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-11-10-02';
+  var BUILD_VERSION = 'build-2026-11-10-03';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -1399,7 +1399,11 @@
   // reason. Its follow-up force=true confirm call reuses a warmed cache
   // instead of repeating that read (also build-2026-10-30), so in practice
   // only the first call should ever actually need this margin.
-  var EXTENDED_TIMEOUT_ACTIONS = { refreshTrayStops: 90000, setItemStatus: 35000, allocateOrderToTruck: 35000, updateSessionTrip: 35000, markTruckDispatched: 35000 };
+  // The Dashboard's big reads (build-2026-11-10-03): each reads several
+  // whole sheets, and a 20s cut-off followed by automatic retries only
+  // restarts the same slow work - better to wait a little longer once.
+  var EXTENDED_TIMEOUT_ACTIONS = { getDashboardForDate: 45000, getOrderFulfillmentOverview: 45000, getLateTruckLeaderboard: 45000,
+    refreshTrayStops: 90000, setItemStatus: 35000, allocateOrderToTruck: 35000, updateSessionTrip: 35000, markTruckDispatched: 35000 };
   var DEFAULT_TIMEOUT_MS = 20000;
 
   // opts.silent (default false): skip the global loading overlay entirely

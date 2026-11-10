@@ -3576,24 +3576,38 @@ function getDashboardForDate(dateStr) {
   var sessions = sheetToObjects_(getSheet_(SHEET_NAMES.SESSIONS)).filter(function (s) { return normalizeDateStr_(s.Date) === targetDate; });
   // Driver deliveries (build-2026-11-10-01) - when each order was marked
   // delivered from the road, keyed by OrderCheckID.
-  var deliveredAtByOrderCheckId = deliveredAtByOrderCheckId_(targetDate);
+  // DriverLogs read ONCE for both lookups below (build-2026-11-10-03 -
+  // this call was timing out; every extra full-sheet read here adds up).
+  var dayDriverLogs = driverLogsForDate_(targetDate);
+  var deliveredAtByOrderCheckId = deliveredAtByOrderCheckId_(targetDate, dayDriverLogs);
   // Fruit-tray stops (build-2026-11-10-02) - counted on each truck's first
   // trip of the day, same as the driver's list.
   var trayByVehicle = trayStopsByVehicle_(targetDate);
-  var trayDelivered = trayDeliveredMap_(targetDate);
+  var trayDelivered = trayDeliveredMap_(targetDate, dayDriverLogs);
   var zohoVehicleByTruckId = {};
   sheetToObjects_(getSheet_(SHEET_NAMES.TRUCKS)).forEach(function (t) { zohoVehicleByTruckId[t.ID] = String(t.ZohoVehicleID || ''); });
   var firstSessionByTruck = {};
   sessions.slice().sort(function (a, b) { return String(a.StartedAt).localeCompare(String(b.StartedAt)); })
     .forEach(function (s) { if (!firstSessionByTruck[s.TruckID]) firstSessionByTruck[s.TruckID] = s.ID; });
   var allOrderChecks = sheetToObjects_(getSheet_(SHEET_NAMES.ORDER_CHECKS)).filter(function (c) { return normalizeDateStr_(c.Date) === targetDate; });
-  var allItemChecks = sheetToObjects_(getSheet_(SHEET_NAMES.ITEM_CHECKS));
+  // Indexed by OrderCheckID up front (build-2026-11-10-03). This used to
+  // run allItemChecks.filter(...) once PER ORDER - every order on the day
+  // scanning every ItemChecks row on record (up to 14 days of them), which
+  // is millions of comparisons on a busy day and the main reason this
+  // call could pass the app's 20s timeout. Only this day's orders are kept.
+  var dayOrderCheckIds = {};
+  allOrderChecks.forEach(function (c) { dayOrderCheckIds[c.ID] = true; });
+  var itemChecksByOrderCheckId = {};
+  sheetToObjects_(getSheet_(SHEET_NAMES.ITEM_CHECKS)).forEach(function (i) {
+    if (!dayOrderCheckIds[i.OrderCheckID]) return;
+    (itemChecksByOrderCheckId[i.OrderCheckID] = itemChecksByOrderCheckId[i.OrderCheckID] || []).push(i);
+  });
 
   var trucks = sessions.map(function (session) {
     var orderChecks = allOrderChecks.filter(function (c) { return c.TruckSessionID === session.ID; });
 
     var orders = orderChecks.map(function (oc) {
-      var items = allItemChecks.filter(function (i) { return i.OrderCheckID === oc.ID; });
+      var items = itemChecksByOrderCheckId[oc.ID] || [];
       var noStockItems = items.filter(function (i) { return i.Status === ITEM_STATUS.NO_STOCK; });
       // "Short-packed" = marked Packed but the checker used Edit Qty to
       // record packing something other than the full ordered Qty (a blank
@@ -4245,11 +4259,23 @@ function driverLogs_() {
 }
 
 /** { OrderCheckID: deliveredAt ISO } for one day ('yyyy-MM-dd'), or every day on record if dateStr is null. */
-function deliveredAtByOrderCheckId_(dateStr) {
+// DriverLogs rows for one day ([] if the tab doesn't exist yet).
+function driverLogsForDate_(dateStr) {
   var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.DRIVER_LOGS);
+  if (!sheet) return [];
+  return sheetToObjects_(sheet).filter(function (l) { return normalizeDateStr_(l.Date) === dateStr; });
+}
+
+// preloadedLogs (optional): DriverLogs rows already read by the caller.
+function deliveredAtByOrderCheckId_(dateStr, preloadedLogs) {
   var map = {};
-  if (!sheet) return map;
-  sheetToObjects_(sheet).forEach(function (l) {
+  var logs = preloadedLogs;
+  if (!logs) {
+    var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.DRIVER_LOGS);
+    if (!sheet) return map;
+    logs = sheetToObjects_(sheet);
+  }
+  logs.forEach(function (l) {
     if (l.Type !== DRIVER_LOG_TYPES.DELIVERED || !l.OrderCheckID) return;
     if (dateStr && normalizeDateStr_(l.Date) !== dateStr) return;
     map[l.OrderCheckID] = l.LoggedAt;
@@ -4457,11 +4483,15 @@ function trayStopsByVehicle_(dateStr) {
 }
 
 /** { TrayStopID: { at, by } } for the day's tray stops marked delivered. */
-function trayDeliveredMap_(dateStr) {
-  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.DRIVER_LOGS);
+function trayDeliveredMap_(dateStr, preloadedLogs) {
   var map = {};
-  if (!sheet) return map;
-  sheetToObjects_(sheet).forEach(function (l) {
+  var logs = preloadedLogs;
+  if (!logs) {
+    var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.DRIVER_LOGS);
+    if (!sheet) return map;
+    logs = sheetToObjects_(sheet);
+  }
+  logs.forEach(function (l) {
     if (l.Type === DRIVER_LOG_TYPES.DELIVERED && l.TrayStopID && normalizeDateStr_(l.Date) === dateStr) {
       map[l.TrayStopID] = { at: l.LoggedAt, by: l.DriverName };
     }
@@ -4575,4 +4605,24 @@ function setDriverReportStatus(reportId, status) {
     ResolvedAt: resolved ? nowIso_() : ''
   });
   return { ok: true };
+}
+
+/**
+ * Run from the Apps Script editor when the Dashboard is slow
+ * (build-2026-11-10-03): logs how many rows each sheet has, how long
+ * reading it takes, and how long a full getDashboardForDate(today) takes.
+ * Reads only - changes nothing.
+ */
+function diagnoseDashboardSpeed() {
+  Object.keys(SHEET_NAMES).forEach(function (k) {
+    var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES[k]);
+    if (!sheet) { Logger.log(SHEET_NAMES[k] + ': (no tab)'); return; }
+    var t0 = Date.now();
+    var rows = sheet.getDataRange().getValues().length - 1;
+    Logger.log(SHEET_NAMES[k] + ': ' + rows + ' rows, read in ' + (Date.now() - t0) + ' ms');
+  });
+  var t1 = Date.now();
+  var d = getDashboardForDate(todayString_());
+  Logger.log('getDashboardForDate(today): ' + (Date.now() - t1) + ' ms for ' + d.trucks.length + ' truck trip(s), ' +
+    d.summary.totalOrders + ' order(s). Paste this log back.');
 }

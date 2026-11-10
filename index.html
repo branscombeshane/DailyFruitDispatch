@@ -1025,7 +1025,7 @@
              the Dashboard - see loadDashboard(). -->
         <div class="card">
           <h3 style="margin-top:0;">Trucks Leaving Late</h3>
-          <p class="hint" style="margin-top:0;">Trucks whose first trip of the day has left after 07:00 three or more times in the last 30 days. A truck's 2nd+ trip isn't held to a leave-by target, so only each day's first trip counts.</p>
+          <p class="hint" style="margin-top:0;" id="late-trucks-hint">Trucks whose first trip of the day has left after 07:00 three or more times recently. A truck's 2nd+ trip isn't held to a leave-by target, so only each day's first trip counts.</p>
           <div id="dashboard-late-trucks"></div>
         </div>
         <div class="card">
@@ -1191,7 +1191,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-11-10-03';
+  var BUILD_VERSION = 'build-2026-11-10-05';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -2457,22 +2457,41 @@
    * rather than inventing new styling for what's visually the same kind
    * of row.
    */
+  // Recorded reasons in red; late trips with no reason (mostly from before
+  // late reasons existed) as a quiet grey count, so they don't drown out
+  // the real ones. Also handles the older server, which listed those as a
+  // "No reason recorded" reason.
+  function lateReasonsLine_(row) {
+    var unrecorded = row.unrecordedCount || 0;
+    var reasons = (row.reasons || []).filter(function (r) {
+      if (r.reason === 'No reason recorded') { unrecorded += r.count; return false; }
+      return true;
+    });
+    return (reasons.length
+        ? '<div class="late-reason-line">Reasons: ' + reasons.map(function (r) { return escapeHtml(r.reason) + ' (' + r.count + ')'; }).join(', ') + '</div>'
+        : '') +
+      (unrecorded ? '<div class="hint">' + unrecorded + ' without a reason recorded</div>' : '');
+  }
+
   function renderLateTruckLeaderboard(data) {
     var el = document.getElementById('dashboard-late-trucks');
     if (!el) return;
     var trucks = (data && data.trucks) || [];
+    var days = (data && data.windowDays) || 14;
+    var minLate = (data && data.minLateCount) || 3;
+    document.getElementById('late-trucks-hint').textContent =
+      'Trucks whose first trip of the day has left after 07:00 ' + minLate + ' or more times in the last ' + days +
+      ' days (all the history the app keeps). A truck\'s 2nd+ trip isn\'t held to a leave-by target, so only each day\'s first trip counts.';
     if (trucks.length === 0) {
-      el.innerHTML = '<div class="empty">No truck has left late 3+ times in the last 30 days.</div>';
+      el.innerHTML = '<div class="empty">No truck has left late ' + minLate + '+ times in the last ' + days + ' days.</div>';
       return;
     }
     el.innerHTML = trucks.map(function (row) {
       return '<div class="timeline-entry">' +
         '<div class="timeline-main">' +
           '<div class="timeline-truck">' + escapeHtml(row.truckName) + '</div>' +
-          '<div class="timeline-who">' + row.lateCount + ' of ' + row.trip1Count + ' first trips left after 07:00, last 30 days</div>' +
-          ((row.reasons && row.reasons.length)
-            ? '<div class="late-reason-line">Reasons: ' + row.reasons.map(function (r) { return escapeHtml(r.reason) + ' (' + r.count + ')'; }).join(', ') + '</div>'
-            : '') +
+          '<div class="timeline-who">' + row.lateCount + ' of ' + row.trip1Count + ' first trips left after 07:00, last ' + days + ' days</div>' +
+          lateReasonsLine_(row) +
         '</div>' +
         '<span class="ontime-badge ontime-red">' + row.lateCount + 'x late</span>' +
       '</div>';

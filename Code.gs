@@ -3748,7 +3748,10 @@ function getDashboardForDate(dateStr) {
  * that would be 30 separate full-sheet reads for data this one read
  * already has.
  */
-var LATE_TRUCK_WINDOW_DAYS = 30;
+// Same as RETENTION_DAYS (build-2026-11-10-05; was 30): pruneOldRecords
+// deletes trips older than that every night, so a longer window would only
+// ever see RETENTION_DAYS of data while claiming more.
+var LATE_TRUCK_WINDOW_DAYS = RETENTION_DAYS;
 var LATE_TRUCK_MIN_LATE_COUNT = 3;
 var LATE_TRUCK_CUTOFF_MINUTES = 7 * 60; // 07:00 - matches onTimeBadge_'s amber/red boundary in index.html
 
@@ -3786,8 +3789,11 @@ function getLateTruckLeaderboard() {
     statsByTruck[truckName].trip1Count++;
     if (minutesOfDay > LATE_TRUCK_CUTOFF_MINUTES) {
       statsByTruck[truckName].lateCount++;
-      var reason = String(s.LateReason || '').trim() || 'No reason recorded';
-      statsByTruck[truckName].reasonCounts[reason] = (statsByTruck[truckName].reasonCounts[reason] || 0) + 1;
+      // Trips from before late reasons existed (or with none set up) are
+      // counted separately, so they don't crowd out the real reasons.
+      var reason = String(s.LateReason || '').trim();
+      if (reason) statsByTruck[truckName].reasonCounts[reason] = (statsByTruck[truckName].reasonCounts[reason] || 0) + 1;
+      else statsByTruck[truckName].unrecordedCount = (statsByTruck[truckName].unrecordedCount || 0) + 1;
     }
   });
 
@@ -3796,6 +3802,7 @@ function getLateTruckLeaderboard() {
       var counts = statsByTruck[truckName].reasonCounts;
       return {
         truckName: truckName, lateCount: statsByTruck[truckName].lateCount, trip1Count: statsByTruck[truckName].trip1Count,
+        unrecordedCount: statsByTruck[truckName].unrecordedCount || 0,
         // Most common reason first - what Shane needs to see to act on a
         // truck that keeps leaving late.
         reasons: Object.keys(counts).map(function (r) { return { reason: r, count: counts[r] }; })

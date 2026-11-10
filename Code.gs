@@ -26,7 +26,8 @@ var SHEET_NAMES = {
   JOBS: 'Jobs',
   PACKING_ISSUES: 'PackingIssues',
   TRUCK_ISSUES: 'TruckIssues',
-  LATE_REASONS: 'LateReasons'
+  LATE_REASONS: 'LateReasons',
+  DRIVER_LOGS: 'DriverLogs'
 };
 
 var SESSION_STATUS = { IN_PROGRESS: 'In Progress', DISPATCHED: 'Dispatched' };
@@ -50,7 +51,25 @@ var ISSUE_STATUS = { OPEN: 'Open', RESOLVED: 'Resolved' };
 // the order lookup (which truck an order is on, and its driver) - nothing
 // else. There's no longer a separate PIN-only Admin/Dispatch Manager gate -
 // one login, role decides access.
-var ROLES = { ADMIN: 'Admin', DISPATCH_MANAGER: 'Dispatch Manager', CHECKER: 'Checker', CUSTOMER_CARE: 'Customer Care' };
+var ROLES = { ADMIN: 'Admin', DISPATCH_MANAGER: 'Dispatch Manager', CHECKER: 'Checker', CUSTOMER_CARE: 'Customer Care', DRIVER: 'Driver' };
+// Drivers (build-2026-11-10-01) are NOT on the Checkers/Users sheet - they
+// sign in with the name + PIN on their own row of the Drivers list (Admin >
+// Drivers), and always get the Driver role: today's trips they're named
+// on, and logging deliveries/problems from the road. See verifyCredentials_.
+
+// What a driver can log from the road (DriverLogs.Type). Delivered is a
+// plain record; the other two are raised on the Dashboard as open items
+// for managers to resolve, same as Truck Issues.
+var DRIVER_LOG_TYPES = { DELIVERED: 'Delivered', CUSTOMER_PROBLEM: 'Customer problem', ROAD_INCIDENT: 'Road incident' };
+var DRIVER_PROBLEM_CATEGORIES = {
+  'Customer problem': ['Customer closed / not available', 'Items rejected or returned', 'Short or missing items', 'Damaged items', 'Wrong address / access problem', 'Other'],
+  'Road incident': ['Breakdown', 'Accident', 'Traffic delay', 'Fuel', 'Police / roadblock', 'Other']
+};
+
+// The signed-in user for the request being handled, set by
+// handleApiRequest_ after the credential check. Each web-app request runs
+// in its own fresh script execution, so this never leaks between users.
+var CURRENT_USER_ = null;
 
 var SHEET_HEADERS = {
   // Role is appended at the end (non-destructive migration, same as every
@@ -71,7 +90,9 @@ var SHEET_HEADERS = {
   // populated from - separate from the freeform Driver/DriverContacts
   // columns on TruckSessions below, which still store whatever ended up
   // selected/typed for that specific trip either way.
-  Drivers: ['ID', 'Name', 'Contact', 'Active', 'CreatedAt'],
+  // PIN appended build-2026-11-10-01 (driver sign-in - see ROLES.DRIVER).
+  // Never sent to the browser: listDrivers strips it.
+  Drivers: ['ID', 'Name', 'Contact', 'Active', 'CreatedAt', 'PIN'],
   // Driver, DispatchedWithWarnings, DispatchWarningsText, Route and the
   // TraySmall/Medium/Large/Other columns are appended at the end for the
   // same non-destructive-migration reason. Driver can hold up to 4 names,
@@ -168,7 +189,13 @@ var SHEET_HEADERS = {
   // TruckSessions.LateReasonOrders (order numbers) and each one is raised
   // as an open item on the Dashboard's Flagged Packing Issues checklist,
   // for management to resolve with night shift.
-  LateReasons: ['ID', 'Name', 'Active', 'CreatedAt', 'RequiresOrder']
+  LateReasons: ['ID', 'Name', 'Active', 'CreatedAt', 'RequiresOrder'],
+  // Everything drivers log from the road (build-2026-11-10-01): one row per
+  // delivered stop, customer problem or road incident. TruckName/
+  // OrderNumber/Customer are snapshotted at log time, same pattern as
+  // PackingIssues. Status is Open/Resolved for problems and incidents
+  // (managers resolve them on the Dashboard) and blank for Delivered.
+  DriverLogs: ['ID', 'Date', 'TruckSessionID', 'TruckName', 'DriverID', 'DriverName', 'Type', 'OrderCheckID', 'OrderNumber', 'Customer', 'Category', 'Note', 'LoggedAt', 'Status', 'ResolvedByName', 'ResolvedAt']
 };
 
 // ---------------------------------------------------------------------------
@@ -260,7 +287,13 @@ var API_ACTIONS = {
   listLateReasons: listLateReasons,
   addLateReason: addLateReason,
   updateLateReason: updateLateReason,
-  deleteLateReason: deleteLateReason
+  deleteLateReason: deleteLateReason,
+  getMyDriverTrips: getMyDriverTrips,
+  driverMarkDelivered: driverMarkDelivered,
+  driverReport: driverReport,
+  listOpenDriverReports: listOpenDriverReports,
+  listDriverReportsForDate: listDriverReportsForDate,
+  setDriverReportStatus: setDriverReportStatus
 };
 
 // ---------------------------------------------------------------------------
@@ -292,7 +325,10 @@ function buildActionRoles_() {
   var TRUCK_FLOW = [ROLES.ADMIN, ROLES.DISPATCH_MANAGER, ROLES.CHECKER];
   var MANAGERS = [ROLES.ADMIN, ROLES.DISPATCH_MANAGER];
   var ADMIN_ONLY = [ROLES.ADMIN];
+  var DRIVERS_ONLY = [ROLES.DRIVER];
   var groups = [
+    // Drivers only ever see their own trips today (see getMyDriverTrips).
+    [DRIVERS_ONLY, ['getMyDriverTrips', 'driverMarkDelivered', 'driverReport']],
     // Customer Care's order lookup - also used by the Dashboard's own
     // order search, so every role gets it.
     [ALL, ['findOrderAcrossTrucks']],
@@ -317,7 +353,7 @@ function buildActionRoles_() {
       'getOrderFulfillmentOverview', 'markOrderCollected', 'unmarkOrderCollected',
       'listJobsForDate', 'listPackingIssuesForDate', 'listOpenPackingIssues',
       'setPackingIssueStatus', 'listTruckIssuesForDate', 'listOpenTruckIssues',
-      'setTruckIssueStatus'
+      'setTruckIssueStatus', 'listOpenDriverReports', 'listDriverReportsForDate', 'setDriverReportStatus'
     ]],
     // Settings: users, trucks, drivers, data source.
     [ADMIN_ONLY, [
@@ -358,6 +394,7 @@ function handleApiRequest_(action, params, auth) {
       if (!allowed || allowed.indexOf(check.user.role) === -1) {
         throw new Error('Your role (' + check.user.role + ') doesn\'t have access to that.');
       }
+      CURRENT_USER_ = check.user;
     }
     result = fn.apply(null, Array.isArray(params) ? params : []);
     return jsonResponse_({ success: true, result: result });
@@ -372,7 +409,7 @@ function handleApiRequest_(action, params, auth) {
 // CREDENTIAL CHECKS
 // ---------------------------------------------------------------------------
 
-var AUTH_USERS_CACHE_KEY = 'authUsers_v1';
+var AUTH_USERS_CACHE_KEY = 'authUsers_v2';
 var AUTH_USERS_CACHE_TTL_SECONDS = 60;
 // Brute-force guard: a 4-digit PIN is only 10,000 guesses, and with every
 // request now carrying a PIN, any action is a guessing endpoint, not just
@@ -407,6 +444,21 @@ function getAuthUsers_() {
       role: u.Role || ROLES.CHECKER
     };
   });
+  // Drivers with a PIN set can sign in too, always as Driver. A driver
+  // with no PIN yet simply can't sign in.
+  var driversSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.DRIVERS);
+  if (driversSheet) {
+    sheetToObjects_(driversSheet).forEach(function (d) {
+      if (d.PIN === undefined || String(d.PIN).trim() === '') return;
+      users.push({
+        id: d.ID,
+        name: String(d.Name).trim(),
+        pinHash: hashPin_(d.PIN),
+        active: d.Active === true || String(d.Active).toUpperCase() === 'TRUE',
+        role: ROLES.DRIVER
+      });
+    });
+  }
   try { cache.put(AUTH_USERS_CACHE_KEY, JSON.stringify(users), AUTH_USERS_CACHE_TTL_SECONDS); } catch (e) { /* best-effort */ }
   return users;
 }
@@ -427,8 +479,11 @@ function verifyCredentials_(name, pin) {
     return { ok: false, error: 'Too many wrong PINs for this name. Try again in 15 minutes, or ask an Admin.' };
   }
 
-  var match = getAuthUsers_().filter(function (u) { return u.name.toLowerCase() === key; })[0];
-  if (!match || match.pinHash !== hashPin_(pinStr)) {
+  // A name can be on both lists (e.g. a checker who also drives) - the
+  // PIN typed decides which login it is.
+  var pinHash = hashPin_(pinStr);
+  var match = getAuthUsers_().filter(function (u) { return u.name.toLowerCase() === key && u.pinHash === pinHash; })[0];
+  if (!match) {
     try { cache.put(failKey, String(failures + 1), AUTH_LOCKOUT_SECONDS); } catch (e) { /* best-effort */ }
     // Same message whether the name or the PIN was wrong, so the endpoint
     // can't be used to find out which names exist.
@@ -912,10 +967,27 @@ function pruneOldRecords() {
     return old;
   });
 
+  // DriverLogs: same rule as the issue sheets above - an open problem or
+  // incident stays until someone resolves it; everything else goes once
+  // it's older than RETENTION_DAYS.
+  var driverLogsDeleted = 0;
+  var driverLogsSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.DRIVER_LOGS);
+  if (driverLogsSheet) {
+    var dlDateCol = SHEET_HEADERS.DriverLogs.indexOf('Date');
+    var dlStatusCol = SHEET_HEADERS.DriverLogs.indexOf('Status');
+    deleteRowsWhere_(driverLogsSheet, function (row) {
+      if (row[dlStatusCol] === ISSUE_STATUS.OPEN) return false;
+      var old = isOld(row[dlDateCol]);
+      if (old) driverLogsDeleted++;
+      return old;
+    });
+  }
+
   var summary = 'Pruned records older than ' + RETENTION_DAYS + ' days: ' +
     sessionsDeleted + ' truck session(s), ' + orderChecksDeleted + ' order check(s), ' +
     itemChecksDeleted + ' item check(s), ' + collectedDeleted + ' collected-order record(s), ' +
-    jobsDeleted + ' job(s), ' + packingIssuesDeleted + ' packing issue(s), ' + truckIssuesDeleted + ' truck issue(s).';
+    jobsDeleted + ' job(s), ' + packingIssuesDeleted + ' packing issue(s), ' + truckIssuesDeleted + ' truck issue(s), ' +
+    driverLogsDeleted + ' driver log(s).';
   Logger.log(summary);
   return summary;
 }
@@ -1158,11 +1230,18 @@ function deleteTruck(id) {
 // date, not perfectly complete before anyone can dispatch.
 // ---------------------------------------------------------------------------
 
+// PINs never leave the server (same as listCheckers) - hasPin tells the
+// Drivers screen whether this driver can sign in yet.
 function listDrivers(activeOnly) {
   var drivers = sheetToObjects_(getSheet_(SHEET_NAMES.DRIVERS));
   if (activeOnly) drivers = drivers.filter(function (d) { return d.Active === true; });
   drivers.sort(function (a, b) { return String(a.Name).localeCompare(String(b.Name)); });
-  return drivers;
+  return drivers.map(function (d) {
+    var copy = {};
+    Object.keys(d).forEach(function (k) { if (k !== 'PIN') copy[k] = d[k]; });
+    copy.hasPin = d.PIN !== undefined && String(d.PIN).trim() !== '';
+    return copy;
+  });
 }
 
 function addDriver(name, contact) {
@@ -1181,12 +1260,22 @@ function addDriver(name, contact) {
 }
 
 function updateDriver(id, patch) {
-  updateRowById_(getSheet_(SHEET_NAMES.DRIVERS), SHEET_HEADERS.Drivers, id, patch, ['Contact']);
+  patch = patch || {};
+  if ('ID' in patch) delete patch.ID;
+  if ('hasPin' in patch) delete patch.hasPin;
+  // Same rules as a user's PIN: blank means "leave it alone".
+  if ('PIN' in patch) {
+    if (String(patch.PIN == null ? '' : patch.PIN).trim() === '') delete patch.PIN;
+    else { patch.PIN = validateNewPin_(patch.PIN); ensureDriverSchema_(); }
+  }
+  updateRowById_(getSheet_(SHEET_NAMES.DRIVERS), SHEET_HEADERS.Drivers, id, patch, ['Contact', 'PIN']);
+  clearAuthUsersCache_();
   return { ok: true };
 }
 
 function deleteDriver(id) {
   deleteRowById_(getSheet_(SHEET_NAMES.DRIVERS), id);
+  clearAuthUsersCache_();
   return { ok: true };
 }
 
@@ -1898,10 +1987,12 @@ function findOrderAcrossTrucks(query, dateStr) {
 
   var sessionsById = {};
   sheetToObjects_(getSheet_(SHEET_NAMES.SESSIONS)).forEach(function (s) { sessionsById[s.ID] = s; });
+  var deliveredAt = deliveredAtByOrderCheckId_(null);
 
   var results = checks.map(function (c) {
     var session = sessionsById[c.TruckSessionID];
     return {
+      deliveredAt: deliveredAt[c.ID] || '',
       orderId: c.OrderID,
       orderNumber: c.OrderNumber,
       customer: c.Customer,
@@ -3460,6 +3551,9 @@ function getTodaysTruckOverview() {
 function getDashboardForDate(dateStr) {
   var targetDate = dateStr || todayString_();
   var sessions = sheetToObjects_(getSheet_(SHEET_NAMES.SESSIONS)).filter(function (s) { return normalizeDateStr_(s.Date) === targetDate; });
+  // Driver deliveries (build-2026-11-10-01) - when each order was marked
+  // delivered from the road, keyed by OrderCheckID.
+  var deliveredAtByOrderCheckId = deliveredAtByOrderCheckId_(targetDate);
   var allOrderChecks = sheetToObjects_(getSheet_(SHEET_NAMES.ORDER_CHECKS)).filter(function (c) { return normalizeDateStr_(c.Date) === targetDate; });
   var allItemChecks = sheetToObjects_(getSheet_(SHEET_NAMES.ITEM_CHECKS));
 
@@ -3483,6 +3577,7 @@ function getDashboardForDate(dateStr) {
         orderNumber: oc.OrderNumber,
         customer: oc.Customer,
         status: oc.Status,
+        deliveredAt: deliveredAtByOrderCheckId[oc.ID] || '',
         itemCount: items.length,
         packedCount: items.filter(function (i) { return i.Status === ITEM_STATUS.PACKED; }).length,
         noStockCount: noStockItems.length,
@@ -3526,6 +3621,8 @@ function getDashboardForDate(dateStr) {
       lateReason: session.LateReason || '',
       lateReasonOrders: session.LateReasonOrders || '',
       orderCount: orders.length,
+      deliveredCount: orders.filter(function (o) { return o.deliveredAt; }).length,
+      lastDeliveredAt: orders.reduce(function (latest, o) { return o.deliveredAt && o.deliveredAt > latest ? o.deliveredAt : latest; }, ''),
       noStockTotal: orders.reduce(function (sum, o) { return sum + o.noStockCount; }, 0),
       shortPackedTotal: orders.reduce(function (sum, o) { return sum + o.shortPackedCount; }, 0),
       orders: orders
@@ -4076,4 +4173,208 @@ function getOrderFulfillmentOverview(referenceDate) {
     // but dispatched/collected" isn't something anyone needs to act on.
     overdueWarnings: overdue.outstanding
   };
+}
+
+// ---------------------------------------------------------------------------
+// DRIVERS ON THE ROAD (build-2026-11-10-01)
+//
+// Drivers sign in with the name + PIN on their Drivers-list row (see
+// verifyCredentials_) and only ever see TODAY's trips they're named on -
+// a trip's Driver field (set by the checker in the trip modal) holds up to
+// 4 comma-separated names. From there they mark each order delivered and
+// report problems at a customer or on the road. Every driver action works
+// out who the driver is from the checked login (CURRENT_USER_), never from
+// anything the phone sends, and refuses a trip the driver isn't on.
+// ---------------------------------------------------------------------------
+
+/** Creates the DriverLogs tab and the Drivers.PIN header if missing - no need to re-run setupSpreadsheet(). */
+function ensureDriverSchema_() {
+  var cache = CacheService.getScriptCache();
+  var flagKey = 'driverSchemaOk_v1';
+  if (cache.get(flagKey)) return;
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var logs = ss.getSheetByName(SHEET_NAMES.DRIVER_LOGS);
+  if (!logs) { logs = ss.insertSheet(SHEET_NAMES.DRIVER_LOGS); logs.setFrozenRows(1); }
+  ensureHeaderCells_(logs, SHEET_HEADERS.DriverLogs, SHEET_HEADERS.DriverLogs);
+  var drivers = getSheet_(SHEET_NAMES.DRIVERS);
+  ensureHeaderCells_(drivers, SHEET_HEADERS.Drivers, ['PIN']);
+  // PINs like "0123" must stay text (same leading-zero problem as Checkers.PIN).
+  drivers.getRange(1, SHEET_HEADERS.Drivers.indexOf('PIN') + 1, drivers.getMaxRows(), 1).setNumberFormat('@');
+  try { cache.put(flagKey, '1', 6 * 60 * 60); } catch (e) { /* best-effort */ }
+}
+
+function driverLogs_() {
+  ensureDriverSchema_();
+  return sheetToObjects_(getSheet_(SHEET_NAMES.DRIVER_LOGS));
+}
+
+/** { OrderCheckID: deliveredAt ISO } for one day ('yyyy-MM-dd'), or every day on record if dateStr is null. */
+function deliveredAtByOrderCheckId_(dateStr) {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.DRIVER_LOGS);
+  var map = {};
+  if (!sheet) return map;
+  sheetToObjects_(sheet).forEach(function (l) {
+    if (l.Type !== DRIVER_LOG_TYPES.DELIVERED || !l.OrderCheckID) return;
+    if (dateStr && normalizeDateStr_(l.Date) !== dateStr) return;
+    map[l.OrderCheckID] = l.LoggedAt;
+  });
+  return map;
+}
+
+function currentDriver_() {
+  if (!CURRENT_USER_ || CURRENT_USER_.role !== ROLES.DRIVER) throw new Error('Only drivers can do this.');
+  return CURRENT_USER_;
+}
+
+/** True if driverName is one of the (comma-separated) names on this trip. */
+function driverIsOnSession_(session, driverName) {
+  var me = String(driverName || '').trim().toLowerCase();
+  return String(session.Driver || '').split(',').some(function (n) { return n.trim().toLowerCase() === me; });
+}
+
+/** Today's session, if this driver is on it - throws otherwise. */
+function driverSessionOrThrow_(sessionId, driver) {
+  var session = sheetToObjects_(getSheet_(SHEET_NAMES.SESSIONS)).filter(function (s) { return s.ID === sessionId; })[0];
+  if (!session || normalizeDateStr_(session.Date) !== todayString_() || !driverIsOnSession_(session, driver.name)) {
+    throw new Error('That trip isn\'t one of yours today. Ask the checker to add you as a driver on it.');
+  }
+  return session;
+}
+
+/**
+ * The driver's screen: every trip today with this driver on it, oldest
+ * first, each with its stops (the orders on that trip, with delivered
+ * time if logged) and the problems/incidents already reported on it.
+ */
+function getMyDriverTrips() {
+  var driver = currentDriver_();
+  var today = todayString_();
+  var allToday = sheetToObjects_(getSheet_(SHEET_NAMES.SESSIONS))
+    .filter(function (s) { return normalizeDateStr_(s.Date) === today; })
+    .sort(function (a, b) { return String(a.StartedAt).localeCompare(String(b.StartedAt)); });
+  var tripNumber = {}, perTruck = {};
+  allToday.forEach(function (s) { perTruck[s.TruckID] = (perTruck[s.TruckID] || 0) + 1; tripNumber[s.ID] = perTruck[s.TruckID]; });
+  var mine = allToday.filter(function (s) { return driverIsOnSession_(s, driver.name); });
+  if (mine.length === 0) return { driverName: driver.name, trips: [], categories: DRIVER_PROBLEM_CATEGORIES };
+
+  var mineIds = {};
+  mine.forEach(function (s) { mineIds[s.ID] = true; });
+  var orderChecks = sheetToObjects_(getSheet_(SHEET_NAMES.ORDER_CHECKS)).filter(function (c) { return mineIds[c.TruckSessionID]; });
+  var logs = driverLogs_().filter(function (l) { return mineIds[l.TruckSessionID]; });
+
+  return {
+    driverName: driver.name,
+    categories: DRIVER_PROBLEM_CATEGORIES,
+    trips: mine.map(function (s) {
+      var sessionLogs = logs.filter(function (l) { return l.TruckSessionID === s.ID; });
+      var delivered = {};
+      sessionLogs.forEach(function (l) {
+        if (l.Type === DRIVER_LOG_TYPES.DELIVERED) delivered[l.OrderCheckID] = { at: l.LoggedAt, by: l.DriverName };
+      });
+      return {
+        sessionId: s.ID, truckName: s.TruckName, tripNumber: tripNumber[s.ID], status: s.Status,
+        route: s.Route || '', drivers: s.Driver || '', dispatchedAt: s.DispatchedAt || '',
+        stops: orderChecks.filter(function (c) { return c.TruckSessionID === s.ID; }).map(function (c) {
+          return {
+            orderCheckId: c.ID, orderNumber: c.OrderNumber, customer: c.Customer,
+            deliveredAt: delivered[c.ID] ? delivered[c.ID].at : '', deliveredBy: delivered[c.ID] ? delivered[c.ID].by : ''
+          };
+        }).sort(function (a, b) { return String(a.customer).localeCompare(String(b.customer)); }),
+        reports: sessionLogs.filter(function (l) { return l.Type !== DRIVER_LOG_TYPES.DELIVERED; }).map(function (l) {
+          return { type: l.Type, category: l.Category, note: l.Note, orderNumber: l.OrderNumber, customer: l.Customer,
+            loggedAt: l.LoggedAt, by: l.DriverName, status: l.Status };
+        }).sort(function (a, b) { return String(b.loggedAt).localeCompare(String(a.loggedAt)); })
+      };
+    })
+  };
+}
+
+/**
+ * Marks one stop delivered (delivered=true) or undoes it (false). Safe to
+ * repeat: marking an already-delivered stop keeps the first time, undoing
+ * a stop that isn't delivered does nothing.
+ */
+function driverMarkDelivered(orderCheckId, delivered) {
+  var driver = currentDriver_();
+  var check = sheetToObjects_(getSheet_(SHEET_NAMES.ORDER_CHECKS)).filter(function (c) { return c.ID === orderCheckId; })[0];
+  if (!check) throw new Error('That order is no longer on the truck. Refresh and try again.');
+  var session = driverSessionOrThrow_(check.TruckSessionID, driver);
+  var sheet = getSheet_(SHEET_NAMES.DRIVER_LOGS);
+
+  return withNamedLock_('driverDelivered_' + orderCheckId, function () {
+    var existing = driverLogs_().filter(function (l) { return l.Type === DRIVER_LOG_TYPES.DELIVERED && l.OrderCheckID === orderCheckId; });
+    if (delivered) {
+      if (existing.length > 0) return { ok: true, deliveredAt: existing[0].LoggedAt };
+      var at = nowIso_();
+      appendObject_(sheet, SHEET_HEADERS.DriverLogs, {
+        ID: Utilities.getUuid(), Date: todayString_(), TruckSessionID: session.ID, TruckName: session.TruckName,
+        DriverID: driver.id, DriverName: driver.name, Type: DRIVER_LOG_TYPES.DELIVERED,
+        OrderCheckID: check.ID, OrderNumber: check.OrderNumber, Customer: check.Customer,
+        Category: '', Note: '', LoggedAt: at, Status: '', ResolvedByName: '', ResolvedAt: ''
+      });
+      return { ok: true, deliveredAt: at };
+    }
+    existing.forEach(function (l) { deleteRowById_(sheet, l.ID); });
+    return { ok: true, deliveredAt: '' };
+  });
+}
+
+/**
+ * A problem at a customer (orderCheckId given) or a road/vehicle incident
+ * (orderCheckId blank) on one of the driver's trips today. category must
+ * be one of DRIVER_PROBLEM_CATEGORIES for that type; a note is required
+ * for "Other". Raised as an Open item on the Dashboard's Driver Reports.
+ */
+function driverReport(sessionId, orderCheckId, category, note) {
+  var driver = currentDriver_();
+  var session = driverSessionOrThrow_(sessionId, driver);
+  var type = orderCheckId ? DRIVER_LOG_TYPES.CUSTOMER_PROBLEM : DRIVER_LOG_TYPES.ROAD_INCIDENT;
+  category = String(category || '').trim();
+  note = String(note || '').trim();
+  if (DRIVER_PROBLEM_CATEGORIES[type].indexOf(category) === -1) throw new Error('Pick what happened.');
+  if (category === 'Other' && !note) throw new Error('Add a short note saying what happened.');
+  if (note.length > 1000) note = note.slice(0, 1000);
+
+  var check = null;
+  if (orderCheckId) {
+    check = sheetToObjects_(getSheet_(SHEET_NAMES.ORDER_CHECKS)).filter(function (c) { return c.ID === orderCheckId && c.TruckSessionID === session.ID; })[0];
+    if (!check) throw new Error('That order isn\'t on this trip. Refresh and try again.');
+  }
+  ensureDriverSchema_();
+  var id = Utilities.getUuid();
+  appendObject_(getSheet_(SHEET_NAMES.DRIVER_LOGS), SHEET_HEADERS.DriverLogs, {
+    ID: id, Date: todayString_(), TruckSessionID: session.ID, TruckName: session.TruckName,
+    DriverID: driver.id, DriverName: driver.name, Type: type,
+    OrderCheckID: check ? check.ID : '', OrderNumber: check ? check.OrderNumber : '', Customer: check ? check.Customer : '',
+    Category: category, Note: note, LoggedAt: nowIso_(), Status: ISSUE_STATUS.OPEN, ResolvedByName: '', ResolvedAt: ''
+  });
+  return { id: id };
+}
+
+function driverReportsWhere_(fn) {
+  return driverLogs_()
+    .filter(function (l) { return l.Type !== DRIVER_LOG_TYPES.DELIVERED && fn(l); })
+    .map(function (l) { l.Date = normalizeDateStr_(l.Date); return l; })
+    .sort(function (a, b) { return String(b.LoggedAt).localeCompare(String(a.LoggedAt)); });
+}
+
+/** Dashboard: every still-open driver report, whatever day it was raised (same rule as Truck Issues). */
+function listOpenDriverReports() {
+  return driverReportsWhere_(function (l) { return l.Status === ISSUE_STATUS.OPEN; });
+}
+
+/** History: every driver report raised on the picked day, resolved or not. */
+function listDriverReportsForDate(dateStr) {
+  var target = dateStr || todayString_();
+  return driverReportsWhere_(function (l) { return normalizeDateStr_(l.Date) === target; });
+}
+
+function setDriverReportStatus(reportId, status) {
+  var resolved = status === ISSUE_STATUS.RESOLVED;
+  updateRowById_(getSheet_(SHEET_NAMES.DRIVER_LOGS), SHEET_HEADERS.DriverLogs, reportId, {
+    Status: resolved ? ISSUE_STATUS.RESOLVED : ISSUE_STATUS.OPEN,
+    ResolvedByName: resolved ? String((CURRENT_USER_ && CURRENT_USER_.name) || '') : '',
+    ResolvedAt: resolved ? nowIso_() : ''
+  });
+  return { ok: true };
 }

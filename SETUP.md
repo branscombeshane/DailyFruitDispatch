@@ -774,6 +774,37 @@ list further, the same way the search and date work together. Clearing
 either the text or the date (or tapping **Clear**) goes back to searching
 every day at once, same as before this was added.
 
+## Drivers on the road (build-2026-11-10-01)
+
+Drivers can sign in and log what happens on their deliveries.
+
+- **Sign-in:** give a driver an **App PIN** in **Admin > Drivers**. They
+  sign in on the normal login screen with their name exactly as on the
+  Drivers list plus that PIN. A driver with no PIN can't sign in;
+  unticking Active blocks them. PINs are never shown again after saving.
+- **What they see:** only today's trips where the checker put them in the
+  trip's Driver fields (the trip modal's driver dropdowns). A driver typed
+  into the freeform 4th slot instead of picked from the list won't match
+  unless the name is spelled exactly the same.
+- **What they log:**
+  - **Delivered** per stop (each order on the trip), with Undo.
+  - **Problem** at a stop: customer closed, items rejected/returned, short
+    or missing, damaged, wrong address/access, or Other (note required).
+  - **Road / vehicle incident**: breakdown, accident, traffic delay, fuel,
+    police/roadblock, or Other.
+- **Where it shows:**
+  - Problems and incidents go to the **Driver Reports** card on the
+    Dashboard and stay until resolved (History shows the picked day).
+  - Delivered progress shows on each Dashboard truck card
+    ("Delivered 3/5 (last 10:42)") and per order.
+  - Customer Care sees the delivered time when they look an order up.
+- Data lives on the `DriverLogs` tab (created automatically). Open reports
+  are never pruned; everything else follows the 14-day retention.
+- The server works out who the driver is from their login, never from
+  what the phone sends, and refuses trips they aren't on.
+- Like everyone else, a driver signs in again whenever the app is fully
+  closed and reopened (the PIN is only kept in memory).
+
 ## Late dispatch reasons (build-2026-11-09-01)
 
 When a truck's **first trip of the day** is marked dispatched **after

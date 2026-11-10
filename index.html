@@ -351,6 +351,14 @@
     .dash-truck-arrow { font-size: 11px; color: var(--grey); margin-left: 8px; }
     .dash-warning-line { color: var(--red); font-size: 13px; font-weight: 600; margin-top: 6px; }
     .late-reason-line { color: var(--red); font-size: 13px; margin-top: 4px; }
+    /* Driver screen (build-2026-11-10-01) - used on a phone in a truck, so
+       big tap targets and one stop per row. */
+    .driver-stop { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 12px 0; border-top: 1px solid var(--border); }
+    .driver-stop .who { font-size: 16px; font-weight: 600; }
+    .driver-stop .when { font-size: 13px; color: var(--green); margin-top: 2px; }
+    .driver-stop-actions { display: flex; gap: 8px; flex-shrink: 0; }
+    .driver-stop-actions .btn { padding: 12px 14px; font-size: 15px; }
+    .driver-delivered .who { color: var(--muted, #6b7280); }
     .dash-order-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-top: 1px solid var(--border); font-size: 14px; }
     .dash-nostock-detail { font-size: 12px; color: var(--red); margin-top: 2px; }
     .dash-shortpacked-detail { font-size: 12px; color: var(--amber); margin-top: 2px; }
@@ -744,6 +752,38 @@
     </div>
   </div>
 
+  <!-- Driver screen (build-2026-11-10-01) - drivers sign in with the PIN
+       set on their row in Admin > Drivers, and only see today's trips
+       they're named on (see getMyDriverTrips in Code.gs). -->
+  <div id="screen-driver" class="screen">
+    <div class="topbar">
+      <div>
+        <div class="title">My deliveries</div>
+        <div class="sub" id="driver-user-name"></div>
+      </div>
+      <div class="actions"><button onclick="loadDriverTrips()">Refresh</button><button onclick="logout()">Log out</button></div>
+    </div>
+    <div class="content">
+      <div id="driver-trips"></div>
+    </div>
+  </div>
+
+  <!-- Driver: report a problem at a customer (orderCheckId set) or a
+       road/vehicle incident (no order). -->
+  <div class="modal-backdrop" id="driver-report-modal">
+    <div class="modal">
+      <h3 style="margin-top:0;" id="driver-report-title">Report a problem</h3>
+      <p class="hint" id="driver-report-sub"></p>
+      <label>What happened?</label>
+      <select id="driver-report-category" onchange="document.getElementById('driver-report-error').textContent = ''" style="width:100%; padding:10px; font-size:15px; border:1px solid var(--border); border-radius:8px;"></select>
+      <label style="margin-top:10px;">Note</label>
+      <textarea id="driver-report-note" rows="3" maxlength="1000" placeholder="Anything management should know" style="width:100%; padding:10px; font-size:15px; border:1px solid var(--border); border-radius:8px; box-sizing:border-box;"></textarea>
+      <div class="error" id="driver-report-error"></div>
+      <button class="btn btn-primary btn-block" style="margin:10px 0;" onclick="submitDriverReport()">Send to management</button>
+      <button class="btn btn-secondary btn-block" onclick="closeDriverReportModal()">Cancel</button>
+    </div>
+  </div>
+
   <!-- Mandatory "any truck issues?" prompt - shown once at the start of a
        BRAND-NEW trip only (see TruckSessions.TruckIssuesPrompted /
        reportTruckIssues in Code.gs), never again for a resumed in-progress
@@ -994,6 +1034,7 @@
         <div id="jobs-today"></div>
         <div id="packing-issues-today"></div>
         <div id="truck-issues-today"></div>
+        <div id="driver-reports-today"></div>
         <div id="dashboard-trucks"></div>
       </div>
 
@@ -1033,6 +1074,7 @@
         <div id="jobs-today-history"></div>
         <div id="packing-issues-today-history"></div>
         <div id="truck-issues-today-history"></div>
+        <div id="driver-reports-today-history"></div>
         <!-- Quick in-day order search (2026-09-22, Shane's request) - a
              plain client-side filter over the trucks/orders already
              fetched for the picked day below, NOT a fresh server search.
@@ -1083,7 +1125,7 @@
       <div class="admin-pane" id="admin-drivers" style="display:none;">
         <div class="card">
           <h3 style="margin-top:0;">Add driver</h3>
-          <p class="hint">Drivers added here show up as dropdown choices when a checker sets up a truck's trip - saves re-typing a name and number every time the same driver goes out.</p>
+          <p class="hint">Drivers added here show up as dropdown choices when a checker sets up a truck's trip - saves re-typing a name and number every time the same driver goes out. Give a driver an App PIN below and they can sign in with their name + PIN to see their trips today and log deliveries and problems from the road.</p>
           <div class="row-inline">
             <input type="text" id="new-driver-name" placeholder="Name">
             <input type="tel" id="new-driver-contact" placeholder="Contact number">
@@ -1140,7 +1182,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-11-09-02';
+  var BUILD_VERSION = 'build-2026-11-10-01';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -1309,7 +1351,12 @@
     // retrying either after a lost response risks a silent duplicate flag/
     // issue row.
     listPackingIssuesForDate: true, listOpenPackingIssues: true, setPackingIssueStatus: true,
-    listTruckIssuesForDate: true, listOpenTruckIssues: true, setTruckIssueStatus: true
+    listTruckIssuesForDate: true, listOpenTruckIssues: true, setTruckIssueStatus: true,
+    // Drivers (build-2026-11-10-01): reads, and driverMarkDelivered keeps
+    // the first delivered time if repeated, so all safe to retry.
+    // driverReport appends a new row, so - like reportTruckIssues - it isn't.
+    getMyDriverTrips: true, driverMarkDelivered: true,
+    listOpenDriverReports: true, listDriverReportsForDate: true, setDriverReportStatus: true
   };
   // Delays before each automatic retry (~0.8s, then ~2s later) - short
   // enough that a genuinely transient hiccup (see callApiAttempt_'s comment
@@ -1534,6 +1581,8 @@
       // Customer Care only ever needs the order lookup - no truck checking,
       // no Admin/Dashboard access at all.
       if (res.user.role === 'Customer Care') { showCustomerCare(); return; }
+      // Drivers only see their own trips today.
+      if (res.user.role === 'Driver') { showDriverHome(); return; }
       goToTrucks();
     }).catch(showFatalError);
   }
@@ -1627,11 +1676,119 @@
           field('Truck', truckText) +
           field('Driver', driverText) +
           field('Dispatch status', dispatchStatus) +
+          (r.deliveredAt ? field('Delivered', escapeHtml(new Date(r.deliveredAt).toLocaleString())) : '') +
           field('Date', escapeHtml(r.date)) +
         '</div>' +
       '</div>';
     }).join('');
   }
+
+  // ------------------------------------------------------------------
+  // DRIVER (build-2026-11-10-01)
+  // ------------------------------------------------------------------
+  var driverData = null;      // last getMyDriverTrips answer
+  var driverReportTarget = null; // { sessionId, orderCheckId, type }
+
+  function showDriverHome() {
+    document.getElementById('driver-user-name').textContent = state.checker.name;
+    document.getElementById('driver-trips').innerHTML = '<div class="hint">Loading your trips...</div>';
+    showScreen('screen-driver');
+    loadDriverTrips();
+  }
+
+  function loadDriverTrips() {
+    callApi('getMyDriverTrips', []).then(function (data) {
+      driverData = data;
+      renderDriverTrips();
+    }).catch(showFatalError);
+  }
+
+  function renderDriverTrips() {
+    var el = document.getElementById('driver-trips');
+    var trips = (driverData && driverData.trips) || [];
+    if (trips.length === 0) {
+      el.innerHTML = '<div class="card"><div class="empty">You\'re not on any truck yet today. Once the checker adds you as a driver on a trip, tap Refresh.</div></div>';
+      return;
+    }
+    el.innerHTML = trips.map(function (t) {
+      var deliveredCount = t.stops.filter(function (s) { return s.deliveredAt; }).length;
+      var statusLine = t.status === 'Dispatched'
+        ? 'Dispatched ' + formatTime(t.dispatchedAt)
+        : 'Still being loaded - not dispatched yet';
+      var stopsHtml = t.stops.length === 0
+        ? '<div class="hint" style="padding:10px 0;">No orders on this trip.</div>'
+        : t.stops.map(function (st) {
+            var done = !!st.deliveredAt;
+            return '<div class="driver-stop' + (done ? ' driver-delivered' : '') + '">' +
+              '<div><div class="who">' + escapeHtml(st.customer) + '</div>' +
+              '<div class="hint">' + escapeHtml(st.orderNumber) + '</div>' +
+              (done ? '<div class="when">Delivered ' + formatTime(st.deliveredAt) + (st.deliveredBy ? ' by ' + escapeHtml(st.deliveredBy) : '') + '</div>' : '') +
+              '</div>' +
+              '<div class="driver-stop-actions">' +
+                (done
+                  ? '<button class="btn btn-secondary" onclick="driverSetDelivered(' + jsStrAttr_(st.orderCheckId) + ', false)">Undo</button>'
+                  : '<button class="btn btn-primary" onclick="driverSetDelivered(' + jsStrAttr_(st.orderCheckId) + ', true)">Delivered</button>') +
+                '<button class="btn btn-secondary" onclick="openDriverReport(' + jsStrAttr_(t.sessionId) + ', ' + jsStrAttr_(st.orderCheckId) + ')">Problem</button>' +
+              '</div></div>';
+          }).join('');
+      var reportsHtml = t.reports.length === 0 ? '' :
+        '<div style="margin-top:12px;"><div style="font-weight:600; margin-bottom:4px;">Reported on this trip</div>' +
+        t.reports.map(function (r) {
+          return '<div class="hint" style="padding:4px 0;">' + formatTime(r.loggedAt) + ' - ' + escapeHtml(r.category) +
+            (r.customer ? ' (' + escapeHtml(r.customer) + ')' : '') + (r.note ? ': ' + escapeHtml(r.note) : '') +
+            ' <span class="badge ' + (r.status === 'Resolved' ? 'badge-complete' : 'badge-pending') + '">' + escapeHtml(r.status) + '</span></div>';
+        }).join('') + '</div>';
+      return '<div class="card">' +
+        '<h3 style="margin:0;">' + escapeHtml(t.truckName) + (t.tripNumber > 1 ? ' (Trip ' + t.tripNumber + ')' : '') + '</h3>' +
+        '<div class="hint">' + escapeHtml(statusLine) + (t.route ? ' &middot; Route: ' + escapeHtml(t.route) : '') + '</div>' +
+        '<div class="hint">Drivers: ' + escapeHtml(t.drivers) + '</div>' +
+        '<div style="margin:10px 0 4px; font-weight:600;">Stops - ' + deliveredCount + ' of ' + t.stops.length + ' delivered</div>' +
+        stopsHtml +
+        '<button class="btn btn-danger btn-block" style="margin-top:12px;" onclick="openDriverReport(' + jsStrAttr_(t.sessionId) + ', \'\')">Report road / vehicle incident</button>' +
+        reportsHtml +
+      '</div>';
+    }).join('');
+  }
+
+  function driverSetDelivered(orderCheckId, delivered) {
+    callApi('driverMarkDelivered', [orderCheckId, delivered]).then(loadDriverTrips).catch(function (err) {
+      showFatalError(err);
+      loadDriverTrips();
+    });
+  }
+
+  function openDriverReport(sessionId, orderCheckId) {
+    var type = orderCheckId ? 'Customer problem' : 'Road incident';
+    driverReportTarget = { sessionId: sessionId, orderCheckId: orderCheckId, type: type };
+    var stopLabel = '';
+    (driverData.trips || []).forEach(function (t) {
+      t.stops.forEach(function (st) { if (st.orderCheckId === orderCheckId) stopLabel = st.customer + ' - ' + st.orderNumber; });
+    });
+    document.getElementById('driver-report-title').textContent = orderCheckId ? 'Problem at a customer' : 'Road / vehicle incident';
+    document.getElementById('driver-report-sub').textContent = orderCheckId ? stopLabel : 'Management sees this on the Dashboard straight away.';
+    var cats = (driverData.categories && driverData.categories[type]) || [];
+    document.getElementById('driver-report-category').innerHTML = '<option value="">- Pick one -</option>' +
+      cats.map(function (c) { return '<option value="' + escapeHtml(c) + '">' + escapeHtml(c) + '</option>'; }).join('');
+    document.getElementById('driver-report-note').value = '';
+    document.getElementById('driver-report-error').textContent = '';
+    document.getElementById('driver-report-modal').classList.add('active');
+  }
+
+  function submitDriverReport() {
+    var category = document.getElementById('driver-report-category').value;
+    var note = document.getElementById('driver-report-note').value.trim();
+    var errorEl = document.getElementById('driver-report-error');
+    if (!category) { errorEl.textContent = 'Pick what happened.'; return; }
+    if (category === 'Other' && !note) { errorEl.textContent = 'Add a short note saying what happened.'; return; }
+    var t = driverReportTarget;
+    closeDriverReportModal();
+    callApi('driverReport', [t.sessionId, t.orderCheckId || '', category, note]).then(function () {
+      alert('Sent to management.');
+      loadDriverTrips();
+    }).catch(showFatalError);
+  }
+
+  function closeDriverReportModal() { document.getElementById('driver-report-modal').classList.remove('active'); }
 
   // ------------------------------------------------------------------
   // TRUCK SELECT
@@ -3884,11 +4041,14 @@
   function loadDrivers() {
     callApi('listDrivers', [false]).then(function (drivers) {
       document.getElementById('drivers-table').innerHTML =
-        '<tr><th>Name</th><th>Contact</th><th>Active</th><th></th></tr>' +
+        '<tr><th>Name</th><th>Contact</th><th title="Lets this driver sign in to the app">App PIN</th><th>Active</th><th></th></tr>' +
         drivers.map(function (d) {
           return '<tr>' +
             '<td><input type="text" style="' + TRUCK_FIELD_STYLE + '" value="' + escapeHtml(d.Name) + '" onchange="updateDriverField(\'' + d.ID + '\', \'Name\', this.value)"></td>' +
             '<td><input type="tel" style="' + TRUCK_FIELD_STYLE + '" value="' + escapeHtml(d.Contact) + '" onchange="updateDriverField(\'' + d.ID + '\', \'Contact\', this.value)"></td>' +
+            // PINs are never sent to the browser - blank box, placeholder
+            // says whether one is set. Typing a new one replaces it.
+            '<td><input type="password" inputmode="numeric" autocomplete="new-password" placeholder="' + (d.hasPin ? 'PIN set - type to change' : 'No PIN - can\'t sign in') + '" style="' + TRUCK_FIELD_STYLE + '" onchange="updateDriverField(\'' + d.ID + '\', \'PIN\', this.value)"></td>' +
             '<td><label class="switch-label"><input type="checkbox" ' + (d.Active ? 'checked' : '') +
             ' onchange="updateDriverField(\'' + d.ID + '\', \'Active\', this.checked)"> Active</label></td>' +
             '<td><button class="btn btn-danger" onclick="deleteDriverUi(\'' + d.ID + '\', ' + jsStrAttr_(d.Name) + ')">Delete</button></td>' +
@@ -3910,10 +4070,17 @@
   }
 
   function updateDriverField(id, field, value) {
+    if (field === 'PIN') {
+      value = String(value).trim();
+      if (!value) return;
+      if (!/^[0-9]{4,}$/.test(value)) { showFatalError(new Error('PIN must be at least 4 digits.')); loadDrivers(); return; }
+    }
     var patch = {};
     patch[field] = value;
     driversCache = null;
-    callApi('updateDriver', [id, patch]).catch(showFatalError);
+    callApi('updateDriver', [id, patch]).then(function () {
+      if (field === 'PIN') loadDrivers(); // refresh the "PIN set" placeholder
+    }).catch(function (err) { showFatalError(err); loadDrivers(); });
   }
 
   function deleteDriverUi(id, name) {
@@ -4040,6 +4207,7 @@
     // listTruckIssuesForDate instead.
     callApi('listOpenPackingIssues', []).then(function (list) { renderPackingIssuesToday(list, ''); }).catch(showFatalError);
     callApi('listOpenTruckIssues', []).then(function (list) { renderTruckIssuesToday(list, ''); }).catch(showFatalError);
+    callApi('listOpenDriverReports', []).then(function (list) { renderDriverReports(list, ''); }).catch(ignoreUnknownAction_);
   }
 
   // History mirrors loadDashboard's shape (same render functions, same
@@ -4069,6 +4237,7 @@
     callApi('listJobsForDate', [dateInput.value]).then(function (list) { renderJobsToday(list, '-history'); }).catch(showFatalError);
     callApi('listPackingIssuesForDate', [dateInput.value]).then(function (list) { renderPackingIssuesToday(list, '-history'); }).catch(showFatalError);
     callApi('listTruckIssuesForDate', [dateInput.value]).then(function (list) { renderTruckIssuesToday(list, '-history'); }).catch(showFatalError);
+    callApi('listDriverReportsForDate', [dateInput.value]).then(function (list) { renderDriverReports(list, '-history'); }).catch(ignoreUnknownAction_);
   }
 
   // Jobs (see openAddJobModal in the truck workspace) are non-order tasks
@@ -4164,6 +4333,49 @@
           (t.Status === 'Resolved' ? 'Undo' : 'Resolve') + '</button></div></div>';
       }).join('') +
       '</div>';
+  }
+
+  // Problems at customers and road/vehicle incidents logged by drivers
+  // (build-2026-11-10-01) - same resolve-as-bookkeeping model as Truck
+  // Issues above: Dashboard shows every open one, History the picked day.
+  function renderDriverReports(list, idSuffix) {
+    var el = document.getElementById('driver-reports-today' + idSuffix);
+    if (!el) return;
+    if (list.length === 0) { el.innerHTML = ''; return; }
+    el.innerHTML = '<div class="card">' +
+      '<h3 style="margin-top:0;">Driver Reports (' + list.length + ')</h3>' +
+      list.map(function (r) {
+        var badgeClass = r.Status === 'Resolved' ? 'badge-complete' : 'badge-pending';
+        var resolvedLine = r.Status === 'Resolved'
+          ? '<div class="hint">Resolved ' + formatDateForDisplay(String(r.ResolvedAt).slice(0, 10)) + ' ' + formatTime(r.ResolvedAt) + (r.ResolvedByName ? ' by ' + escapeHtml(r.ResolvedByName) : '') + '</div>'
+          : '';
+        return '<div class="dash-order-row"><div><div>' +
+          escapeHtml(r.Type) + ': ' + escapeHtml(r.Category) + ' <span class="hint">(' + escapeHtml(r.TruckName) +
+          (r.OrderNumber ? ' - ' + escapeHtml(r.OrderNumber) + ' ' + escapeHtml(r.Customer) : '') + ')</span>' +
+          '</div>' + (r.Note ? '<div class="hint">' + escapeHtml(r.Note) + '</div>' : '') +
+          '<div class="hint">Reported ' + formatDateForDisplay(r.Date) + ' ' + formatTime(r.LoggedAt) + (r.DriverName ? ' by ' + escapeHtml(r.DriverName) : '') + '</div>' +
+          resolvedLine +
+          '</div><div style="display:flex; align-items:center; gap:10px;"><span class="badge ' + badgeClass + '">' + escapeHtml(r.Status) + '</span>' +
+          '<button class="btn btn-secondary" style="padding:6px 10px; font-size:13px;" onclick="toggleDriverReportResolved(\'' + r.ID + '\', \'' + r.Status + '\', \'' + idSuffix + '\')">' +
+          (r.Status === 'Resolved' ? 'Undo' : 'Resolve') + '</button></div></div>';
+      }).join('') +
+      '</div>';
+  }
+
+  // The Driver Reports card is new (build-2026-11-10-01): if the page goes
+  // live before the matching Code.gs is deployed, the server doesn't know
+  // these actions yet - skip the card quietly instead of an error popup
+  // on every Dashboard load.
+  function ignoreUnknownAction_(err) {
+    if (err && /Unknown action/.test(err.message || '')) return;
+    showFatalError(err);
+  }
+
+  function toggleDriverReportResolved(reportId, currentStatus, idSuffix) {
+    var newStatus = currentStatus === 'Resolved' ? 'Open' : 'Resolved';
+    callApi('setDriverReportStatus', [reportId, newStatus])
+      .then(function () { idSuffix === '-history' ? loadHistory() : loadDashboard(); })
+      .catch(showFatalError);
   }
 
   function toggleTruckIssueResolved(issueId, currentStatus, idSuffix) {
@@ -4488,6 +4700,7 @@
         'Started ' + formatTime(t.startedAt)
       ];
       if (t.dispatchedAt) metaParts.push('Dispatched ' + formatTime(t.dispatchedAt) + (durationText ? ' (' + durationText + ')' : ''));
+      if (t.deliveredCount) metaParts.push('Delivered ' + t.deliveredCount + '/' + t.orderCount + (t.lastDeliveredAt ? ' (last ' + formatTime(t.lastDeliveredAt) + ')' : ''));
 
       var warningLine = (t.dispatchedWithWarnings
         ? '<div class="dash-warning-line">Dispatched despite: ' + escapeHtml(t.dispatchWarningsText) + '</div>'
@@ -4525,6 +4738,7 @@
               : '';
             return '<div class="dash-order-row"><div><div>' + escapeHtml(o.orderNumber) + ' - ' + escapeHtml(o.customer) +
               '</div>' + noStockDetail + shortPackedDetail + '</div><div><span class="badge ' + badgeClass + '">' + o.status + '</span> ' +
+              (o.deliveredAt ? '<span class="badge badge-complete">Delivered ' + formatTime(o.deliveredAt) + '</span> ' : '') +
               '<span class="hint">' + o.packedCount + '/' + o.itemCount + ' packed' +
               (o.noStockCount ? ', ' + o.noStockCount + ' no-stock' : '') +
               (o.shortPackedCount ? ', ' + o.shortPackedCount + ' short-packed' : '') + '</span></div></div>';

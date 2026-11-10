@@ -794,6 +794,11 @@ every day at once, same as before this was added.
   Outstanding can be bigger than Unassigned: it also counts orders on
   trucks that haven't been dispatched yet. The quick **Mark Collected**
   there stays for end-of-day tidying, and now records the person's name.
+- **Never on a truck** (build-2026-11-10-08): a tile next to Outstanding
+  counts outstanding orders that were never put on any truck. That's the
+  orders left unassigned on a past day; on today's Dashboard it reads "Not
+  on a truck". On **History**, the Orders due card now sits above the
+  Dispatch Timeline so it isn't buried below a long list.
 - **Amended orders:** an order amended in Sage after it was dispatched or
   collected (new OrderID, same order number) no longer shows as
   Outstanding.

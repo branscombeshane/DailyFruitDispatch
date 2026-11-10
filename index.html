@@ -1081,6 +1081,15 @@
           <p class="hint" style="margin-top:0;">Pick a past day to see that day's trucks, orders due, and overdue warnings - for today, use Dashboard.</p>
           <div id="dashboard-summary-history" style="display:flex; flex-wrap:wrap; gap:12px;"></div>
         </div>
+        <!-- Orders due that day - moved above the Dispatch Timeline
+             (build-2026-11-10-08): on a busy day the timeline is long, and
+             this is where you see what didn't go out. -->
+        <div class="card">
+          <h3 style="margin-top:0;" id="fulfillment-title-history">Orders due</h3>
+          <p class="hint" id="fulfillment-hint-history"></p>
+          <div id="fulfillment-summary-history" style="display:flex; flex-wrap:wrap; gap:12px; margin-bottom:14px;"></div>
+          <div id="fulfillment-drilldown-history"></div>
+        </div>
         <!-- Dispatch Timeline for this picked day (build-2026-10-27) - same
              card as Dashboard's own (see that card's comment above), just
              scoped to whichever day is currently picked instead of always
@@ -1091,12 +1100,6 @@
           <h3 style="margin-top:0;">Dispatch Timeline</h3>
           <p class="hint" style="margin-top:0;">How long each truck took from its first order (or trip start, for a trays/jobs-only run) to actually leaving - newest dispatch first.</p>
           <div id="dashboard-dispatch-timeline-history"></div>
-        </div>
-        <div class="card">
-          <h3 style="margin-top:0;" id="fulfillment-title-history">Orders due</h3>
-          <p class="hint" id="fulfillment-hint-history"></p>
-          <div id="fulfillment-summary-history" style="display:flex; flex-wrap:wrap; gap:12px; margin-bottom:14px;"></div>
-          <div id="fulfillment-drilldown-history"></div>
         </div>
         <div id="jobs-today-history"></div>
         <div id="packing-issues-today-history"></div>
@@ -1215,7 +1218,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-11-10-07';
+  var BUILD_VERSION = 'build-2026-11-10-08';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -4668,11 +4671,23 @@
 
     var t = data.today;
     var sel = fulfillmentSelectedTile[idSuffix];
+    if (t.outstanding.length === 0 || 'onTruck' in t.outstanding[0]) {
+      t.neverOnTruck = t.outstanding.filter(function (o) { return !o.onTruck; });
+    }
+    FULFILLMENT_TILE_LABELS.neverOnTruck = isViewingToday ? 'Not on a truck' : 'Never on a truck';
     document.getElementById('fulfillment-summary' + idSuffix).innerHTML =
       statTile(t.total, 'Orders due ' + dayLabel, false, { onclick: "selectFulfillmentTile('" + idSuffix + "', 'total')", selected: sel === 'total' }) +
       statTile(t.dispatchedCount, 'Dispatched', false, { onclick: "selectFulfillmentTile('" + idSuffix + "', 'dispatched')", selected: sel === 'dispatched' }) +
       statTile(t.collectedCount, 'Collected', false, { onclick: "selectFulfillmentTile('" + idSuffix + "', 'collected')", selected: sel === 'collected' }) +
       statTile(t.outstandingCount, 'Outstanding', t.outstandingCount > 0, { onclick: "selectFulfillmentTile('" + idSuffix + "', 'outstanding')", selected: sel === 'outstanding' }) +
+      // The outstanding orders that were never put on a truck at all
+      // (build-2026-11-10-08) - for a past day, the orders left unassigned.
+      // Needs the server's onTruck field (build-2026-11-10-07 Code.gs);
+      // hidden until then rather than showing a wrong number.
+      (t.neverOnTruck
+        ? statTile(t.neverOnTruck.length, isViewingToday ? 'Not on a truck' : 'Never on a truck', t.neverOnTruck.length > 0,
+            { onclick: "selectFulfillmentTile('" + idSuffix + "', 'neverOnTruck')", selected: sel === 'neverOnTruck' })
+        : '') +
       // Overdue (2026-09-19, per Shane's decluttering request): folded into
       // this same tile row instead of its own always-visible red card below -
       // see renderFulfillmentDrilldown_'s own comment for why tapping it
@@ -4704,7 +4719,7 @@
   // outstanding orders are listed (previously the always-visible Outstanding
   // list and the Outstanding tile's own drilldown showed the same orders
   // twice).
-  var FULFILLMENT_ACTIONABLE_KEYS = { outstanding: true, overdue: true };
+  var FULFILLMENT_ACTIONABLE_KEYS = { outstanding: true, overdue: true, neverOnTruck: true };
 
   function renderFulfillmentDrilldown_(idSuffix) {
     var el = document.getElementById('fulfillment-drilldown' + idSuffix);

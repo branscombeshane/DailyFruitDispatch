@@ -27,7 +27,8 @@ var SHEET_NAMES = {
   PACKING_ISSUES: 'PackingIssues',
   TRUCK_ISSUES: 'TruckIssues',
   LATE_REASONS: 'LateReasons',
-  DRIVER_LOGS: 'DriverLogs'
+  DRIVER_LOGS: 'DriverLogs',
+  TRAY_STOPS: 'TrayStops'
 };
 
 var SESSION_STATUS = { IN_PROGRESS: 'In Progress', DISPATCHED: 'Dispatched' };
@@ -85,7 +86,11 @@ var SHEET_HEADERS = {
   // destructive column removal; neither is read or written by truck-admin
   // code any more. Registration/Type are appended at the end (not
   // inserted) so existing rows in a live sheet don't shift columns.
-  Trucks: ['ID', 'Name', 'Driver', 'Route', 'Active', 'CreatedAt', 'Registration', 'Type'],
+  // ZohoVehicleID (appended build-2026-11-10-02): which Zoho Creator
+  // delivery vehicle - e.g. "(1) - Ntwanano" - this truck carries, set in
+  // Admin > Trucks. That's how fruit-tray clients from Zoho's Delivery
+  // Schedule end up on the right Dispatch truck (see TrayStops).
+  Trucks: ['ID', 'Name', 'Driver', 'Route', 'Active', 'CreatedAt', 'Registration', 'Type', 'ZohoVehicleID'],
   // The pre-set driver list (Admin > Drivers) a trip's driver dropdowns are
   // populated from - separate from the freeform Driver/DriverContacts
   // columns on TruckSessions below, which still store whatever ended up
@@ -195,7 +200,14 @@ var SHEET_HEADERS = {
   // OrderNumber/Customer are snapshotted at log time, same pattern as
   // PackingIssues. Status is Open/Resolved for problems and incidents
   // (managers resolve them on the Dashboard) and blank for Delivered.
-  DriverLogs: ['ID', 'Date', 'TruckSessionID', 'TruckName', 'DriverID', 'DriverName', 'Type', 'OrderCheckID', 'OrderNumber', 'Customer', 'Category', 'Note', 'LoggedAt', 'Status', 'ResolvedByName', 'ResolvedAt']
+  DriverLogs: ['ID', 'Date', 'TruckSessionID', 'TruckName', 'DriverID', 'DriverName', 'Type', 'OrderCheckID', 'OrderNumber', 'Customer', 'Category', 'Note', 'LoggedAt', 'Status', 'ResolvedByName', 'ResolvedAt', 'TrayStopID'],
+  // Fruit-tray deliveries copied from Zoho Creator's Delivery Schedule
+  // (build-2026-11-10-02) by dzPullTrayStops_ in ZohoCreator.gs - one row
+  // per Zoho order per delivery date (a "tray stop"), replaced on every
+  // pull. ID is "<Zoho order ID>_<date>", so it stays the same across
+  // pulls and a driver's Delivered tick (DriverLogs.TrayStopID) survives.
+  // Read-only copy: Zoho stays the place to change tray orders.
+  TrayStops: ['ID', 'Date', 'ZohoOrderID', 'OrderNo', 'Customer', 'ZohoVehicleID', 'ZohoVehicle', 'Products', 'TotalQty', 'PulledAt']
 };
 
 // ---------------------------------------------------------------------------
@@ -288,6 +300,10 @@ var API_ACTIONS = {
   addLateReason: addLateReason,
   updateLateReason: updateLateReason,
   deleteLateReason: deleteLateReason,
+  getTrayStopsForTruck: getTrayStopsForTruck,
+  getZohoTraySettings: getZohoTraySettings,
+  refreshTrayStops: refreshTrayStops,
+  driverMarkTrayDelivered: driverMarkTrayDelivered,
   getMyDriverTrips: getMyDriverTrips,
   driverMarkDelivered: driverMarkDelivered,
   driverReport: driverReport,
@@ -328,7 +344,7 @@ function buildActionRoles_() {
   var DRIVERS_ONLY = [ROLES.DRIVER];
   var groups = [
     // Drivers only ever see their own trips today (see getMyDriverTrips).
-    [DRIVERS_ONLY, ['getMyDriverTrips', 'driverMarkDelivered', 'driverReport']],
+    [DRIVERS_ONLY, ['getMyDriverTrips', 'driverMarkDelivered', 'driverReport', 'driverMarkTrayDelivered']],
     // Customer Care's order lookup - also used by the Dashboard's own
     // order search, so every role gets it.
     [ALL, ['findOrderAcrossTrucks']],
@@ -345,7 +361,7 @@ function buildActionRoles_() {
       'getTruckPackTimerInfo', 'getOrderForChecking', 'unallocateOrder',
       'setItemStatus', 'setOrderCoaConfirmed', 'markTruckDispatched',
       'getJobsForSession', 'addJobToTruck', 'setJobStatus', 'removeJob',
-      'flagPackingIssue', 'reportTruckIssues'
+      'flagPackingIssue', 'reportTruckIssues', 'getTrayStopsForTruck'
     ]],
     // Dashboard / History / issues checklists / collected orders.
     [MANAGERS, [
@@ -353,14 +369,15 @@ function buildActionRoles_() {
       'getOrderFulfillmentOverview', 'markOrderCollected', 'unmarkOrderCollected',
       'listJobsForDate', 'listPackingIssuesForDate', 'listOpenPackingIssues',
       'setPackingIssueStatus', 'listTruckIssuesForDate', 'listOpenTruckIssues',
-      'setTruckIssueStatus', 'listOpenDriverReports', 'listDriverReportsForDate', 'setDriverReportStatus'
+      'setTruckIssueStatus', 'listOpenDriverReports', 'listDriverReportsForDate', 'setDriverReportStatus',
+      'refreshTrayStops'
     ]],
     // Settings: users, trucks, drivers, data source.
     [ADMIN_ONLY, [
       'listCheckers', 'addChecker', 'updateChecker', 'deleteChecker',
       'listTrucks', 'addTruck', 'updateTruck', 'deleteTruck',
       'addDriver', 'updateDriver', 'deleteDriver',
-      'listLateReasons', 'addLateReason', 'updateLateReason', 'deleteLateReason',
+      'listLateReasons', 'addLateReason', 'updateLateReason', 'deleteLateReason', 'getZohoTraySettings',
       'getAdminSettings', 'probeSpreadsheet', 'saveDataSourceConfig'
     ]]
   ];
@@ -1210,6 +1227,10 @@ function addTruck(name, registration, type) {
 }
 
 function updateTruck(id, patch) {
+  if (patch && 'ZohoVehicleID' in patch) {
+    ensureTraySchema_();
+    patch.ZohoVehicleID = String(patch.ZohoVehicleID || '').trim();
+  }
   updateRowById_(getSheet_(SHEET_NAMES.TRUCKS), SHEET_HEADERS.Trucks, id, patch);
   return { ok: true };
 }
@@ -2633,6 +2654,7 @@ function getTruckAssignmentBoardUncached_() {
     });
   });
 
+  var trayStopsByVehicle = trayStopsByVehicle_(today);
   var boardTrucks = trucks.map(function (t) {
     var truckSessionsToday = sessionsToday.filter(function (s) { return s.TruckID === t.ID; });
     var allDispatchedToday = truckSessionsToday.length > 0 && truckSessionsToday.every(function (s) { return s.Status === SESSION_STATUS.DISPATCHED; });
@@ -2694,7 +2716,8 @@ function getTruckAssignmentBoardUncached_() {
           dispatchedAt: s.DispatchedAt || '', dispatchedBy: s.DispatchedBy || ''
         };
       }),
-      orders: ordersByTruckId[t.ID] || []
+      orders: ordersByTruckId[t.ID] || [],
+      trayStopCount: t.ZohoVehicleID ? (trayStopsByVehicle[String(t.ZohoVehicleID)] || []).length : 0
     };
   });
 
@@ -3554,6 +3577,15 @@ function getDashboardForDate(dateStr) {
   // Driver deliveries (build-2026-11-10-01) - when each order was marked
   // delivered from the road, keyed by OrderCheckID.
   var deliveredAtByOrderCheckId = deliveredAtByOrderCheckId_(targetDate);
+  // Fruit-tray stops (build-2026-11-10-02) - counted on each truck's first
+  // trip of the day, same as the driver's list.
+  var trayByVehicle = trayStopsByVehicle_(targetDate);
+  var trayDelivered = trayDeliveredMap_(targetDate);
+  var zohoVehicleByTruckId = {};
+  sheetToObjects_(getSheet_(SHEET_NAMES.TRUCKS)).forEach(function (t) { zohoVehicleByTruckId[t.ID] = String(t.ZohoVehicleID || ''); });
+  var firstSessionByTruck = {};
+  sessions.slice().sort(function (a, b) { return String(a.StartedAt).localeCompare(String(b.StartedAt)); })
+    .forEach(function (s) { if (!firstSessionByTruck[s.TruckID]) firstSessionByTruck[s.TruckID] = s.ID; });
   var allOrderChecks = sheetToObjects_(getSheet_(SHEET_NAMES.ORDER_CHECKS)).filter(function (c) { return normalizeDateStr_(c.Date) === targetDate; });
   var allItemChecks = sheetToObjects_(getSheet_(SHEET_NAMES.ITEM_CHECKS));
 
@@ -3622,6 +3654,10 @@ function getDashboardForDate(dateStr) {
       lateReasonOrders: session.LateReasonOrders || '',
       orderCount: orders.length,
       deliveredCount: orders.filter(function (o) { return o.deliveredAt; }).length,
+      trayStopCount: (firstSessionByTruck[session.TruckID] === session.ID && zohoVehicleByTruckId[session.TruckID])
+        ? (trayByVehicle[zohoVehicleByTruckId[session.TruckID]] || []).length : 0,
+      trayDeliveredCount: (firstSessionByTruck[session.TruckID] === session.ID && zohoVehicleByTruckId[session.TruckID])
+        ? (trayByVehicle[zohoVehicleByTruckId[session.TruckID]] || []).filter(function (st) { return trayDelivered[st.ID]; }).length : 0,
       lastDeliveredAt: orders.reduce(function (latest, o) { return o.deliveredAt && o.deliveredAt > latest ? o.deliveredAt : latest; }, ''),
       noStockTotal: orders.reduce(function (sum, o) { return sum + o.noStockCount; }, 0),
       shortPackedTotal: orders.reduce(function (sum, o) { return sum + o.shortPackedCount; }, 0),
@@ -4190,7 +4226,7 @@ function getOrderFulfillmentOverview(referenceDate) {
 /** Creates the DriverLogs tab and the Drivers.PIN header if missing - no need to re-run setupSpreadsheet(). */
 function ensureDriverSchema_() {
   var cache = CacheService.getScriptCache();
-  var flagKey = 'driverSchemaOk_v1';
+  var flagKey = 'driverSchemaOk_v2';
   if (cache.get(flagKey)) return;
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var logs = ss.getSheetByName(SHEET_NAMES.DRIVER_LOGS);
@@ -4262,18 +4298,39 @@ function getMyDriverTrips() {
   var orderChecks = sheetToObjects_(getSheet_(SHEET_NAMES.ORDER_CHECKS)).filter(function (c) { return mineIds[c.TruckSessionID]; });
   var logs = driverLogs_().filter(function (l) { return mineIds[l.TruckSessionID]; });
 
+  // Fruit-tray stops from Zoho: shown on the driver's FIRST trip today on
+  // each truck (tray clients are one run a day), via the truck's Zoho
+  // vehicle (Admin > Trucks). Delivered ticks are keyed by tray stop, so
+  // they show whichever of the truck's drivers ticked them.
+  var trucksById = {};
+  sheetToObjects_(getSheet_(SHEET_NAMES.TRUCKS)).forEach(function (t) { trucksById[t.ID] = t; });
+  var trayByVehicle = trayStopsByVehicle_(today);
+  var trayDelivered = trayDeliveredMap_(today);
+  var trayShownForTruck = {};
+
   return {
     driverName: driver.name,
     categories: DRIVER_PROBLEM_CATEGORIES,
     trips: mine.map(function (s) {
+      var truck = trucksById[s.TruckID];
+      var trayStops = [];
+      if (truck && truck.ZohoVehicleID && !trayShownForTruck[s.TruckID]) {
+        trayShownForTruck[s.TruckID] = true;
+        trayStops = (trayByVehicle[String(truck.ZohoVehicleID)] || []).map(function (st) {
+          var d = trayDelivered[st.ID];
+          return { trayStopId: st.ID, customer: st.Customer, orderNo: st.OrderNo, products: st.Products,
+            deliveredAt: d ? d.at : '', deliveredBy: d ? d.by : '' };
+        });
+      }
       var sessionLogs = logs.filter(function (l) { return l.TruckSessionID === s.ID; });
       var delivered = {};
       sessionLogs.forEach(function (l) {
-        if (l.Type === DRIVER_LOG_TYPES.DELIVERED) delivered[l.OrderCheckID] = { at: l.LoggedAt, by: l.DriverName };
+        if (l.Type === DRIVER_LOG_TYPES.DELIVERED && l.OrderCheckID) delivered[l.OrderCheckID] = { at: l.LoggedAt, by: l.DriverName };
       });
       return {
         sessionId: s.ID, truckName: s.TruckName, tripNumber: tripNumber[s.ID], status: s.Status,
         route: s.Route || '', drivers: s.Driver || '', dispatchedAt: s.DispatchedAt || '',
+        trayStops: trayStops,
         stops: orderChecks.filter(function (c) { return c.TruckSessionID === s.ID; }).map(function (c) {
           return {
             orderCheckId: c.ID, orderNumber: c.OrderNumber, customer: c.Customer,
@@ -4282,6 +4339,7 @@ function getMyDriverTrips() {
         }).sort(function (a, b) { return String(a.customer).localeCompare(String(b.customer)); }),
         reports: sessionLogs.filter(function (l) { return l.Type !== DRIVER_LOG_TYPES.DELIVERED; }).map(function (l) {
           return { type: l.Type, category: l.Category, note: l.Note, orderNumber: l.OrderNumber, customer: l.Customer,
+            trayStopId: l.TrayStopID || '',
             loggedAt: l.LoggedAt, by: l.DriverName, status: l.Status };
         }).sort(function (a, b) { return String(b.loggedAt).localeCompare(String(a.loggedAt)); })
       };
@@ -4325,10 +4383,13 @@ function driverMarkDelivered(orderCheckId, delivered) {
  * be one of DRIVER_PROBLEM_CATEGORIES for that type; a note is required
  * for "Other". Raised as an Open item on the Dashboard's Driver Reports.
  */
-function driverReport(sessionId, orderCheckId, category, note) {
+function driverReport(sessionId, orderCheckId, category, note, trayStopId) {
   var driver = currentDriver_();
   var session = driverSessionOrThrow_(sessionId, driver);
-  var type = orderCheckId ? DRIVER_LOG_TYPES.CUSTOMER_PROBLEM : DRIVER_LOG_TYPES.ROAD_INCIDENT;
+  // A problem at a fruit-tray stop (build-2026-11-10-02) counts as a
+  // customer problem, same as one at an order.
+  var trayStop = trayStopId ? trayStopForSessionOrThrow_(trayStopId, session) : null;
+  var type = (orderCheckId || trayStop) ? DRIVER_LOG_TYPES.CUSTOMER_PROBLEM : DRIVER_LOG_TYPES.ROAD_INCIDENT;
   category = String(category || '').trim();
   note = String(note || '').trim();
   if (DRIVER_PROBLEM_CATEGORIES[type].indexOf(category) === -1) throw new Error('Pick what happened.');
@@ -4345,10 +4406,147 @@ function driverReport(sessionId, orderCheckId, category, note) {
   appendObject_(getSheet_(SHEET_NAMES.DRIVER_LOGS), SHEET_HEADERS.DriverLogs, {
     ID: id, Date: todayString_(), TruckSessionID: session.ID, TruckName: session.TruckName,
     DriverID: driver.id, DriverName: driver.name, Type: type,
-    OrderCheckID: check ? check.ID : '', OrderNumber: check ? check.OrderNumber : '', Customer: check ? check.Customer : '',
-    Category: category, Note: note, LoggedAt: nowIso_(), Status: ISSUE_STATUS.OPEN, ResolvedByName: '', ResolvedAt: ''
+    OrderCheckID: check ? check.ID : '',
+    OrderNumber: check ? check.OrderNumber : (trayStop ? 'Fruit trays (Zoho order ' + trayStop.OrderNo + ')' : ''),
+    Customer: check ? check.Customer : (trayStop ? trayStop.Customer : ''),
+    Category: category, Note: note, LoggedAt: nowIso_(), Status: ISSUE_STATUS.OPEN, ResolvedByName: '', ResolvedAt: '',
+    TrayStopID: trayStop ? trayStop.ID : ''
   });
   return { id: id };
+}
+
+// ---------------------------------------------------------------------------
+// FRUIT TRAYS FROM ZOHO CREATOR (build-2026-11-10-02)
+//
+// ZohoCreator.gs (a separate file in this Apps Script project, kept out of
+// the public repo) copies today's and tomorrow's fruit-tray deliveries from
+// Zoho Creator's All_Fruit_Statistics report into the TrayStops tab every
+// 30 minutes. Each Dispatch truck is linked to one Zoho vehicle in Admin >
+// Trucks, and that link decides which tray stops show on which truck: in
+// the checker's workspace, as a count on the Trucks board, and as stops in
+// the driver's list.
+// ---------------------------------------------------------------------------
+
+/** Creates the TrayStops tab and the new Trucks/DriverLogs headers if missing. */
+function ensureTraySchema_() {
+  var cache = CacheService.getScriptCache();
+  var flagKey = 'traySchemaOk_v1';
+  if (cache.get(flagKey)) return;
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var stops = ss.getSheetByName(SHEET_NAMES.TRAY_STOPS);
+  if (!stops) { stops = ss.insertSheet(SHEET_NAMES.TRAY_STOPS); stops.setFrozenRows(1); }
+  ensureHeaderCells_(stops, SHEET_HEADERS.TrayStops, SHEET_HEADERS.TrayStops);
+  ensureHeaderCells_(getSheet_(SHEET_NAMES.TRUCKS), SHEET_HEADERS.Trucks, ['ZohoVehicleID']);
+  ensureDriverSchema_();
+  ensureHeaderCells_(getSheet_(SHEET_NAMES.DRIVER_LOGS), SHEET_HEADERS.DriverLogs, ['TrayStopID']);
+  try { cache.put(flagKey, '1', 6 * 60 * 60); } catch (e) { /* best-effort */ }
+}
+
+/** Tray stops for one day ('yyyy-MM-dd'), keyed by Zoho vehicle ID, each list sorted by customer. */
+function trayStopsByVehicle_(dateStr) {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.TRAY_STOPS);
+  var map = {};
+  if (!sheet) return map;
+  sheetToObjects_(sheet).forEach(function (st) {
+    if (normalizeDateStr_(st.Date) !== dateStr) return;
+    var key = String(st.ZohoVehicleID || '');
+    (map[key] = map[key] || []).push(st);
+  });
+  Object.keys(map).forEach(function (k) { map[k].sort(function (a, b) { return String(a.Customer).localeCompare(String(b.Customer)); }); });
+  return map;
+}
+
+/** { TrayStopID: { at, by } } for the day's tray stops marked delivered. */
+function trayDeliveredMap_(dateStr) {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.DRIVER_LOGS);
+  var map = {};
+  if (!sheet) return map;
+  sheetToObjects_(sheet).forEach(function (l) {
+    if (l.Type === DRIVER_LOG_TYPES.DELIVERED && l.TrayStopID && normalizeDateStr_(l.Date) === dateStr) {
+      map[l.TrayStopID] = { at: l.LoggedAt, by: l.DriverName };
+    }
+  });
+  return map;
+}
+
+function trayPulledInfo_() {
+  try { return JSON.parse(readSettings_().TrayStopsPulled || 'null'); } catch (e) { return null; }
+}
+
+/** Checker's workspace: today's tray stops for this truck, plus product totals for loading. */
+function getTrayStopsForTruck(truckId) {
+  var truck = sheetToObjects_(getSheet_(SHEET_NAMES.TRUCKS)).filter(function (t) { return t.ID === truckId; })[0];
+  var info = trayPulledInfo_();
+  if (!truck || !truck.ZohoVehicleID) return { linked: false, pulledAt: info ? info.at : '', stops: [], productTotals: [] };
+  var stops = trayStopsByVehicle_(todayString_())[String(truck.ZohoVehicleID)] || [];
+  var totals = {};
+  stops.forEach(function (st) {
+    String(st.Products || '').split(/,\s*/).forEach(function (part) {
+      var m = part.match(/^(.*) x(\d+)$/);
+      if (m) totals[m[1]] = (totals[m[1]] || 0) + Number(m[2]);
+    });
+  });
+  var delivered = trayDeliveredMap_(todayString_());
+  return {
+    linked: true,
+    zohoVehicle: stops.length ? stops[0].ZohoVehicle : '',
+    pulledAt: info ? info.at : '',
+    stops: stops.map(function (st) {
+      return { customer: st.Customer, orderNo: st.OrderNo, products: st.Products, totalQty: st.TotalQty,
+        deliveredAt: delivered[st.ID] ? delivered[st.ID].at : '' };
+    }),
+    productTotals: Object.keys(totals).sort().map(function (k) { return { product: k, qty: totals[k] }; })
+  };
+}
+
+/** Admin > Trucks: the Zoho vehicles to pick from, and when Zoho was last read. */
+function getZohoTraySettings() {
+  var s = readSettings_();
+  var vehicles = [];
+  try { vehicles = JSON.parse(s.ZohoVehicles || '[]'); } catch (e) { vehicles = []; }
+  return { vehicles: vehicles, pulled: trayPulledInfo_(), zohoFileInstalled: typeof dzPullTrayStops_ === 'function' };
+}
+
+/** "Refresh from Zoho" button (Admin > Trucks, and the checker's tray list for managers). */
+function refreshTrayStops() {
+  if (typeof dzPullTrayStops_ !== 'function') {
+    throw new Error('The ZohoCreator file isn\'t in the Dispatch Apps Script project yet - add it first (see SETUP.md).');
+  }
+  return dzPullTrayStops_();
+}
+
+/** The tray stop, if it's today's and on this session's truck's Zoho vehicle - throws otherwise. */
+function trayStopForSessionOrThrow_(trayStopId, session) {
+  var truck = sheetToObjects_(getSheet_(SHEET_NAMES.TRUCKS)).filter(function (t) { return t.ID === session.TruckID; })[0];
+  var stop = (trayStopsByVehicle_(todayString_())[String((truck && truck.ZohoVehicleID) || '')] || [])
+    .filter(function (st) { return st.ID === trayStopId; })[0];
+  if (!truck || !truck.ZohoVehicleID || !stop) throw new Error('That tray stop isn\'t on this truck today. Tap Refresh.');
+  return stop;
+}
+
+/** Driver ticks a fruit-tray stop delivered (or undoes it). Same rules as driverMarkDelivered. */
+function driverMarkTrayDelivered(sessionId, trayStopId, delivered) {
+  var driver = currentDriver_();
+  var session = driverSessionOrThrow_(sessionId, driver);
+  var stop = trayStopForSessionOrThrow_(trayStopId, session);
+  ensureTraySchema_();
+  var sheet = getSheet_(SHEET_NAMES.DRIVER_LOGS);
+  return withNamedLock_('trayDelivered_' + trayStopId, function () {
+    var existing = driverLogs_().filter(function (l) { return l.Type === DRIVER_LOG_TYPES.DELIVERED && l.TrayStopID === trayStopId; });
+    if (delivered) {
+      if (existing.length > 0) return { ok: true, deliveredAt: existing[0].LoggedAt };
+      var at = nowIso_();
+      appendObject_(sheet, SHEET_HEADERS.DriverLogs, {
+        ID: Utilities.getUuid(), Date: todayString_(), TruckSessionID: session.ID, TruckName: session.TruckName,
+        DriverID: driver.id, DriverName: driver.name, Type: DRIVER_LOG_TYPES.DELIVERED,
+        OrderCheckID: '', OrderNumber: 'Fruit trays (Zoho order ' + stop.OrderNo + ')', Customer: stop.Customer,
+        Category: '', Note: '', LoggedAt: at, Status: '', ResolvedByName: '', ResolvedAt: '', TrayStopID: stop.ID
+      });
+      return { ok: true, deliveredAt: at };
+    }
+    existing.forEach(function (l) { deleteRowById_(sheet, l.ID); });
+    return { ok: true, deliveredAt: '' };
+  });
 }
 
 function driverReportsWhere_(fn) {

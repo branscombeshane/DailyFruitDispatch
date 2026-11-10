@@ -774,6 +774,38 @@ list further, the same way the search and date work together. Clearing
 either the text or the date (or tapping **Clear**) goes back to searching
 every day at once, same as before this was added.
 
+## Fruit trays from Zoho Creator (build-2026-11-10-02)
+
+Tray clients from Zoho Creator's Delivery Schedule ("Orders Due" page, Jhb
+app) are copied into Dispatch so each truck shows its tray clients.
+
+- **Source:** Zoho's `All_Fruit_Statistics` report: one row per order line
+  per delivery date, with the order's vehicle (e.g. "(1) - Ntwanano").
+  Rows of deleted orders are left out, which is how Creator's own schedule
+  works. Customer names come from the `Orders` report.
+- **Copy:** `ZohoCreator.gs` (a second file in the Dispatch Apps Script
+  project) writes today's and tomorrow's tray stops to the `TrayStops` tab
+  every 30 minutes, 05:00-21:59, and on **Settings > Trucks > Refresh from
+  Zoho now**. It's read-only on Zoho; change tray orders in Zoho as before.
+- **`ZohoCreator.gs` is not in this repo.** The Zoho connection code comes
+  from the private Procurement repo, whose rules keep `.gs` files out of
+  public repos. Keep its master copy in Apps Script (or a private repo).
+- **Linking trucks:** Zoho's vehicles are named by driver/area, not by
+  Dispatch truck, so each truck needs its **Zoho vehicle** picked once in
+  **Settings > Trucks**. Unlinked trucks show no tray clients.
+- **Where it shows:**
+  - Checker's workspace, Fruit Trays tab: "Tray clients today", with
+    product totals to load.
+  - Trucks board: "N tray clients" per truck.
+  - Driver's stops on their first trip of the day on that truck: Delivered
+    / Problem, same as orders.
+  - Dashboard truck card: "Tray clients delivered x/y".
+- **One-time setup** in the Apps Script editor: add Script properties
+  `ZC_CLIENT_ID`, `ZC_CLIENT_SECRET`, `ZC_DC`, `ZC_REFRESH_TOKEN` (copied
+  from Procurement's), `ZOHO_CREATOR_OWNER` = `shane_dailyfruit`,
+  `ZOHO_CREATOR_APP` = `dailyfruit`. Run `trayPullNow` once, then
+  `setupTrayPullTrigger` once.
+
 ## Drivers on the road (build-2026-11-10-01)
 
 Drivers can sign in and log what happens on their deliveries.

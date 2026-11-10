@@ -665,6 +665,9 @@
           </div>
           <div class="hint" id="tray-updated" style="text-align:center;"></div>
         </div>
+        <!-- Tray clients on this truck today, from Zoho Creator's Delivery
+             Schedule (build-2026-11-10-02) - see getTrayStopsForTruck. -->
+        <div id="ws-tray-stops"></div>
       </div>
 
       <!-- Orders pane: only orders already allocated to THIS truck - the
@@ -1119,6 +1122,12 @@
           <input type="text" id="new-truck-type" placeholder="Type (optional)">
           <button class="btn btn-primary btn-block" onclick="addTruckUi()">Add</button>
         </div>
+        <div class="card">
+          <h3 style="margin-top:0;">Fruit trays from Zoho</h3>
+          <p class="hint">Tray clients come from Zoho Creator's Delivery Schedule every 30 minutes. Pick each truck's Zoho vehicle below so its tray clients show on the right truck - for the checker, on the Trucks board and in the driver's stops.</p>
+          <div class="hint" id="zoho-tray-status"></div>
+          <button class="btn btn-secondary" onclick="refreshTrayStopsUi()">Refresh from Zoho now</button>
+        </div>
         <div class="card"><p class="hint">Click any field below to edit it - changes save automatically.</p><table id="trucks-table"></table></div>
       </div>
 
@@ -1182,7 +1191,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-11-10-01';
+  var BUILD_VERSION = 'build-2026-11-10-02';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -1356,6 +1365,9 @@
     // the first delivered time if repeated, so all safe to retry.
     // driverReport appends a new row, so - like reportTruckIssues - it isn't.
     getMyDriverTrips: true, driverMarkDelivered: true,
+    // Fruit trays from Zoho (build-2026-11-10-02): reads, a keep-first-time
+    // delivered tick, and a pull that replaces the same rows each time.
+    getTrayStopsForTruck: true, getZohoTraySettings: true, driverMarkTrayDelivered: true, refreshTrayStops: true,
     listOpenDriverReports: true, listDriverReportsForDate: true, setDriverReportStatus: true
   };
   // Delays before each automatic retry (~0.8s, then ~2s later) - short
@@ -1387,7 +1399,7 @@
   // reason. Its follow-up force=true confirm call reuses a warmed cache
   // instead of repeating that read (also build-2026-10-30), so in practice
   // only the first call should ever actually need this margin.
-  var EXTENDED_TIMEOUT_ACTIONS = { setItemStatus: 35000, allocateOrderToTruck: 35000, updateSessionTrip: 35000, markTruckDispatched: 35000 };
+  var EXTENDED_TIMEOUT_ACTIONS = { refreshTrayStops: 90000, setItemStatus: 35000, allocateOrderToTruck: 35000, updateSessionTrip: 35000, markTruckDispatched: 35000 };
   var DEFAULT_TIMEOUT_MS = 20000;
 
   // opts.silent (default false): skip the global loading overlay entirely
@@ -1731,6 +1743,26 @@
                 '<button class="btn btn-secondary" onclick="openDriverReport(' + jsStrAttr_(t.sessionId) + ', ' + jsStrAttr_(st.orderCheckId) + ')">Problem</button>' +
               '</div></div>';
           }).join('');
+      // Fruit-tray clients from Zoho (build-2026-11-10-02) - only on the
+      // first of this driver's trips on that truck today.
+      var trayStops = t.trayStops || [];
+      var trayDone = trayStops.filter(function (s) { return s.deliveredAt; }).length;
+      var trayHtml = trayStops.length === 0 ? '' :
+        '<div style="margin:16px 0 4px; font-weight:600;">Fruit tray clients - ' + trayDone + ' of ' + trayStops.length + ' delivered</div>' +
+        trayStops.map(function (st) {
+          var done = !!st.deliveredAt;
+          return '<div class="driver-stop' + (done ? ' driver-delivered' : '') + '">' +
+            '<div><div class="who">' + escapeHtml(st.customer) + '</div>' +
+            '<div class="hint">' + escapeHtml(st.products) + '</div>' +
+            (done ? '<div class="when">Delivered ' + formatTime(st.deliveredAt) + (st.deliveredBy ? ' by ' + escapeHtml(st.deliveredBy) : '') + '</div>' : '') +
+            '</div>' +
+            '<div class="driver-stop-actions">' +
+              (done
+                ? '<button class="btn btn-secondary" onclick="driverSetTrayDelivered(' + jsStrAttr_(t.sessionId) + ', ' + jsStrAttr_(st.trayStopId) + ', false)">Undo</button>'
+                : '<button class="btn btn-primary" onclick="driverSetTrayDelivered(' + jsStrAttr_(t.sessionId) + ', ' + jsStrAttr_(st.trayStopId) + ', true)">Delivered</button>') +
+              '<button class="btn btn-secondary" onclick="openDriverReport(' + jsStrAttr_(t.sessionId) + ', \'\', ' + jsStrAttr_(st.trayStopId) + ')">Problem</button>' +
+            '</div></div>';
+        }).join('');
       var reportsHtml = t.reports.length === 0 ? '' :
         '<div style="margin-top:12px;"><div style="font-weight:600; margin-bottom:4px;">Reported on this trip</div>' +
         t.reports.map(function (r) {
@@ -1744,10 +1776,18 @@
         '<div class="hint">Drivers: ' + escapeHtml(t.drivers) + '</div>' +
         '<div style="margin:10px 0 4px; font-weight:600;">Stops - ' + deliveredCount + ' of ' + t.stops.length + ' delivered</div>' +
         stopsHtml +
+        trayHtml +
         '<button class="btn btn-danger btn-block" style="margin-top:12px;" onclick="openDriverReport(' + jsStrAttr_(t.sessionId) + ', \'\')">Report road / vehicle incident</button>' +
         reportsHtml +
       '</div>';
     }).join('');
+  }
+
+  function driverSetTrayDelivered(sessionId, trayStopId, delivered) {
+    callApi('driverMarkTrayDelivered', [sessionId, trayStopId, delivered]).then(loadDriverTrips).catch(function (err) {
+      showFatalError(err);
+      loadDriverTrips();
+    });
   }
 
   function driverSetDelivered(orderCheckId, delivered) {
@@ -1757,15 +1797,17 @@
     });
   }
 
-  function openDriverReport(sessionId, orderCheckId) {
-    var type = orderCheckId ? 'Customer problem' : 'Road incident';
-    driverReportTarget = { sessionId: sessionId, orderCheckId: orderCheckId, type: type };
+  function openDriverReport(sessionId, orderCheckId, trayStopId) {
+    var atCustomer = !!(orderCheckId || trayStopId);
+    var type = atCustomer ? 'Customer problem' : 'Road incident';
+    driverReportTarget = { sessionId: sessionId, orderCheckId: orderCheckId, trayStopId: trayStopId || '', type: type };
     var stopLabel = '';
     (driverData.trips || []).forEach(function (t) {
-      t.stops.forEach(function (st) { if (st.orderCheckId === orderCheckId) stopLabel = st.customer + ' - ' + st.orderNumber; });
+      t.stops.forEach(function (st) { if (orderCheckId && st.orderCheckId === orderCheckId) stopLabel = st.customer + ' - ' + st.orderNumber; });
+      (t.trayStops || []).forEach(function (st) { if (trayStopId && st.trayStopId === trayStopId) stopLabel = st.customer + ' - fruit trays'; });
     });
-    document.getElementById('driver-report-title').textContent = orderCheckId ? 'Problem at a customer' : 'Road / vehicle incident';
-    document.getElementById('driver-report-sub').textContent = orderCheckId ? stopLabel : 'Management sees this on the Dashboard straight away.';
+    document.getElementById('driver-report-title').textContent = atCustomer ? 'Problem at a customer' : 'Road / vehicle incident';
+    document.getElementById('driver-report-sub').textContent = atCustomer ? stopLabel : 'Management sees this on the Dashboard straight away.';
     var cats = (driverData.categories && driverData.categories[type]) || [];
     document.getElementById('driver-report-category').innerHTML = '<option value="">- Pick one -</option>' +
       cats.map(function (c) { return '<option value="' + escapeHtml(c) + '">' + escapeHtml(c) + '</option>'; }).join('');
@@ -1782,7 +1824,7 @@
     if (category === 'Other' && !note) { errorEl.textContent = 'Add a short note saying what happened.'; return; }
     var t = driverReportTarget;
     closeDriverReportModal();
-    callApi('driverReport', [t.sessionId, t.orderCheckId || '', category, note]).then(function () {
+    callApi('driverReport', [t.sessionId, t.orderCheckId || '', category, note, t.trayStopId || '']).then(function () {
       alert('Sent to management.');
       loadDriverTrips();
     }).catch(showFatalError);
@@ -2184,7 +2226,8 @@
         var packOverdueText = packOverdueBadgeText_(t.openTripPackStartAt, boardData.packWarningThresholdMinutes);
         var packOverdue = !!packOverdueText;
         var overdueBadge = packOverdue ? '<span class="badge badge-pack-overdue" style="margin-left:6px;">' + packOverdueText + '</span>' : '';
-        var meta = [t.registration, t.type].filter(Boolean).join(' - ');
+        var meta = [t.registration, t.type].filter(Boolean).join(' - ') +
+          (t.trayStopCount ? (t.registration || t.type ? ' · ' : '') + t.trayStopCount + ' tray client' + (t.trayStopCount === 1 ? '' : 's') : '');
         // If this truck has more than one trip today, group its orders
         // under their own trip - each trip gets its own status/driver/time
         // line AND the orders that were actually checked against it, so
@@ -2796,6 +2839,7 @@
     showScreen('screen-workspace');
     startWorkspacePackPolling(state.session.ID);
     showWsTab('trays');
+    loadWorkspaceTrayStops();
     refreshMyOrders();
     // The truck-issues prompt takes priority over the driver/route prompt -
     // "a window first comes up to report any truck issues" (Shane's
@@ -3054,6 +3098,46 @@
   function renderTrayUpdated() {
     var el = document.getElementById('tray-updated');
     el.textContent = state.session.TrayCountUpdatedAt ? 'Last updated ' + formatTime(state.session.TrayCountUpdatedAt) : '';
+  }
+
+  // Fruit-tray clients for this truck today, copied from Zoho Creator every
+  // 30 minutes (build-2026-11-10-02). Read-only here: Zoho stays the place
+  // to change a tray order. Shows the product totals to load first, then
+  // each client.
+  function loadWorkspaceTrayStops() {
+    var el = document.getElementById('ws-tray-stops');
+    el.innerHTML = '';
+    if (!state.session || !state.session.TruckID) return;
+    callApi('getTrayStopsForTruck', [state.session.TruckID], { silent: true }).then(function (data) {
+      if (!data.linked) {
+        el.innerHTML = '<div class="card"><div class="hint">This truck isn\'t linked to a Zoho vehicle yet, so its tray clients can\'t be shown. An Admin can link it in Settings > Trucks.</div></div>';
+        return;
+      }
+      var pulled = data.pulledAt ? 'From Zoho, updated ' + formatTime(data.pulledAt) : 'Not read from Zoho yet';
+      if (data.stops.length === 0) {
+        el.innerHTML = '<div class="card"><h3 style="margin-top:0;">Tray clients today</h3><div class="hint">None for this truck today. ' + escapeHtml(pulled) + '.</div></div>';
+        return;
+      }
+      el.innerHTML = '<div class="card">' +
+        '<h3 style="margin-top:0;">Tray clients today (' + data.stops.length + ')</h3>' +
+        '<div class="hint" style="margin-bottom:8px;">' + escapeHtml((data.zohoVehicle ? 'Zoho vehicle ' + data.zohoVehicle + ' - ' : '') + pulled) + '</div>' +
+        '<div style="font-weight:600; margin-bottom:4px;">To load</div>' +
+        data.productTotals.map(function (pt) {
+          return '<div class="dash-order-row"><span>' + escapeHtml(pt.product) + '</span><strong>' + pt.qty + '</strong></div>';
+        }).join('') +
+        '<div style="font-weight:600; margin:12px 0 4px;">Clients</div>' +
+        data.stops.map(function (st) {
+          return '<div class="dash-order-row"><div><div>' + escapeHtml(st.customer) + '</div>' +
+            '<div class="hint">' + escapeHtml(st.products) + '</div></div>' +
+            (st.deliveredAt ? '<span class="badge badge-complete">Delivered ' + formatTime(st.deliveredAt) + '</span>' : '') +
+          '</div>';
+        }).join('') +
+      '</div>';
+    }).catch(function (err) {
+      // Never let the tray list get in the way of checking the truck.
+      if (err && /Unknown action/.test(err.message || '')) return;
+      el.innerHTML = '<div class="card"><div class="hint">Couldn\'t load tray clients: ' + escapeHtml(err.message || String(err)) + '</div></div>';
+    });
   }
 
   function showWsTab(tab) {
@@ -3947,15 +4031,49 @@
     }).catch(showFatalError);
   }
 
+  function renderZohoTrayStatus(settings) {
+    var el = document.getElementById('zoho-tray-status');
+    if (!settings) { el.textContent = ''; return; }
+    if (!settings.zohoFileInstalled) { el.textContent = 'The ZohoCreator file isn\'t in the Apps Script project yet.'; return; }
+    var p = settings.pulled;
+    el.textContent = p
+      ? 'Last read ' + formatDateForDisplay(String(p.at).slice(0, 10)) + ' ' + formatTime(p.at) + ': ' + p.stops + ' tray client stop(s) for today and tomorrow' +
+        (p.withoutVehicle ? ', ' + p.withoutVehicle + ' with no vehicle in Zoho' : '') + '.'
+      : 'Not read from Zoho yet.';
+  }
+
+  function refreshTrayStopsUi() {
+    callApi('refreshTrayStops', []).then(function () { loadTrucks(); }).catch(showFatalError);
+  }
+
   function loadTrucks() {
-    callApi('listTrucks', [false]).then(function (trucks) {
+    // Zoho vehicles for the dropdown - optional: if the server or the Zoho
+    // file isn't there yet, the trucks table still loads.
+    var zohoPromise = callApi('getZohoTraySettings', [], { silent: true }).catch(function () { return null; });
+    Promise.all([callApi('listTrucks', [false]), zohoPromise]).then(function (results) {
+      var trucks = results[0], zoho = results[1];
+      renderZohoTrayStatus(zoho);
+      var vehicles = (zoho && zoho.vehicles) || [];
+      var vehicleCell = function (t) {
+        var current = String(t.ZohoVehicleID || '');
+        var known = vehicles.some(function (v) { return v.id === current; });
+        return '<td><select style="' + TRUCK_FIELD_STYLE + '" onchange="updateTruckField(\'' + t.ID + '\', \'ZohoVehicleID\', this.value)">' +
+          '<option value="">- None -</option>' +
+          (current && !known ? '<option value="' + escapeHtml(current) + '" selected>(vehicle ' + escapeHtml(current) + ')</option>' : '') +
+          vehicles.map(function (v) {
+            return '<option value="' + escapeHtml(v.id) + '"' + (v.id === current ? ' selected' : '') + '>' +
+              escapeHtml(v.name + (v.area ? ' - ' + v.area : '')) + '</option>';
+          }).join('') +
+          '</select></td>';
+      };
       document.getElementById('trucks-table').innerHTML =
-        '<tr><th>Name</th><th>Registration</th><th>Type</th><th>Active</th><th></th></tr>' +
+        '<tr><th>Name</th><th>Registration</th><th>Type</th><th>Zoho vehicle</th><th>Active</th><th></th></tr>' +
         trucks.map(function (t) {
           return '<tr>' +
             '<td><input type="text" style="' + TRUCK_FIELD_STYLE + '" value="' + escapeHtml(t.Name) + '" onchange="updateTruckField(\'' + t.ID + '\', \'Name\', this.value)"></td>' +
             '<td><input type="text" style="' + TRUCK_FIELD_STYLE + '" value="' + escapeHtml(t.Registration) + '" onchange="updateTruckField(\'' + t.ID + '\', \'Registration\', this.value)"></td>' +
             '<td><input type="text" style="' + TRUCK_FIELD_STYLE + '" value="' + escapeHtml(t.Type) + '" onchange="updateTruckField(\'' + t.ID + '\', \'Type\', this.value)"></td>' +
+            vehicleCell(t) +
             '<td><label class="switch-label"><input type="checkbox" ' + (t.Active ? 'checked' : '') +
             ' onchange="updateTruckField(\'' + t.ID + '\', \'Active\', this.checked)"> Active</label></td>' +
             '<td><button class="btn btn-danger" onclick="deleteTruckUi(\'' + t.ID + '\', ' + jsStrAttr_(t.Name) + ')">Delete</button></td>' +
@@ -4701,6 +4819,7 @@
       ];
       if (t.dispatchedAt) metaParts.push('Dispatched ' + formatTime(t.dispatchedAt) + (durationText ? ' (' + durationText + ')' : ''));
       if (t.deliveredCount) metaParts.push('Delivered ' + t.deliveredCount + '/' + t.orderCount + (t.lastDeliveredAt ? ' (last ' + formatTime(t.lastDeliveredAt) + ')' : ''));
+      if (t.trayStopCount) metaParts.push('Tray clients delivered ' + (t.trayDeliveredCount || 0) + '/' + t.trayStopCount);
 
       var warningLine = (t.dispatchedWithWarnings
         ? '<div class="dash-warning-line">Dispatched despite: ' + escapeHtml(t.dispatchWarningsText) + '</div>'

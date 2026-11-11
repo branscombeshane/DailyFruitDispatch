@@ -4613,7 +4613,7 @@ function driverReport(sessionId, orderCheckId, category, note, trayStopId) {
     ID: id, Date: todayString_(), TruckSessionID: session.ID, TruckName: session.TruckName,
     DriverID: driver.id, DriverName: driver.name, Type: type,
     OrderCheckID: check ? check.ID : '',
-    OrderNumber: check ? check.OrderNumber : (trayStop ? 'Fruit trays (Zoho order ' + trayStop.OrderNo + ')' : ''),
+    OrderNumber: check ? check.OrderNumber : (trayStop ? trayStopLabel_(trayStop) : ''),
     Customer: check ? check.Customer : (trayStop ? trayStop.Customer : ''),
     Category: category, Note: note, LoggedAt: nowIso_(), Status: ISSUE_STATUS.OPEN, ResolvedByName: '', ResolvedAt: '',
     TrayStopID: trayStop ? trayStop.ID : ''
@@ -4632,6 +4632,12 @@ function driverReport(sessionId, orderCheckId, category, note, trayStopId) {
 // the checker's workspace, as a count on the Trucks board, and as stops in
 // the driver's list.
 // ---------------------------------------------------------------------------
+
+// How a tray stop is named in driver logs/reports. Order_Register (where
+// tray customers come from) has no order number, so usually just "Fruit trays".
+function trayStopLabel_(stop) {
+  return stop.OrderNo ? 'Fruit trays (Zoho order ' + stop.OrderNo + ')' : 'Fruit trays';
+}
 
 /** Creates the TrayStops tab and the new Trucks/DriverLogs headers if missing. */
 function ensureTraySchema_() {
@@ -4749,7 +4755,7 @@ function driverMarkTrayDelivered(sessionId, trayStopId, delivered) {
       appendObject_(sheet, SHEET_HEADERS.DriverLogs, {
         ID: Utilities.getUuid(), Date: todayString_(), TruckSessionID: session.ID, TruckName: session.TruckName,
         DriverID: driver.id, DriverName: driver.name, Type: DRIVER_LOG_TYPES.DELIVERED,
-        OrderCheckID: '', OrderNumber: 'Fruit trays (Zoho order ' + stop.OrderNo + ')', Customer: stop.Customer,
+        OrderCheckID: '', OrderNumber: trayStopLabel_(stop), Customer: stop.Customer,
         Category: '', Note: '', LoggedAt: at, Status: '', ResolvedByName: '', ResolvedAt: '', TrayStopID: stop.ID
       });
       return { ok: true, deliveredAt: at };

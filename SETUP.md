@@ -824,8 +824,11 @@ sheet instead of by hand.
   Dispatch's Apps Script must be able to open that spreadsheet (same
   Google account).
 - **Data read:** only `EmployeeNumber`, `Name`, `Department`,
-  `CompanyGroup`, `Active`, `DateDischarged`, `ContactNumber`. No pay, ID
-  or bank details.
+  `CompanyGroup`, `Active`, `ContactNumber`. No pay, ID or bank details.
+- **Active rule:** the same as the Financials app's (build-2026-11-11-09).
+  An employee is active unless `Active` is explicitly FALSE; a blank cell
+  counts as active. Discharging sets Active to FALSE. `DateDischarged` is
+  ignored because it can stay filled in after a rehire.
 - **Matching:** by employee number. The first time, also by exact name, so
   drivers already on the list (e.g. from `seedInitialDrivers`) are linked.
 - **Changes:**

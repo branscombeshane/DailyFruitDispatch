@@ -5237,7 +5237,7 @@ function readFinancialsDrivers_(spreadsheetId) {
     return i;
   };
   var cEmp = col('EmployeeNumber', true), cName = col('Name', true), cDept = col('Department', true), cActive = col('Active', true);
-  var cGroup = col('CompanyGroup', false), cContact = col('ContactNumber', false), cDischarged = col('DateDischarged', false);
+  var cGroup = col('CompanyGroup', false), cContact = col('ContactNumber', false);
   var out = [];
   for (var i = 1; i < values.length; i++) {
     var r = values[i];
@@ -5246,8 +5246,12 @@ function readFinancialsDrivers_(spreadsheetId) {
     var empNo = String(finCell_(r, cEmp)).trim();
     var name = String(finCell_(r, cName)).replace(/\s+/g, ' ').trim();
     if (!empNo || !name) continue;
+    // Same rule as the Financials app itself (build-2026-11-11-09): an
+    // employee is active unless Active is explicitly FALSE - a blank Active
+    // cell counts as active, and discharging someone sets Active to FALSE.
+    // DateDischarged is NOT used: it can stay filled in after a rehire.
     var activeCell = finCell_(r, cActive);
-    var active = (activeCell === true || String(activeCell).toUpperCase() === 'TRUE') && !String(finCell_(r, cDischarged)).trim();
+    var active = !(activeCell === false || String(activeCell).trim().toUpperCase() === 'FALSE');
     out.push({ empNo: empNo, name: name, contact: String(finCell_(r, cContact) || '').trim(), active: active });
   }
   return out;

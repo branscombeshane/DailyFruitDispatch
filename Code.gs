@@ -460,7 +460,7 @@ function handleApiRequest_(action, params, auth) {
 // CREDENTIAL CHECKS
 // ---------------------------------------------------------------------------
 
-var AUTH_USERS_CACHE_KEY = 'authUsers_v3';
+var AUTH_USERS_CACHE_KEY = 'authUsers_v4';
 var AUTH_USERS_CACHE_TTL_SECONDS = 60;
 // Brute-force guard: a 4-digit PIN is only 10,000 guesses, and with every
 // request now carrying a PIN, any action is a guessing endpoint, not just
@@ -504,9 +504,13 @@ function getAuthUsers_() {
       users.push({
         id: d.ID,
         name: String(d.Name).trim(),
-        // Short sign-in name from the Financials sync (e.g. "SteveR"); the
-        // full name still works too.
+        // Short sign-in name from the Financials sync (e.g. "SteveR").
+        // Synced drivers sign in ONLY with it (build-2026-11-11-07): some
+        // dispatchers are also drivers and have a separate dispatcher login
+        // (their first name, in Users), so the driver login must never be
+        // their name. Hand-added drivers (no Login) still use their name.
         login: String(d.Login || '').trim().toLowerCase(),
+        loginOnly: String(d.Source || '') === 'Financials' && !!String(d.Login || '').trim(),
         pinHash: hashPin_(d.PIN),
         active: d.Active === true || String(d.Active).toUpperCase() === 'TRUE',
         role: ROLES.DRIVER
@@ -537,7 +541,7 @@ function verifyCredentials_(name, pin) {
   // PIN typed decides which login it is.
   var pinHash = hashPin_(pinStr);
   var match = getAuthUsers_().filter(function (u) {
-    return (u.name.toLowerCase() === key || (u.login && u.login === key)) && u.pinHash === pinHash;
+    return ((!u.loginOnly && u.name.toLowerCase() === key) || (u.login && u.login === key)) && u.pinHash === pinHash;
   })[0];
   if (!match) {
     try { cache.put(failKey, String(failures + 1), AUTH_LOCKOUT_SECONDS); } catch (e) { /* best-effort */ }

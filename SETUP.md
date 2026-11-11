@@ -802,8 +802,15 @@ sheet instead of by hand.
 - **Sign-in (Shane's decision):** login = first name + surname initial
   (`SteveR`, case doesn't matter; clashes get more surname letters, e.g.
   `SiphoMo`). PIN = employee number, set the first time a driver is
-  synced. A PIN an Admin changes afterwards is kept. The full name still
-  works as the login too.
+  synced. A PIN an Admin changes afterwards is kept. Synced drivers sign
+  in ONLY with this login, not their full name (build-2026-11-11-07).
+  Hand-added drivers still sign in with their name.
+- **Dispatchers who also drive** have two separate logins:
+  - **Dispatcher:** a user in Settings > Users named with just their
+    **first name** (e.g. `Rodney`), with its own PIN and role.
+  - **Driver:** their driver login (`RodneyM`) and employee number.
+  Each opens the matching screen. Keep the Users name as the first name
+  only, never the full name or the driver login.
 - **Security note:** employee numbers are on payslips and fairly
   predictable, so anyone who knows a driver's login and number can sign in
   as them. Shane accepted this (low-risk data).

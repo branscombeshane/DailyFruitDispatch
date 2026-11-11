@@ -795,6 +795,24 @@
     </div>
   </div>
 
+  <!-- Driver: empty wooden trays collected at a fruit-tray stop
+       (build-2026-11-11-02) - asked every time a tray stop is marked
+       delivered; feeds the Dashboard's Wooden Trays roster. -->
+  <div class="modal-backdrop" id="tray-collect-modal">
+    <div class="modal">
+      <h3 style="margin-top:0;">Empty trays collected</h3>
+      <div id="tray-collect-customer" style="font-weight:600;"></div>
+      <p class="hint" id="tray-collect-dropping"></p>
+      <p class="hint" style="margin-top:0;">How many empty wooden trays did you pick up from the last delivery? Enter 0 if none.</p>
+      <div class="tray-field-row"><label for="tray-collect-small">Small</label><input type="number" inputmode="numeric" min="0" id="tray-collect-small" value="0"></div>
+      <div class="tray-field-row"><label for="tray-collect-medium">Medium</label><input type="number" inputmode="numeric" min="0" id="tray-collect-medium" value="0"></div>
+      <div class="tray-field-row"><label for="tray-collect-large">Large</label><input type="number" inputmode="numeric" min="0" id="tray-collect-large" value="0"></div>
+      <div class="error" id="tray-collect-error"></div>
+      <button class="btn btn-primary btn-block" style="margin:10px 0;" onclick="submitTrayCollect()">Mark delivered</button>
+      <button class="btn btn-secondary btn-block" onclick="closeTrayCollectModal()">Cancel</button>
+    </div>
+  </div>
+
   <!-- Driver: report a problem at a customer (orderCheckId set) or a
        road/vehicle incident (no order). -->
   <div class="modal-backdrop" id="driver-report-modal">
@@ -1062,6 +1080,9 @@
         <div id="packing-issues-today"></div>
         <div id="truck-issues-today"></div>
         <div id="driver-reports-today"></div>
+        <!-- Wooden trays at customers (build-2026-11-11-02) - see
+             renderTrayRoster / getTrayRoster in Code.gs. -->
+        <div id="tray-roster"></div>
         <div id="dashboard-trucks"></div>
       </div>
 
@@ -1218,7 +1239,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-11-10-08';
+  var BUILD_VERSION = 'build-2026-11-11-02';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -1397,7 +1418,7 @@
     getTrayStopsForTruck: true, getZohoTraySettings: true, driverMarkTrayDelivered: true, refreshTrayStops: true,
     // Collection (build-2026-11-10-07): collectOrder leaves an already
     // collected order as it is, so a retry can't double it up.
-    getOrderForCollection: true, collectOrder: true,
+    getOrderForCollection: true, collectOrder: true, getTrayRoster: true,
     listOpenDriverReports: true, listDriverReportsForDate: true, setDriverReportStatus: true
   };
   // Delays before each automatic retry (~0.8s, then ~2s later) - short
@@ -1859,10 +1880,13 @@
         '<div style="margin:16px 0 4px; font-weight:600;">Fruit tray clients - ' + trayDone + ' of ' + trayStops.length + ' delivered</div>' +
         trayStops.map(function (st) {
           var done = !!st.deliveredAt;
+          var cp = customerParts_(st.customer);
           return '<div class="driver-stop' + (done ? ' driver-delivered' : '') + '">' +
-            '<div><div class="who">' + escapeHtml(st.customer) + '</div>' +
+            '<div><div class="who">' + escapeHtml(cp.name) + '</div>' +
+            (cp.rest ? '<div class="hint">' + escapeHtml(cp.rest) + '</div>' : '') +
             '<div class="hint">' + escapeHtml(st.products) + '</div>' +
-            (done ? '<div class="when">Delivered ' + formatTime(st.deliveredAt) + (st.deliveredBy ? ' by ' + escapeHtml(st.deliveredBy) : '') + '</div>' : '') +
+            (done ? '<div class="when">Delivered ' + formatTime(st.deliveredAt) + (st.deliveredBy ? ' by ' + escapeHtml(st.deliveredBy) : '') +
+              (st.collected ? ' · Empty trays collected: ' + escapeHtml(trayCountText_(st.collected, 'none')) : '') + '</div>' : '') +
             '</div>' +
             '<div class="driver-stop-actions">' +
               (done
@@ -1891,12 +1915,64 @@
     }).join('');
   }
 
+  // Zoho tray customers come as "Company | Contact | Contact | Address" -
+  // show the company bold and the rest as a smaller line (build-2026-11-11-02).
+  function customerParts_(full) {
+    var parts = String(full || '').split(' | ');
+    return { name: parts[0], rest: parts.slice(1).filter(function (p, i, a) { return p && a.indexOf(p) === i; }).join(' · ') };
+  }
+
+  function trayCountText_(c, zeroText) {
+    if (!c) return '';
+    var bits = [];
+    if (Number(c.small)) bits.push(c.small + ' small');
+    if (Number(c.medium)) bits.push(c.medium + ' medium');
+    if (Number(c.large)) bits.push(c.large + ' large');
+    return bits.length ? bits.join(', ') : (zeroText || 'none');
+  }
+
+  var trayCollectTarget = null;
+
+  // Undo goes straight through; Delivered first asks how many empty trays
+  // were collected.
   function driverSetTrayDelivered(sessionId, trayStopId, delivered) {
-    callApi('driverMarkTrayDelivered', [sessionId, trayStopId, delivered]).then(loadDriverTrips).catch(function (err) {
+    if (delivered) { openTrayCollect(sessionId, trayStopId); return; }
+    callApi('driverMarkTrayDelivered', [sessionId, trayStopId, false]).then(loadDriverTrips).catch(function (err) {
       showFatalError(err);
       loadDriverTrips();
     });
   }
+
+  function openTrayCollect(sessionId, trayStopId) {
+    var stop = null;
+    (driverData.trips || []).forEach(function (t) { (t.trayStops || []).forEach(function (st) { if (st.trayStopId === trayStopId) stop = st; }); });
+    trayCollectTarget = { sessionId: sessionId, trayStopId: trayStopId };
+    document.getElementById('tray-collect-customer').textContent = stop ? customerParts_(stop.customer).name : '';
+    document.getElementById('tray-collect-dropping').textContent = stop && stop.trays
+      ? 'Dropping off: ' + trayCountText_(stop.trays, 'no sized trays on this order') : '';
+    ['small', 'medium', 'large'].forEach(function (k) { document.getElementById('tray-collect-' + k).value = '0'; });
+    document.getElementById('tray-collect-error').textContent = '';
+    document.getElementById('tray-collect-modal').classList.add('active');
+  }
+
+  function submitTrayCollect() {
+    var counts = {}, bad = false;
+    ['small', 'medium', 'large'].forEach(function (k) {
+      var v = String(document.getElementById('tray-collect-' + k).value).trim();
+      var n = v === '' ? 0 : Number(v);
+      if (!(n >= 0) || Math.floor(n) !== n) bad = true;
+      counts[k] = n;
+    });
+    if (bad) { document.getElementById('tray-collect-error').textContent = 'Use whole numbers, 0 or more.'; return; }
+    var t = trayCollectTarget;
+    closeTrayCollectModal();
+    callApi('driverMarkTrayDelivered', [t.sessionId, t.trayStopId, true, counts]).then(loadDriverTrips).catch(function (err) {
+      showFatalError(err);
+      loadDriverTrips();
+    });
+  }
+
+  function closeTrayCollectModal() { document.getElementById('tray-collect-modal').classList.remove('active'); }
 
   function driverSetDelivered(orderCheckId, delivered) {
     callApi('driverMarkDelivered', [orderCheckId, delivered]).then(loadDriverTrips).catch(function (err) {
@@ -3261,7 +3337,7 @@
         }).join('') +
         '<div style="font-weight:600; margin:12px 0 4px;">Clients</div>' +
         data.stops.map(function (st) {
-          return '<div class="dash-order-row"><div><div>' + escapeHtml(st.customer) + '</div>' +
+          return '<div class="dash-order-row"><div><div>' + escapeHtml(customerParts_(st.customer).name) + '</div>' +
             '<div class="hint">' + escapeHtml(st.products) + '</div></div>' +
             (st.deliveredAt ? '<span class="badge badge-complete">Delivered ' + formatTime(st.deliveredAt) + '</span>' : '') +
           '</div>';
@@ -4460,6 +4536,51 @@
     callApi('listOpenPackingIssues', []).then(function (list) { renderPackingIssuesToday(list, ''); }).catch(showFatalError);
     callApi('listOpenTruckIssues', []).then(function (list) { renderTruckIssuesToday(list, ''); }).catch(showFatalError);
     callApi('listOpenDriverReports', []).then(function (list) { renderDriverReports(list, ''); }).catch(ignoreUnknownAction_);
+    callApi('getTrayRoster', []).then(function (data) { trayRosterData = data; renderTrayRoster(); }).catch(ignoreUnknownAction_);
+  }
+
+  // Wooden trays at customers (build-2026-11-11-02): per customer, trays
+  // dropped off vs empty trays collected by drivers, worst first - mainly
+  // customers with several deliveries in a row and nothing collected.
+  var trayRosterData = null;
+  var trayRosterShowAll = false;
+
+  function renderTrayRoster() {
+    var el = document.getElementById('tray-roster');
+    var data = trayRosterData;
+    if (!el || !data || !data.customers || data.customers.length === 0) { if (el) el.innerHTML = ''; return; }
+    var qEl = document.getElementById('tray-roster-search');
+    var q = qEl ? qEl.value.trim().toLowerCase() : '';
+    var list = data.customers.filter(function (c) { return !q || c.customer.toLowerCase().indexOf(q) !== -1; });
+    var problem = data.customers.filter(function (c) { return c.missedInARow >= 2; }).length;
+    var shown = (trayRosterShowAll || q) ? list : list.slice(0, 15);
+    var outText = function (o) {
+      var bits = [];
+      ['small', 'medium', 'large'].forEach(function (k) { if (o[k]) bits.push(o[k] + ' ' + k); });
+      return bits.length ? bits.join(', ') : '0';
+    };
+    el.innerHTML = '<div class="card">' +
+      '<h3 style="margin-top:0;">Wooden Trays at Customers</h3>' +
+      '<p class="hint" style="margin-top:0;">Trays dropped off (from the Zoho products) minus empty trays drivers collected, since ' +
+        escapeHtml(formatDateForDisplay(data.since)) + '. Customers with several deliveries in a row and nothing collected are listed first' +
+        (problem ? ' - <strong style="color:var(--red);">' + problem + ' customer(s) with 2+ deliveries and nothing back</strong>' : '') + '. ' +
+        'Trays already out before tracking started aren\'t counted, so early on a customer can show fewer out (or below 0) than they really have.</p>' +
+      '<input type="text" id="tray-roster-search" placeholder="Search customer" value="' + escapeHtml(q) + '" oninput="renderTrayRoster()" style="margin-bottom:8px;">' +
+      shown.map(function (c) {
+        var cp = customerParts_(c.customer);
+        return '<div class="dash-order-row"><div><div>' + escapeHtml(cp.name) + (c.truck ? ' <span class="hint">(' + escapeHtml(c.truck) + ')</span>' : '') + '</div>' +
+          '<div class="hint">' + c.deliveries + ' deliver' + (c.deliveries === 1 ? 'y' : 'ies') + ', last ' + escapeHtml(formatDateForDisplay(c.lastDelivery)) +
+            ' · last trays back: ' + (c.lastCollection ? escapeHtml(formatDateForDisplay(c.lastCollection)) : 'never') + '</div>' +
+          (c.missedInARow >= 2 ? '<div class="late-reason-line">' + c.missedInARow + ' deliveries in a row with nothing collected</div>' : '') +
+          '</div><div style="text-align:right;"><strong>' + escapeHtml(outText(c.out)) + '</strong><div class="hint">out</div></div></div>';
+      }).join('') +
+      (!q && list.length > 15
+        ? '<button class="btn btn-secondary" style="margin-top:8px;" onclick="trayRosterShowAll = !trayRosterShowAll; renderTrayRoster();">' +
+            (trayRosterShowAll ? 'Show fewer' : 'Show all ' + list.length) + '</button>'
+        : '') +
+      '</div>';
+    var input = document.getElementById('tray-roster-search');
+    if (q && input) { input.focus(); input.setSelectionRange(input.value.length, input.value.length); }
   }
 
   // History mirrors loadDashboard's shape (same render functions, same

@@ -774,6 +774,31 @@ list further, the same way the search and date work together. Clearing
 either the text or the date (or tapping **Clear**) goes back to searching
 every day at once, same as before this was added.
 
+## Wooden tray roster (build-2026-11-11-02)
+
+Fruit trays go out in wooden trays, and the empty tray from the previous
+delivery is picked up at the next one.
+
+- **Driver prompt:** when a driver marks a fruit-tray client **Delivered**,
+  they're asked how many empty trays they collected (Small / Medium /
+  Large, default 0). The prompt also shows what they're dropping off.
+- **Trays dropped off:** worked out from the Zoho product names. A product
+  whose name says Small, Medium or Large counts as that many trays of that
+  size (e.g. "Seasonal Variety Medium x1" = 1 medium, "GIBS - Large x9" =
+  9 large). Products with no size in the name (e.g. "Mixed Nuts - 30g",
+  "70pc - Discovery") aren't counted as trays.
+- **Roster:** the Dashboard's **Wooden Trays at Customers** card shows, per
+  customer, trays out (dropped off minus collected), last delivery, when
+  trays last came back, and how many deliveries in a row had nothing
+  collected. Customers with 2+ such deliveries are listed first, in red.
+- **Opening balance:** trays already at customers before tracking started
+  aren't known. In the first weeks a customer can show fewer out than
+  they really have (even below 0 when they return an older tray).
+- **Storage:** the `TrayLedger` tab is created automatically and kept for
+  365 days, not the usual 14. Undoing a delivery removes its row.
+- **Customer names:** Zoho tray customers ("Company | Contact | Address")
+  show with the company in bold and the rest underneath.
+
 ## Customer collections with an item checklist (build-2026-11-10-07)
 
 - **Collect button:** every order in the Trucks board's **Unassigned**

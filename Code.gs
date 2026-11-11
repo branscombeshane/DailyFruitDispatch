@@ -28,7 +28,8 @@ var SHEET_NAMES = {
   TRUCK_ISSUES: 'TruckIssues',
   LATE_REASONS: 'LateReasons',
   DRIVER_LOGS: 'DriverLogs',
-  TRAY_STOPS: 'TrayStops'
+  TRAY_STOPS: 'TrayStops',
+  TRAY_LEDGER: 'TrayLedger'
 };
 
 var SESSION_STATUS = { IN_PROGRESS: 'In Progress', DISPATCHED: 'Dispatched' };
@@ -210,8 +211,16 @@ var SHEET_HEADERS = {
   // pull. ID is "<Zoho order ID>_<date>", so it stays the same across
   // pulls and a driver's Delivered tick (DriverLogs.TrayStopID) survives.
   // Read-only copy: Zoho stays the place to change tray orders.
-  TrayStops: ['ID', 'Date', 'ZohoOrderID', 'OrderNo', 'Customer', 'ZohoVehicleID', 'ZohoVehicle', 'Products', 'TotalQty', 'PulledAt']
+  TrayStops: ['ID', 'Date', 'ZohoOrderID', 'OrderNo', 'Customer', 'ZohoVehicleID', 'ZohoVehicle', 'Products', 'TotalQty', 'PulledAt'],
+  // Wooden-tray roster (build-2026-11-11-02): one row per fruit-tray stop a
+  // driver marks delivered - trays dropped off (worked out from the Zoho
+  // product names, see trayCountsFromProducts_) and empty trays collected
+  // (entered by the driver). Kept TRAY_LEDGER_KEEP_DAYS, not the usual 14,
+  // so a customer who keeps not returning trays shows up over weeks.
+  TrayLedger: ['ID', 'Date', 'TrayStopID', 'Customer', 'ZohoVehicle', 'TruckName', 'DriverName',
+    'DeliveredSmall', 'DeliveredMedium', 'DeliveredLarge', 'CollectedSmall', 'CollectedMedium', 'CollectedLarge', 'LoggedAt']
 };
+var TRAY_LEDGER_KEEP_DAYS = 365;
 
 // ---------------------------------------------------------------------------
 // WEB APP ENTRY POINT
@@ -308,6 +317,7 @@ var API_ACTIONS = {
   refreshTrayStops: refreshTrayStops,
   driverMarkTrayDelivered: driverMarkTrayDelivered,
   getOrderForCollection: getOrderForCollection,
+  getTrayRoster: getTrayRoster,
   collectOrder: collectOrder,
   getMyDriverTrips: getMyDriverTrips,
   driverMarkDelivered: driverMarkDelivered,
@@ -376,7 +386,7 @@ function buildActionRoles_() {
       'listJobsForDate', 'listPackingIssuesForDate', 'listOpenPackingIssues',
       'setPackingIssueStatus', 'listTruckIssuesForDate', 'listOpenTruckIssues',
       'setTruckIssueStatus', 'listOpenDriverReports', 'listDriverReportsForDate', 'setDriverReportStatus',
-      'refreshTrayStops'
+      'refreshTrayStops', 'getTrayRoster'
     ]],
     // Settings: users, trucks, drivers, data source.
     [ADMIN_ONLY, [
@@ -1026,6 +1036,15 @@ function pruneOldRecords() {
       if (old) driverLogsDeleted++;
       return old;
     });
+  }
+
+  // Wooden-tray roster: kept a year (TRAY_LEDGER_KEEP_DAYS), not 14 days.
+  var trayLedgerSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.TRAY_LEDGER);
+  if (trayLedgerSheet) {
+    var ledgerCutoff = new Date();
+    ledgerCutoff.setDate(ledgerCutoff.getDate() - TRAY_LEDGER_KEEP_DAYS);
+    var tlDateCol = SHEET_HEADERS.TrayLedger.indexOf('Date');
+    deleteRowsWhere_(trayLedgerSheet, function (row) { var d = parseAnyDate_(row[tlDateCol]); return d !== null && d < ledgerCutoff; });
   }
 
   var summary = 'Pruned records older than ' + RETENTION_DAYS + ' days: ' +
@@ -4522,10 +4541,14 @@ function getMyDriverTrips() {
       var trayStops = [];
       if (truck && truck.ZohoVehicleID && !trayShownForTruck[s.TruckID]) {
         trayShownForTruck[s.TruckID] = true;
+        var ledgerToday = trayLedgerByStopId_(today);
         trayStops = (trayByVehicle[String(truck.ZohoVehicleID)] || []).map(function (st) {
           var d = trayDelivered[st.ID];
+          var l = ledgerToday[st.ID];
           return { trayStopId: st.ID, customer: st.Customer, orderNo: st.OrderNo, products: st.Products,
-            deliveredAt: d ? d.at : '', deliveredBy: d ? d.by : '' };
+            deliveredAt: d ? d.at : '', deliveredBy: d ? d.by : '',
+            trays: trayCountsFromProducts_(st.Products),
+            collected: l ? { small: l.CollectedSmall, medium: l.CollectedMedium, large: l.CollectedLarge } : null };
         });
       }
       var sessionLogs = logs.filter(function (l) { return l.TruckSessionID === s.ID; });
@@ -4639,15 +4662,82 @@ function trayStopLabel_(stop) {
   return stop.OrderNo ? 'Fruit trays (Zoho order ' + stop.OrderNo + ')' : 'Fruit trays';
 }
 
+/**
+ * Wooden trays dropped off, by size, from a tray stop's Products text
+ * ("Seasonal Variety Medium x1, GIBS - Large x9"): every product whose name
+ * says Small, Medium or Large counts as that many trays of that size.
+ * Products with no size in the name (e.g. "Mixed Nuts - 30g") aren't trays.
+ */
+function trayCountsFromProducts_(productsText) {
+  var out = { small: 0, medium: 0, large: 0 };
+  String(productsText || '').split(/,\s*(?=[^,]* x\d+$|[^,]* x\d+,)/).forEach(function (part) {
+    var m = String(part).trim().match(/^(.*) x(\d+)$/);
+    if (!m) return;
+    var name = m[1], n = Number(m[2]) || 0;
+    if (/\blarge\b/i.test(name)) out.large += n;
+    else if (/\bmedium\b/i.test(name)) out.medium += n;
+    else if (/\bsmall\b/i.test(name)) out.small += n;
+  });
+  return out;
+}
+
+/** Today's (or dateStr's) TrayLedger rows keyed by TrayStopID. */
+function trayLedgerByStopId_(dateStr) {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.TRAY_LEDGER);
+  var map = {};
+  if (!sheet) return map;
+  sheetToObjects_(sheet).forEach(function (r) { if (normalizeDateStr_(r.Date) === dateStr) map[r.TrayStopID] = r; });
+  return map;
+}
+
+/**
+ * Dashboard's wooden-tray roster: per customer, trays dropped off vs empty
+ * trays collected since tracking started (or TRAY_LEDGER_KEEP_DAYS ago),
+ * the balance still out there, and how many deliveries in a row came back
+ * with nothing collected. Worst first.
+ */
+function getTrayRoster() {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.TRAY_LEDGER);
+  if (!sheet) return { since: '', customers: [] };
+  var rows = sheetToObjects_(sheet).map(function (r) { r.Date = normalizeDateStr_(r.Date); return r; })
+    .sort(function (a, b) { return String(a.LoggedAt).localeCompare(String(b.LoggedAt)); });
+  var num = function (v) { return Number(v) || 0; };
+  var by = {};
+  rows.forEach(function (r) {
+    var key = String(r.Customer || '').trim();
+    var c = by[key] || (by[key] = { customer: key, deliveries: 0, delivered: { small: 0, medium: 0, large: 0 },
+      collected: { small: 0, medium: 0, large: 0 }, lastDelivery: '', lastCollection: '', missedInARow: 0, notAsked: 0, truck: '' });
+    c.deliveries++;
+    c.delivered.small += num(r.DeliveredSmall); c.delivered.medium += num(r.DeliveredMedium); c.delivered.large += num(r.DeliveredLarge);
+    var asked = r.CollectedSmall !== '' || r.CollectedMedium !== '' || r.CollectedLarge !== '';
+    var got = num(r.CollectedSmall) + num(r.CollectedMedium) + num(r.CollectedLarge);
+    c.collected.small += num(r.CollectedSmall); c.collected.medium += num(r.CollectedMedium); c.collected.large += num(r.CollectedLarge);
+    if (!asked) c.notAsked++;
+    if (got > 0) { c.lastCollection = r.Date; c.missedInARow = 0; } else if (asked) c.missedInARow++;
+    c.lastDelivery = r.Date;
+    c.truck = r.TruckName || c.truck;
+  });
+  var customers = Object.keys(by).map(function (k) {
+    var c = by[k];
+    c.out = { small: c.delivered.small - c.collected.small, medium: c.delivered.medium - c.collected.medium, large: c.delivered.large - c.collected.large };
+    c.outTotal = c.out.small + c.out.medium + c.out.large;
+    return c;
+  }).sort(function (a, b) { return (b.missedInARow - a.missedInARow) || (b.outTotal - a.outTotal) || a.customer.localeCompare(b.customer); });
+  return { since: rows.length ? rows[0].Date : '', customers: customers };
+}
+
 /** Creates the TrayStops tab and the new Trucks/DriverLogs headers if missing. */
 function ensureTraySchema_() {
   var cache = CacheService.getScriptCache();
-  var flagKey = 'traySchemaOk_v1';
+  var flagKey = 'traySchemaOk_v2';
   if (cache.get(flagKey)) return;
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var stops = ss.getSheetByName(SHEET_NAMES.TRAY_STOPS);
   if (!stops) { stops = ss.insertSheet(SHEET_NAMES.TRAY_STOPS); stops.setFrozenRows(1); }
   ensureHeaderCells_(stops, SHEET_HEADERS.TrayStops, SHEET_HEADERS.TrayStops);
+  var ledger = ss.getSheetByName(SHEET_NAMES.TRAY_LEDGER);
+  if (!ledger) { ledger = ss.insertSheet(SHEET_NAMES.TRAY_LEDGER); ledger.setFrozenRows(1); }
+  ensureHeaderCells_(ledger, SHEET_HEADERS.TrayLedger, SHEET_HEADERS.TrayLedger);
   ensureHeaderCells_(getSheet_(SHEET_NAMES.TRUCKS), SHEET_HEADERS.Trucks, ['ZohoVehicleID']);
   ensureDriverSchema_();
   ensureHeaderCells_(getSheet_(SHEET_NAMES.DRIVER_LOGS), SHEET_HEADERS.DriverLogs, ['TrayStopID']);
@@ -4741,10 +4831,21 @@ function trayStopForSessionOrThrow_(trayStopId, session) {
 }
 
 /** Driver ticks a fruit-tray stop delivered (or undoes it). Same rules as driverMarkDelivered. */
-function driverMarkTrayDelivered(sessionId, trayStopId, delivered) {
+function driverMarkTrayDelivered(sessionId, trayStopId, delivered, collected) {
   var driver = currentDriver_();
   var session = driverSessionOrThrow_(sessionId, driver);
   var stop = trayStopForSessionOrThrow_(trayStopId, session);
+  // Empty trays collected, from the driver's prompt - checked BEFORE any
+  // write, so a bad number can't leave a delivery recorded without its
+  // roster row. Blank (not 0) if an older page sent none, so the roster can
+  // tell "none collected" from "not asked".
+  var count = function (k) {
+    if (!collected || collected[k] === undefined || collected[k] === null || collected[k] === '') return '';
+    var n = Number(collected[k]);
+    if (!(n >= 0) || Math.floor(n) !== n || n > 999) throw new Error('Enter how many empty trays were collected (0 or more).');
+    return n;
+  };
+  var cS = delivered ? count('small') : '', cM = delivered ? count('medium') : '', cL = delivered ? count('large') : '';
   ensureTraySchema_();
   var sheet = getSheet_(SHEET_NAMES.DRIVER_LOGS);
   return withNamedLock_('trayDelivered_' + trayStopId, function () {
@@ -4758,9 +4859,21 @@ function driverMarkTrayDelivered(sessionId, trayStopId, delivered) {
         OrderCheckID: '', OrderNumber: trayStopLabel_(stop), Customer: stop.Customer,
         Category: '', Note: '', LoggedAt: at, Status: '', ResolvedByName: '', ResolvedAt: '', TrayStopID: stop.ID
       });
+      // Wooden-tray roster row (build-2026-11-11-02) - counts checked
+      // above, before anything was written.
+      var dropped = trayCountsFromProducts_(stop.Products);
+      appendObject_(getSheet_(SHEET_NAMES.TRAY_LEDGER), SHEET_HEADERS.TrayLedger, {
+        ID: Utilities.getUuid(), Date: todayString_(), TrayStopID: stop.ID, Customer: stop.Customer,
+        ZohoVehicle: stop.ZohoVehicle, TruckName: session.TruckName, DriverName: driver.name,
+        DeliveredSmall: dropped.small, DeliveredMedium: dropped.medium, DeliveredLarge: dropped.large,
+        CollectedSmall: cS, CollectedMedium: cM, CollectedLarge: cL, LoggedAt: at
+      });
       return { ok: true, deliveredAt: at };
     }
     existing.forEach(function (l) { deleteRowById_(sheet, l.ID); });
+    var ledger = getSheet_(SHEET_NAMES.TRAY_LEDGER);
+    sheetToObjects_(ledger).filter(function (r) { return r.TrayStopID === trayStopId; })
+      .forEach(function (r) { deleteRowById_(ledger, r.ID); });
     return { ok: true, deliveredAt: '' };
   });
 }

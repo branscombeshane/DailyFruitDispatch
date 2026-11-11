@@ -774,6 +774,42 @@ list further, the same way the search and date work together. Clearing
 either the text or the date (or tapping **Clear**) goes back to searching
 every day at once, same as before this was added.
 
+## Drivers synced from the Financials app (build-2026-11-11-06)
+
+The Drivers list is kept up to date from the Financials app's **Employees**
+sheet instead of by hand.
+
+- **Who:** active employees in the **Drivers** department of company group
+  `group` (Jhb). Cape Town / Blendid and other departments are ignored.
+- **When:** every night (inside `pruneOldRecords`, so the 02:00 trigger
+  from `setupDailyPruneTrigger` covers it), and from **Settings > Drivers
+  > Sync now**.
+- **Setup:** paste the Financials spreadsheet URL into Settings > Drivers
+  and tap **Connect**. It's stored as Setting `FinancialsSpreadsheetId`.
+  Dispatch's Apps Script must be able to open that spreadsheet (same
+  Google account).
+- **Data read:** only `EmployeeNumber`, `Name`, `Department`,
+  `CompanyGroup`, `Active`, `DateDischarged`, `ContactNumber`. No pay, ID
+  or bank details.
+- **Matching:** by employee number. The first time, also by exact name, so
+  drivers already on the list (e.g. from `seedInitialDrivers`) are linked.
+- **Changes:**
+  - New drivers are added.
+  - Names and contact numbers follow Financials.
+  - Drivers who are inactive or discharged in Financials, or no longer in
+    the Drivers department, are switched off here, which blocks sign-in.
+  - Drivers added by hand who aren't in Financials are left alone.
+- **Sign-in (Shane's decision):** login = first name + surname initial
+  (`SteveR`, case doesn't matter; clashes get more surname letters, e.g.
+  `SiphoMo`). PIN = employee number, set the first time a driver is
+  synced. A PIN an Admin changes afterwards is kept. The full name still
+  works as the login too.
+- **Security note:** employee numbers are on payslips and fairly
+  predictable, so anyone who knows a driver's login and number can sign in
+  as them. Shane accepted this (low-risk data).
+- New columns on Drivers: `EmployeeNumber`, `Login`, `Source`. They're
+  added automatically.
+
 ## Route order for drivers (build-2026-11-11-05)
 
 A driver's orders and fruit-tray clients show as one numbered list, in the

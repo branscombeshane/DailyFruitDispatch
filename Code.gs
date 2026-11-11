@@ -99,7 +99,12 @@ var SHEET_HEADERS = {
   // selected/typed for that specific trip either way.
   // PIN appended build-2026-11-10-01 (driver sign-in - see ROLES.DRIVER).
   // Never sent to the browser: listDrivers strips it.
-  Drivers: ['ID', 'Name', 'Contact', 'Active', 'CreatedAt', 'PIN'],
+  // EmployeeNumber/Login/Source appended build-2026-11-11-06: drivers are
+  // synced from the Financials app's Employees sheet (see
+  // syncDriversFromFinancials). Login is the short sign-in name (first name
+  // + surname initial, e.g. "SteveR"); Source is 'Financials' for synced
+  // drivers, blank for ones added by hand.
+  Drivers: ['ID', 'Name', 'Contact', 'Active', 'CreatedAt', 'PIN', 'EmployeeNumber', 'Login', 'Source'],
   // Driver, DispatchedWithWarnings, DispatchWarningsText, Route and the
   // TraySmall/Medium/Large/Other columns are appended at the end for the
   // same non-destructive-migration reason. Driver can hold up to 4 names,
@@ -327,6 +332,9 @@ var API_ACTIONS = {
   getTrayRoster: getTrayRoster,
   getLiveDeliveries: getLiveDeliveries,
   driverSetStopOrder: driverSetStopOrder,
+  getDriverSyncSettings: getDriverSyncSettings,
+  saveFinancialsSource: saveFinancialsSource,
+  syncDriversFromFinancials: syncDriversFromFinancials,
   collectOrder: collectOrder,
   getMyDriverTrips: getMyDriverTrips,
   driverMarkDelivered: driverMarkDelivered,
@@ -403,6 +411,7 @@ function buildActionRoles_() {
       'listTrucks', 'addTruck', 'updateTruck', 'deleteTruck',
       'addDriver', 'updateDriver', 'deleteDriver',
       'listLateReasons', 'addLateReason', 'updateLateReason', 'deleteLateReason', 'getZohoTraySettings',
+      'getDriverSyncSettings', 'saveFinancialsSource', 'syncDriversFromFinancials',
       'getAdminSettings', 'probeSpreadsheet', 'saveDataSourceConfig'
     ]]
   ];
@@ -451,7 +460,7 @@ function handleApiRequest_(action, params, auth) {
 // CREDENTIAL CHECKS
 // ---------------------------------------------------------------------------
 
-var AUTH_USERS_CACHE_KEY = 'authUsers_v2';
+var AUTH_USERS_CACHE_KEY = 'authUsers_v3';
 var AUTH_USERS_CACHE_TTL_SECONDS = 60;
 // Brute-force guard: a 4-digit PIN is only 10,000 guesses, and with every
 // request now carrying a PIN, any action is a guessing endpoint, not just
@@ -495,6 +504,9 @@ function getAuthUsers_() {
       users.push({
         id: d.ID,
         name: String(d.Name).trim(),
+        // Short sign-in name from the Financials sync (e.g. "SteveR"); the
+        // full name still works too.
+        login: String(d.Login || '').trim().toLowerCase(),
         pinHash: hashPin_(d.PIN),
         active: d.Active === true || String(d.Active).toUpperCase() === 'TRUE',
         role: ROLES.DRIVER
@@ -524,7 +536,9 @@ function verifyCredentials_(name, pin) {
   // A name can be on both lists (e.g. a checker who also drives) - the
   // PIN typed decides which login it is.
   var pinHash = hashPin_(pinStr);
-  var match = getAuthUsers_().filter(function (u) { return u.name.toLowerCase() === key && u.pinHash === pinHash; })[0];
+  var match = getAuthUsers_().filter(function (u) {
+    return (u.name.toLowerCase() === key || (u.login && u.login === key)) && u.pinHash === pinHash;
+  })[0];
   if (!match) {
     try { cache.put(failKey, String(failures + 1), AUTH_LOCKOUT_SECONDS); } catch (e) { /* best-effort */ }
     // Same message whether the name or the PIN was wrong, so the endpoint
@@ -1055,6 +1069,10 @@ function pruneOldRecords() {
     var tlDateCol = SHEET_HEADERS.TrayLedger.indexOf('Date');
     deleteRowsWhere_(trayLedgerSheet, function (row) { var d = parseAnyDate_(row[tlDateCol]); return d !== null && d < ledgerCutoff; });
   }
+
+  // Drivers list from Financials (build-2026-11-11-06) rides on this same
+  // nightly run - best-effort, never stops the clean-up.
+  try { if (readSettings_().FinancialsSpreadsheetId) syncDriversFromFinancials(); } catch (err) { Logger.log('Driver sync failed: ' + err.message); }
 
   var summary = 'Pruned records older than ' + RETENTION_DAYS + ' days: ' +
     sessionsDeleted + ' truck session(s), ' + orderChecksDeleted + ' order check(s), ' +
@@ -4448,16 +4466,18 @@ function getOrderFulfillmentOverview(referenceDate) {
 /** Creates the DriverLogs tab and the Drivers.PIN header if missing - no need to re-run setupSpreadsheet(). */
 function ensureDriverSchema_() {
   var cache = CacheService.getScriptCache();
-  var flagKey = 'driverSchemaOk_v2';
+  var flagKey = 'driverSchemaOk_v3';
   if (cache.get(flagKey)) return;
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var logs = ss.getSheetByName(SHEET_NAMES.DRIVER_LOGS);
   if (!logs) { logs = ss.insertSheet(SHEET_NAMES.DRIVER_LOGS); logs.setFrozenRows(1); }
   ensureHeaderCells_(logs, SHEET_HEADERS.DriverLogs, SHEET_HEADERS.DriverLogs);
   var drivers = getSheet_(SHEET_NAMES.DRIVERS);
-  ensureHeaderCells_(drivers, SHEET_HEADERS.Drivers, ['PIN']);
-  // PINs like "0123" must stay text (same leading-zero problem as Checkers.PIN).
-  drivers.getRange(1, SHEET_HEADERS.Drivers.indexOf('PIN') + 1, drivers.getMaxRows(), 1).setNumberFormat('@');
+  ensureHeaderCells_(drivers, SHEET_HEADERS.Drivers, ['PIN', 'EmployeeNumber', 'Login', 'Source']);
+  // PINs/employee numbers like "0123" must stay text (same leading-zero problem as Checkers.PIN).
+  ['PIN', 'EmployeeNumber'].forEach(function (col) {
+    drivers.getRange(1, SHEET_HEADERS.Drivers.indexOf(col) + 1, drivers.getMaxRows(), 1).setNumberFormat('@');
+  });
   try { cache.put(flagKey, '1', 6 * 60 * 60); } catch (e) { /* best-effort */ }
 }
 
@@ -5174,4 +5194,161 @@ function driverSetStopOrder(sessionId, keys) {
   keys.forEach(function (k) { k = String(k || ''); if (/^[ot]:/.test(k) && clean.indexOf(k) === -1) clean.push(k.slice(0, 300)); });
   saveStopOrder_(session.TruckID, clean, driver.name, 'driver');
   return { ok: true };
+}
+
+// ---------------------------------------------------------------------------
+// DRIVERS FROM THE FINANCIALS APP (build-2026-11-11-06)
+//
+// Shane's request: the Drivers list is kept up to date from Financials'
+// Employees sheet - Department "Drivers", company group "group" (Jhb) -
+// instead of by hand. Each driver signs in with a short login (first name +
+// surname initial, e.g. "SteveR") and their employee number as the PIN
+// (Shane's call, 11 Nov 2026: low-risk data, easy for drivers). Only name,
+// employee number, contact number and active/discharged status are read -
+// nothing about pay, ID or banking is copied. Runs nightly (inside
+// pruneOldRecords) and from Settings > Drivers > Sync now.
+// ---------------------------------------------------------------------------
+
+var FIN_EMPLOYEES_TAB = 'Employees';
+var FIN_DRIVER_DEPARTMENT = 'Drivers';
+var FIN_COMPANY_GROUP = 'group'; // Jhb
+
+function finCell_(row, col) { return col === -1 ? '' : row[col]; }
+
+/** Reads the Financials drivers: [{ empNo, name, contact, active }]. Throws a clear error if the sheet can't be read. */
+function readFinancialsDrivers_(spreadsheetId) {
+  var ss = SpreadsheetApp.openById(spreadsheetId);
+  var sheet = ss.getSheetByName(FIN_EMPLOYEES_TAB);
+  if (!sheet) throw new Error('No "' + FIN_EMPLOYEES_TAB + '" tab in that spreadsheet - is it the Financials sheet?');
+  var values = sheet.getDataRange().getValues();
+  var h = values[0].map(function (x) { return String(x).trim(); });
+  var col = function (name, required) {
+    var i = h.indexOf(name);
+    if (i === -1 && required) throw new Error('Financials Employees tab has no "' + name + '" column.');
+    return i;
+  };
+  var cEmp = col('EmployeeNumber', true), cName = col('Name', true), cDept = col('Department', true), cActive = col('Active', true);
+  var cGroup = col('CompanyGroup', false), cContact = col('ContactNumber', false), cDischarged = col('DateDischarged', false);
+  var out = [];
+  for (var i = 1; i < values.length; i++) {
+    var r = values[i];
+    if (String(finCell_(r, cDept)).trim() !== FIN_DRIVER_DEPARTMENT) continue;
+    if ((String(finCell_(r, cGroup)).trim() || 'group') !== FIN_COMPANY_GROUP) continue;
+    var empNo = String(finCell_(r, cEmp)).trim();
+    var name = String(finCell_(r, cName)).replace(/\s+/g, ' ').trim();
+    if (!empNo || !name) continue;
+    var activeCell = finCell_(r, cActive);
+    var active = (activeCell === true || String(activeCell).toUpperCase() === 'TRUE') && !String(finCell_(r, cDischarged)).trim();
+    out.push({ empNo: empNo, name: name, contact: String(finCell_(r, cContact) || '').trim(), active: active });
+  }
+  return out;
+}
+
+/** "Steve Roux" -> "SteveR"; extra surname letters (then the employee number) if two drivers would clash. */
+function driverLogins_(drivers) {
+  var taken = {}, out = {};
+  var clean = function (x) { return String(x || '').replace(/[^A-Za-z]/g, ''); };
+  drivers.forEach(function (d) {
+    var parts = d.name.replace(/\(.*?\)/g, ' ').trim().split(/\s+/);
+    var first = clean(parts[0]), last = clean(parts.length > 1 ? parts[parts.length - 1] : '');
+    var login = '';
+    for (var n = 1; n <= Math.max(1, last.length); n++) {
+      var cand = first + last.slice(0, n);
+      if (!taken[cand.toLowerCase()]) { login = cand; break; }
+    }
+    if (!login) login = first + last + d.empNo;
+    taken[login.toLowerCase()] = true;
+    out[d.empNo] = login;
+  });
+  return out;
+}
+
+function getDriverSyncSettings() {
+  var s = readSettings_();
+  var info = null;
+  try { info = JSON.parse(s.DriverSyncInfo || 'null'); } catch (e) { info = null; }
+  return { financialsSpreadsheetId: s.FinancialsSpreadsheetId || '', lastSync: info };
+}
+
+/** Admin > Drivers: connect the Financials spreadsheet (URL or ID); checks it can be read before saving. */
+function saveFinancialsSource(idOrUrl) {
+  var id = extractSpreadsheetId_(idOrUrl);
+  if (!id) throw new Error('Paste the Financials spreadsheet URL.');
+  var drivers = readFinancialsDrivers_(id);
+  writeSetting_('FinancialsSpreadsheetId', id);
+  return { ok: true, driversFound: drivers.length };
+}
+
+/**
+ * Brings Dispatch's Drivers list in line with Financials. Matches on
+ * employee number (or, the first time, on the exact name for drivers added
+ * by hand). New active drivers are added; synced drivers who left (inactive,
+ * discharged, moved out of Drivers) are made inactive, which blocks their
+ * sign-in. Names, contact numbers and logins follow Financials. The PIN is
+ * set to the employee number the first time a driver is synced (or whenever
+ * it's blank); a PIN changed by an Admin afterwards is kept. Drivers added
+ * by hand who aren't in Financials are left alone.
+ */
+function syncDriversFromFinancials() {
+  var id = readSettings_().FinancialsSpreadsheetId;
+  if (!id) throw new Error('Connect the Financials spreadsheet first (Settings > Drivers).');
+  var fin = readFinancialsDrivers_(id);
+  ensureDriverSchema_();
+  var finActive = fin.filter(function (d) { return d.active; });
+  var logins = driverLogins_(finActive);
+  var finByEmp = {};
+  fin.forEach(function (d) { finByEmp[d.empNo] = d; });
+
+  return withNamedLock_('driverSync', function () {
+    var sheet = getSheet_(SHEET_NAMES.DRIVERS);
+    var current = sheetToObjects_(sheet);
+    var byEmp = {}, byName = {};
+    current.forEach(function (d) {
+      if (String(d.EmployeeNumber || '').trim()) byEmp[String(d.EmployeeNumber).trim()] = d;
+      byName[String(d.Name || '').replace(/\s+/g, ' ').trim().toLowerCase()] = d;
+    });
+    var added = 0, updated = 0, deactivated = 0, matchedIds = {};
+
+    fin.forEach(function (f) {
+      var d = byEmp[f.empNo] || byName[f.name.toLowerCase()];
+      if (d && matchedIds[d.ID]) d = null; // never match one Dispatch row twice
+      if (!d) {
+        if (!f.active) return;
+        appendObjectForcingText_(sheet, SHEET_HEADERS.Drivers, {
+          ID: Utilities.getUuid(), Name: f.name, Contact: f.contact, Active: true, CreatedAt: nowIso_(),
+          PIN: f.empNo, EmployeeNumber: f.empNo, Login: logins[f.empNo] || '', Source: 'Financials'
+        }, ['Contact', 'PIN', 'EmployeeNumber']);
+        added++;
+        return;
+      }
+      matchedIds[d.ID] = true;
+      var firstSync = String(d.Source || '') !== 'Financials';
+      var patch = {};
+      if (d.Name !== f.name) patch.Name = f.name;
+      if (f.contact && String(d.Contact || '') !== f.contact) patch.Contact = f.contact;
+      if ((d.Active === true) !== f.active) { patch.Active = f.active; if (!f.active) deactivated++; }
+      if (String(d.EmployeeNumber || '') !== f.empNo) patch.EmployeeNumber = f.empNo;
+      var login = f.active ? (logins[f.empNo] || '') : '';
+      if (String(d.Login || '') !== login) patch.Login = login;
+      if (firstSync) patch.Source = 'Financials';
+      if (firstSync || !String(d.PIN || '').trim()) patch.PIN = f.empNo;
+      if (Object.keys(patch).length) {
+        updateRowById_(sheet, SHEET_HEADERS.Drivers, d.ID, patch, ['Contact', 'PIN', 'EmployeeNumber']);
+        updated++;
+      }
+    });
+
+    // Synced before, no longer a Jhb driver in Financials -> inactive.
+    current.forEach(function (d) {
+      if (String(d.Source || '') !== 'Financials' || matchedIds[d.ID] || d.Active !== true) return;
+      if (finByEmp[String(d.EmployeeNumber || '').trim()]) return;
+      updateRowById_(sheet, SHEET_HEADERS.Drivers, d.ID, { Active: false, Login: '' });
+      deactivated++;
+    });
+
+    clearAuthUsersCache_();
+    var info = { at: nowIso_(), financialsDrivers: fin.length, active: finActive.length, added: added, updated: updated, deactivated: deactivated };
+    writeSetting_('DriverSyncInfo', JSON.stringify(info));
+    return info;
+  });
 }

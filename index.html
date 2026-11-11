@@ -535,7 +535,7 @@
     <div class="content">
       <div class="card" style="margin-top:40px;">
         <label>Name</label>
-        <input type="text" id="login-name" autocomplete="off" placeholder="Your name">
+        <input type="text" id="login-name" autocomplete="off" placeholder="Your name (drivers: e.g. SteveR)">
         <label>PIN</label>
         <input type="password" id="login-pin" inputmode="numeric" placeholder="PIN">
         <div class="error" id="login-error"></div>
@@ -1234,6 +1234,17 @@
       </div>
 
       <div class="admin-pane" id="admin-drivers" style="display:none;">
+        <!-- Drivers synced from the Financials app (build-2026-11-11-06). -->
+        <div class="card">
+          <h3 style="margin-top:0;">Drivers from Financials</h3>
+          <p class="hint">Every active Jhb employee in the Financials app's <strong>Drivers</strong> department is kept on this list automatically (every night, or tap Sync now). They sign in with their login below (first name + surname initial, e.g. SteveR) and their employee number as the PIN. People who leave or are discharged in Financials are switched off here.</p>
+          <div class="row-inline">
+            <input type="text" id="fin-source-input" placeholder="Financials spreadsheet URL">
+            <button class="btn btn-secondary" onclick="saveFinancialsSourceUi()">Connect</button>
+            <button class="btn btn-primary" onclick="syncDriversUi()">Sync now</button>
+          </div>
+          <div class="hint" id="driver-sync-status" style="margin-top:6px;"></div>
+        </div>
         <div class="card">
           <h3 style="margin-top:0;">Add driver</h3>
           <p class="hint">Drivers added here show up as dropdown choices when a checker sets up a truck's trip - saves re-typing a name and number every time the same driver goes out. Give a driver an App PIN below and they can sign in with their name + PIN to see their trips today and log deliveries and problems from the road.</p>
@@ -1293,7 +1304,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-11-11-05';
+  var BUILD_VERSION = 'build-2026-11-11-06';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -1474,6 +1485,8 @@
     // collected order as it is, so a retry can't double it up.
     getOrderForCollection: true, collectOrder: true, getTrayRoster: true,
     getLiveDeliveries: true,
+    // Driver sync replaces the same rows each time; settings is a read.
+    getDriverSyncSettings: true, syncDriversFromFinancials: true,
     // Saving a stop order sets the same order again if repeated.
     driverSetStopOrder: true,
     listOpenDriverReports: true, listDriverReportsForDate: true, setDriverReportStatus: true
@@ -1510,7 +1523,7 @@
   // The Dashboard's big reads (build-2026-11-10-03): each reads several
   // whole sheets, and a 20s cut-off followed by automatic retries only
   // restarts the same slow work - better to wait a little longer once.
-  var EXTENDED_TIMEOUT_ACTIONS = { getDashboardForDate: 45000, getOrderFulfillmentOverview: 45000, getLateTruckLeaderboard: 45000,
+  var EXTENDED_TIMEOUT_ACTIONS = { syncDriversFromFinancials: 60000, saveFinancialsSource: 45000, getDashboardForDate: 45000, getOrderFulfillmentOverview: 45000, getLateTruckLeaderboard: 45000,
     refreshTrayStops: 90000, setItemStatus: 35000, allocateOrderToTruck: 35000, updateSessionTrip: 35000, markTruckDispatched: 35000 };
   var DEFAULT_TIMEOUT_MS = 20000;
 
@@ -4557,13 +4570,44 @@
     callApi('deleteLateReason', [id]).then(loadLateReasons).catch(showFatalError);
   }
 
+  function renderDriverSyncStatus(st) {
+    var el = document.getElementById('driver-sync-status');
+    if (!st) { el.textContent = ''; return; }
+    var input = document.getElementById('fin-source-input');
+    if (st.financialsSpreadsheetId && !input.value) input.value = 'Connected (' + st.financialsSpreadsheetId.slice(0, 8) + '...)';
+    var s = st.lastSync;
+    el.textContent = !st.financialsSpreadsheetId ? 'Not connected yet - paste the Financials spreadsheet URL and tap Connect.'
+      : s ? 'Last sync ' + formatDateForDisplay(String(s.at).slice(0, 10)) + ' ' + formatTime(s.at) + ': ' + s.active + ' active driver(s) in Financials; ' +
+          s.added + ' added, ' + s.updated + ' updated, ' + s.deactivated + ' switched off.'
+      : 'Connected - not synced yet.';
+  }
+
+  function saveFinancialsSourceUi() {
+    var v = document.getElementById('fin-source-input').value.trim();
+    if (!v || /^Connected/.test(v)) return;
+    callApi('saveFinancialsSource', [v]).then(function (r) {
+      alert('Connected - ' + r.driversFound + ' Jhb driver(s) found in Financials. Tap Sync now to bring them in.');
+      document.getElementById('fin-source-input').value = '';
+      loadDrivers();
+    }).catch(showFatalError);
+  }
+
+  function syncDriversUi() {
+    callApi('syncDriversFromFinancials', []).then(function () { driversCache = null; loadDrivers(); }).catch(showFatalError);
+  }
+
   function loadDrivers() {
+    callApi('getDriverSyncSettings', [], { silent: true }).then(renderDriverSyncStatus).catch(function () { renderDriverSyncStatus(null); });
     callApi('listDrivers', [false]).then(function (drivers) {
       document.getElementById('drivers-table').innerHTML =
-        '<tr><th>Name</th><th>Contact</th><th title="Lets this driver sign in to the app">App PIN</th><th>Active</th><th></th></tr>' +
+        '<tr><th>Name</th><th>Login</th><th>Contact</th><th title="Lets this driver sign in to the app">App PIN</th><th>Active</th><th></th></tr>' +
         drivers.map(function (d) {
+          var synced = d.Source === 'Financials';
           return '<tr>' +
             '<td><input type="text" style="' + TRUCK_FIELD_STYLE + '" value="' + escapeHtml(d.Name) + '" onchange="updateDriverField(\'' + d.ID + '\', \'Name\', this.value)"></td>' +
+            // Login + employee number come from Financials (read-only here).
+            '<td style="white-space:nowrap;">' + (d.Login ? '<strong>' + escapeHtml(d.Login) + '</strong>' : '<span class="hint">full name</span>') +
+              (synced ? '<div class="hint">Emp ' + escapeHtml(String(d.EmployeeNumber || '')) + ' · Financials</div>' : '') + '</td>' +
             '<td><input type="tel" style="' + TRUCK_FIELD_STYLE + '" value="' + escapeHtml(d.Contact) + '" onchange="updateDriverField(\'' + d.ID + '\', \'Contact\', this.value)"></td>' +
             // PINs are never sent to the browser - blank box, placeholder
             // says whether one is set. Typing a new one replaces it.

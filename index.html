@@ -823,6 +823,33 @@
     </div>
   </div>
 
+  <!-- WhatsApp app-login invites (build-2026-11-11-08) -->
+  <div class="modal-backdrop" id="invite-modal">
+    <div class="modal" style="max-width:640px;">
+      <h3 style="margin-top:0;">Send app login on WhatsApp</h3>
+      <div id="invite-setup"></div>
+      <div id="invite-preview"></div>
+      <div class="card" style="margin:10px 0; padding:10px 12px; background:#f7f9f8;">
+        <div style="font-weight:600;">Send a test first</div>
+        <div class="hint">Sends the real message to any number, filled in with the name below and an example login. No driver gets anything.</div>
+        <div class="row-inline" style="margin-top:6px;">
+          <input type="text" id="invite-test-name" placeholder="Name on the test">
+          <input type="tel" id="invite-test-phone" placeholder="Cell number">
+          <button class="btn btn-secondary" onclick="sendInviteTestUi()">Send test</button>
+        </div>
+      </div>
+      <div style="display:flex; gap:8px; flex-wrap:wrap; margin:8px 0;">
+        <button class="btn btn-secondary" onclick="inviteSelect('notSent')">Not sent yet</button>
+        <button class="btn btn-secondary" onclick="inviteSelect('all')">All</button>
+        <button class="btn btn-secondary" onclick="inviteSelect('none')">None</button>
+      </div>
+      <div id="invite-list" style="max-height:45vh; overflow-y:auto;"></div>
+      <div class="error" id="invite-error"></div>
+      <button class="btn btn-primary btn-block" id="invite-send-btn" style="margin:10px 0;" onclick="sendInvitesUi()">Send</button>
+      <button class="btn btn-secondary btn-block" onclick="document.getElementById('invite-modal').classList.remove('active')">Close</button>
+    </div>
+  </div>
+
   <!-- Driver: empty wooden trays collected at a fruit-tray stop
        (build-2026-11-11-02) - asked every time a tray stop is marked
        delivered; feeds the Dashboard's Wooden Trays roster. -->
@@ -1245,6 +1272,12 @@
           </div>
           <div class="hint" id="driver-sync-status" style="margin-top:6px;"></div>
         </div>
+        <!-- WhatsApp app-login invites (build-2026-11-11-08) -->
+        <div class="card">
+          <h3 style="margin-top:0;">Send login on WhatsApp</h3>
+          <p class="hint">Sends drivers a WhatsApp from the payslip number with how to open the app and their login. Their PIN isn't sent - the message says it's their employee number.</p>
+          <button class="btn btn-primary" onclick="openInviteModal()">Send login on WhatsApp...</button>
+        </div>
         <div class="card">
           <h3 style="margin-top:0;">Add driver</h3>
           <p class="hint">Drivers added here show up as dropdown choices when a checker sets up a truck's trip - saves re-typing a name and number every time the same driver goes out. Give a driver an App PIN below and they can sign in with their name + PIN to see their trips today and log deliveries and problems from the road.</p>
@@ -1304,7 +1337,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-11-11-06';
+  var BUILD_VERSION = 'build-2026-11-11-08';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -1486,7 +1519,7 @@
     getOrderForCollection: true, collectOrder: true, getTrayRoster: true,
     getLiveDeliveries: true,
     // Driver sync replaces the same rows each time; settings is a read.
-    getDriverSyncSettings: true, syncDriversFromFinancials: true,
+    getDriverSyncSettings: true, syncDriversFromFinancials: true, getDriverInviteInfo: true,
     // Saving a stop order sets the same order again if repeated.
     driverSetStopOrder: true,
     listOpenDriverReports: true, listDriverReportsForDate: true, setDriverReportStatus: true
@@ -1523,7 +1556,7 @@
   // The Dashboard's big reads (build-2026-11-10-03): each reads several
   // whole sheets, and a 20s cut-off followed by automatic retries only
   // restarts the same slow work - better to wait a little longer once.
-  var EXTENDED_TIMEOUT_ACTIONS = { syncDriversFromFinancials: 60000, saveFinancialsSource: 45000, getDashboardForDate: 45000, getOrderFulfillmentOverview: 45000, getLateTruckLeaderboard: 45000,
+  var EXTENDED_TIMEOUT_ACTIONS = { sendDriverInvites: 240000, getDriverInviteInfo: 45000, syncDriversFromFinancials: 60000, saveFinancialsSource: 45000, getDashboardForDate: 45000, getOrderFulfillmentOverview: 45000, getLateTruckLeaderboard: 45000,
     refreshTrayStops: 90000, setItemStatus: 35000, allocateOrderToTruck: 35000, updateSessionTrip: 35000, markTruckDispatched: 35000 };
   var DEFAULT_TIMEOUT_MS = 20000;
 
@@ -4580,6 +4613,85 @@
       : s ? 'Last sync ' + formatDateForDisplay(String(s.at).slice(0, 10)) + ' ' + formatTime(s.at) + ': ' + s.active + ' active driver(s) in Financials; ' +
           s.added + ' added, ' + s.updated + ' updated, ' + s.deactivated + ' switched off.'
       : 'Connected - not synced yet.';
+  }
+
+  var inviteData = null, inviteTicked = {};
+
+  function openInviteModal() {
+    document.getElementById('invite-error').textContent = '';
+    callApi('getDriverInviteInfo', []).then(function (data) {
+      inviteData = data;
+      inviteTicked = {};
+      var tn = document.getElementById('invite-test-name');
+      if (!tn.value && state.checker) tn.value = state.checker.name;
+      data.drivers.forEach(function (d) { if (d.phone && !/^Sent/.test(d.status)) inviteTicked[d.id] = true; });
+      renderInviteModal();
+      document.getElementById('invite-modal').classList.add('active');
+    }).catch(showFatalError);
+  }
+
+  function inviteSelect(mode) {
+    inviteTicked = {};
+    inviteData.drivers.forEach(function (d) {
+      if (!d.phone) return;
+      if (mode === 'all' || (mode === 'notSent' && !/^Sent/.test(d.status))) inviteTicked[d.id] = true;
+    });
+    renderInviteModal();
+  }
+
+  function toggleInvite(id, on) { if (on) inviteTicked[id] = true; else delete inviteTicked[id]; renderInviteModal(); }
+
+  function renderInviteModal() {
+    var d = inviteData, setup = document.getElementById('invite-setup'), canSend = true;
+    if (d.missing.length) {
+      canSend = false;
+      setup.innerHTML = '<div class="late-reason-line">Not set up yet. In the Dispatch Apps Script project add these Script properties: ' + escapeHtml(d.missing.join(', ')) + ' (the same values as the Financials app uses for payslips).</div>';
+    } else if (!d.template || !d.template.found) {
+      canSend = false;
+      setup.innerHTML = '<div class="late-reason-line">' + escapeHtml((d.template && d.template.error) || 'Template not found.') + ' Create it in WhatsApp Manager (see SETUP.md) and wait for Meta to approve it.</div>';
+    } else if (d.template.status !== 'APPROVED') {
+      canSend = false;
+      setup.innerHTML = '<div class="late-reason-line">The "' + escapeHtml(d.templateName) + '" template is ' + escapeHtml(d.template.status) + ' - it can be sent once Meta approves it.</div>';
+    } else {
+      setup.innerHTML = '<div class="hint">Template "' + escapeHtml(d.templateName) + '" is approved.</div>';
+    }
+    var first = d.drivers.filter(function (x) { return x.preview; })[0];
+    document.getElementById('invite-preview').innerHTML = first
+      ? '<div class="hint" style="margin-top:8px;">What ' + escapeHtml(first.name) + ' will get:</div><div style="white-space:pre-wrap; background:#e7f8e3; border-radius:8px; padding:10px; font-size:14px; margin-top:4px;">' + escapeHtml(first.preview) + '</div>'
+      : '';
+    var n = Object.keys(inviteTicked).length;
+    document.getElementById('invite-list').innerHTML = d.drivers.map(function (x) {
+      var st = x.status ? (/^Sent/.test(x.status) ? 'Sent ' + formatDateForDisplay(x.status.slice(5, 15)) : escapeHtml(x.status.replace(/^Failed \S+: /, 'Failed: '))) : '';
+      return '<label class="dash-order-row" style="cursor:' + (x.phone ? 'pointer' : 'default') + ';"><div style="display:flex; gap:10px; align-items:flex-start;">' +
+        '<input type="checkbox" ' + (inviteTicked[x.id] ? 'checked ' : '') + (x.phone ? '' : 'disabled ') + 'onchange="toggleInvite(' + jsStrAttr_(x.id) + ', this.checked)" style="margin-top:3px;">' +
+        '<div><div>' + escapeHtml(x.name) + ' <span class="hint">login ' + escapeHtml(x.login) + (x.hasPin ? '' : ' · no PIN set') + '</span></div>' +
+        '<div class="hint">' + (x.phone ? '+' + escapeHtml(x.phone) : 'No usable cell number' + (x.contact ? ' ("' + escapeHtml(x.contact) + '")' : '')) + '</div></div></div>' +
+        '<div class="hint" style="text-align:right; max-width:45%;">' + st + '</div></label>';
+    }).join('');
+    var btn = document.getElementById('invite-send-btn');
+    btn.textContent = 'Send to ' + n + ' driver' + (n === 1 ? '' : 's');
+    btn.disabled = !canSend || n === 0;
+    btn.style.opacity = btn.disabled ? '0.5' : '';
+  }
+
+  function sendInviteTestUi() {
+    var name = document.getElementById('invite-test-name').value.trim();
+    var phone = document.getElementById('invite-test-phone').value.trim();
+    if (!phone) { document.getElementById('invite-error').textContent = 'Enter the cell number for the test.'; return; }
+    callApi('sendDriverInviteTest', [phone, name]).then(function (r) {
+      document.getElementById('invite-error').textContent = '';
+      alert('Test sent to +' + r.to + ' (example login ' + r.login + '). Check your WhatsApp.');
+    }).catch(function (err) { document.getElementById('invite-error').textContent = err.message || String(err); });
+  }
+
+  function sendInvitesUi() {
+    var ids = Object.keys(inviteTicked);
+    if (!ids.length || !confirm('Send the WhatsApp to ' + ids.length + ' driver(s)?')) return;
+    callApi('sendDriverInvites', [ids]).then(function (r) {
+      document.getElementById('invite-error').textContent = r.failed ? r.failed + ' failed - see the reason next to each name.' : '';
+      alert(r.sent + ' sent' + (r.failed ? ', ' + r.failed + ' failed' : '') + '.');
+      return callApi('getDriverInviteInfo', []).then(function (data) { inviteData = data; inviteTicked = {}; renderInviteModal(); });
+    }).catch(function (err) { document.getElementById('invite-error').textContent = err.message || String(err); });
   }
 
   function saveFinancialsSourceUi() {

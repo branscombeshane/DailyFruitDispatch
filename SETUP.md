@@ -774,6 +774,41 @@ list further, the same way the search and date work together. Clearing
 either the text or the date (or tapping **Clear**) goes back to searching
 every day at once, same as before this was added.
 
+## WhatsApp app-login invites for drivers (build-2026-11-11-08)
+
+**Settings > Drivers > Send login on WhatsApp** sends drivers a WhatsApp
+with how to open the app and their login. It uses the same WhatsApp
+Business number and Meta Cloud API as the Financials app's payslips. The
+PIN is never sent: the message says it's their employee number.
+
+**One-time setup:**
+1. **Template:** WhatsApp only lets a business start a chat with an
+   approved template. In WhatsApp Manager, create a template:
+   - name `dispatch_app_invite`, category **Utility**, language English;
+   - body with `{{1}}` = first name and `{{2}}` = login (the text Shane
+     submits is in the chat that built this);
+   - optional "Visit website" button to `https://dispatch.dailyfruit.co.za`.
+   Wait for Meta's approval. A different name works too: set Script
+   property `DISPATCH_INVITE_TEMPLATE`.
+2. **Script properties** (Dispatch Apps Script project): add
+   `WHATSAPP_ACCESS_TOKEN` (the same value as in the Financials project),
+   `WHATSAPP_PHONE_NUMBER_ID` and `WHATSAPP_WABA_ID` (the same IDs the
+   Financials app uses). Never paste the token into chat or code.
+
+**Sending:**
+- **Send a test first:** sends the real message to any number, filled with
+  the name typed and an example login. No driver records are touched.
+- **Drivers:** tick drivers (default: active, with a usable cell number,
+  not sent yet), then **Send**. Each driver's last result is stored in
+  `Drivers.InviteStatus`, as "Sent <time>" or "Failed <time>: <Meta's
+  reason>".
+- **Cell numbers:** 082… / 27… / +27… are all accepted. Drivers without a
+  usable number can't be ticked; fix their ContactNumber in Financials and
+  sync.
+- **Limits:** while the number is new or in test mode, Meta may only
+  deliver to approved test numbers and caps new conversations per day.
+  Its refusal reason is shown per driver.
+
 ## Drivers synced from the Financials app (build-2026-11-11-06)
 
 The Drivers list is kept up to date from the Financials app's **Employees**

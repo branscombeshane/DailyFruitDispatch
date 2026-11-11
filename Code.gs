@@ -104,7 +104,9 @@ var SHEET_HEADERS = {
   // syncDriversFromFinancials). Login is the short sign-in name (first name
   // + surname initial, e.g. "SteveR"); Source is 'Financials' for synced
   // drivers, blank for ones added by hand.
-  Drivers: ['ID', 'Name', 'Contact', 'Active', 'CreatedAt', 'PIN', 'EmployeeNumber', 'Login', 'Source'],
+  // InviteStatus appended build-2026-11-11-08: the last WhatsApp app-login
+  // invite ("Sent <iso>" / "Failed <iso>: reason") - see sendDriverInvites.
+  Drivers: ['ID', 'Name', 'Contact', 'Active', 'CreatedAt', 'PIN', 'EmployeeNumber', 'Login', 'Source', 'InviteStatus'],
   // Driver, DispatchedWithWarnings, DispatchWarningsText, Route and the
   // TraySmall/Medium/Large/Other columns are appended at the end for the
   // same non-destructive-migration reason. Driver can hold up to 4 names,
@@ -335,6 +337,9 @@ var API_ACTIONS = {
   getDriverSyncSettings: getDriverSyncSettings,
   saveFinancialsSource: saveFinancialsSource,
   syncDriversFromFinancials: syncDriversFromFinancials,
+  getDriverInviteInfo: getDriverInviteInfo,
+  sendDriverInvites: sendDriverInvites,
+  sendDriverInviteTest: sendDriverInviteTest,
   collectOrder: collectOrder,
   getMyDriverTrips: getMyDriverTrips,
   driverMarkDelivered: driverMarkDelivered,
@@ -411,7 +416,7 @@ function buildActionRoles_() {
       'listTrucks', 'addTruck', 'updateTruck', 'deleteTruck',
       'addDriver', 'updateDriver', 'deleteDriver',
       'listLateReasons', 'addLateReason', 'updateLateReason', 'deleteLateReason', 'getZohoTraySettings',
-      'getDriverSyncSettings', 'saveFinancialsSource', 'syncDriversFromFinancials',
+      'getDriverSyncSettings', 'saveFinancialsSource', 'syncDriversFromFinancials', 'getDriverInviteInfo', 'sendDriverInvites', 'sendDriverInviteTest',
       'getAdminSettings', 'probeSpreadsheet', 'saveDataSourceConfig'
     ]]
   ];
@@ -4470,14 +4475,14 @@ function getOrderFulfillmentOverview(referenceDate) {
 /** Creates the DriverLogs tab and the Drivers.PIN header if missing - no need to re-run setupSpreadsheet(). */
 function ensureDriverSchema_() {
   var cache = CacheService.getScriptCache();
-  var flagKey = 'driverSchemaOk_v3';
+  var flagKey = 'driverSchemaOk_v4';
   if (cache.get(flagKey)) return;
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var logs = ss.getSheetByName(SHEET_NAMES.DRIVER_LOGS);
   if (!logs) { logs = ss.insertSheet(SHEET_NAMES.DRIVER_LOGS); logs.setFrozenRows(1); }
   ensureHeaderCells_(logs, SHEET_HEADERS.DriverLogs, SHEET_HEADERS.DriverLogs);
   var drivers = getSheet_(SHEET_NAMES.DRIVERS);
-  ensureHeaderCells_(drivers, SHEET_HEADERS.Drivers, ['PIN', 'EmployeeNumber', 'Login', 'Source']);
+  ensureHeaderCells_(drivers, SHEET_HEADERS.Drivers, ['PIN', 'EmployeeNumber', 'Login', 'Source', 'InviteStatus']);
   // PINs/employee numbers like "0123" must stay text (same leading-zero problem as Checkers.PIN).
   ['PIN', 'EmployeeNumber'].forEach(function (col) {
     drivers.getRange(1, SHEET_HEADERS.Drivers.indexOf(col) + 1, drivers.getMaxRows(), 1).setNumberFormat('@');
@@ -5355,4 +5360,174 @@ function syncDriversFromFinancials() {
     writeSetting_('DriverSyncInfo', JSON.stringify(info));
     return info;
   });
+}
+
+// ---------------------------------------------------------------------------
+// WHATSAPP APP-LOGIN INVITES FOR DRIVERS (build-2026-11-11-08)
+//
+// Sends each driver a WhatsApp telling them how to use the Dispatch app and
+// what their login is, from the same WhatsApp Business number the Financials
+// app sends payslips from (Meta WhatsApp Cloud API). WhatsApp only allows a
+// business to start a conversation with an APPROVED message template, so the
+// text lives in Meta (template DISPATCH_INVITE_TEMPLATE, default
+// "dispatch_app_invite"), not here: {{1}} = first name, {{2}} = login. The
+// PIN is never sent - the template says it's their employee number.
+//
+// Script properties (Dispatch project), typed in by an Admin, never in chat
+// or code: WHATSAPP_ACCESS_TOKEN (same token as Financials),
+// WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_WABA_ID; optional
+// DISPATCH_INVITE_TEMPLATE, WHATSAPP_API_VERSION.
+// ---------------------------------------------------------------------------
+
+function dwaConfig_() {
+  var pr = PropertiesService.getScriptProperties();
+  var g = function (k, d) { var v = pr.getProperty(k); return v ? String(v).trim() : d; };
+  return {
+    token: g('WHATSAPP_ACCESS_TOKEN', ''), phoneNumberId: g('WHATSAPP_PHONE_NUMBER_ID', ''), wabaId: g('WHATSAPP_WABA_ID', ''),
+    templateName: g('DISPATCH_INVITE_TEMPLATE', 'dispatch_app_invite'), apiVersion: g('WHATSAPP_API_VERSION', 'v21.0')
+  };
+}
+
+function dwaMissing_(cfg) {
+  return ['WHATSAPP_ACCESS_TOKEN', 'WHATSAPP_PHONE_NUMBER_ID', 'WHATSAPP_WABA_ID'].filter(function (k) {
+    return !cfg[{ WHATSAPP_ACCESS_TOKEN: 'token', WHATSAPP_PHONE_NUMBER_ID: 'phoneNumberId', WHATSAPP_WABA_ID: 'wabaId' }[k]];
+  });
+}
+
+function dwaCall_(cfg, method, path, body) {
+  var opts = { method: method, muteHttpExceptions: true, headers: { Authorization: 'Bearer ' + cfg.token } };
+  if (body) { opts.contentType = 'application/json'; opts.payload = JSON.stringify(body); }
+  var resp = UrlFetchApp.fetch('https://graph.facebook.com/' + cfg.apiVersion + '/' + path, opts);
+  var parsed = {};
+  try { parsed = JSON.parse(resp.getContentText() || '{}'); } catch (e) { parsed = {}; }
+  return { code: resp.getResponseCode(), body: parsed };
+}
+
+function dwaError_(r) {
+  var e = r.body && r.body.error;
+  if (!e) return 'WhatsApp answered HTTP ' + r.code + '.';
+  return '(#' + (e.code || r.code) + ') ' + (e.message || 'rejected') + (e.error_data && e.error_data.details ? ' ' + e.error_data.details : '');
+}
+
+/** South African cell number in any common spelling -> 27XXXXXXXXX; '' if it can't be a mobile. */
+function dwaPhone_(raw) {
+  var text = String(raw || '').trim();
+  var hasPlus = /^(\+|00)/.test(text);
+  var digits = text.replace(/\D/g, '').replace(/^00/, '');
+  if (/^27\d{9}$/.test(digits)) return digits;
+  if (/^0\d{9}$/.test(digits)) return '27' + digits.slice(1);
+  if (!hasPlus && /^[1-9]\d{8}$/.test(digits)) return '27' + digits;
+  if (hasPlus && digits.length >= 10 && digits.length <= 15) return digits;
+  return '';
+}
+
+/** The approved template from Meta: status, language, body text and how many {{variables}} it has. */
+function dwaTemplate_(cfg) {
+  var r = dwaCall_(cfg, 'get', cfg.wabaId + '/message_templates?name=' + encodeURIComponent(cfg.templateName) +
+    '&fields=name,status,language,parameter_format,components&limit=20');
+  if (r.code !== 200) return { found: false, error: dwaError_(r) };
+  var list = (r.body.data || []).filter(function (t) { return t.name === cfg.templateName; });
+  if (!list.length) return { found: false, error: 'There is no template called "' + cfg.templateName + '" on the WhatsApp account yet.' };
+  var t = list.filter(function (x) { return x.status === 'APPROVED'; })[0] || list[0];
+  var body = (t.components || []).filter(function (c) { return String(c.type).toUpperCase() === 'BODY'; })[0] || {};
+  var text = String(body.text || '');
+  var vars = [], re = /\{\{\s*([A-Za-z0-9_]+)\s*\}\}/g, m;
+  while ((m = re.exec(text))) { if (vars.indexOf(m[1]) === -1) vars.push(m[1]); }
+  return { found: true, status: t.status, language: t.language, named: t.parameter_format === 'NAMED', bodyText: text, vars: vars };
+}
+
+function dwaFirstName_(name) { return String(name || '').replace(/\(.*?\)/g, ' ').trim().split(/\s+/)[0] || ''; }
+
+/** Fills a template body for the preview: {{1}}/first var = first name, {{2}}/second = login. */
+function dwaFill_(tpl, d) {
+  var vals = [dwaFirstName_(d.Name), String(d.Login || d.Name || '')];
+  var text = tpl.bodyText;
+  tpl.vars.forEach(function (v, i) { text = text.split('{{' + v + '}}').join(vals[i] !== undefined ? vals[i] : ''); });
+  return text;
+}
+
+/** Settings > Drivers > Send login on WhatsApp: setup state, the template, and each active driver. */
+function getDriverInviteInfo() {
+  var cfg = dwaConfig_();
+  var missing = dwaMissing_(cfg);
+  ensureDriverSchema_();
+  var drivers = sheetToObjects_(getSheet_(SHEET_NAMES.DRIVERS)).filter(function (d) { return d.Active === true; })
+    .sort(function (a, b) { return String(a.Name).localeCompare(String(b.Name)); });
+  var tpl = missing.length ? null : dwaTemplate_(cfg);
+  return {
+    missing: missing, templateName: cfg.templateName, template: tpl,
+    drivers: drivers.map(function (d) {
+      return {
+        id: d.ID, name: d.Name, login: d.Login || d.Name, phone: dwaPhone_(d.Contact), contact: d.Contact || '',
+        hasPin: String(d.PIN || '').trim() !== '', status: d.InviteStatus || '',
+        preview: tpl && tpl.found ? dwaFill_(tpl, d) : ''
+      };
+    })
+  };
+}
+
+function dwaSendInvite_(cfg, tpl, phone, firstName, login) {
+  var vals = [firstName, login];
+  var params = tpl.vars.map(function (v, k) {
+    var p = { type: 'text', text: vals[k] !== undefined ? vals[k] : '' };
+    if (tpl.named) p.parameter_name = v;
+    return p;
+  });
+  var payload = { messaging_product: 'whatsapp', to: phone, type: 'template',
+    template: { name: cfg.templateName, language: { code: tpl.language }, components: params.length ? [{ type: 'body', parameters: params }] : [] } };
+  try { return dwaCall_(cfg, 'post', cfg.phoneNumberId + '/messages', payload); }
+  catch (err) { return { code: 0, body: { error: { message: String(err && err.message || err) } } }; }
+}
+
+/** Ready to send? Throws a clear reason if not. Returns { cfg, tpl }. */
+function dwaReady_() {
+  var cfg = dwaConfig_();
+  var missing = dwaMissing_(cfg);
+  if (missing.length) throw new Error('Add these Script properties in the Dispatch Apps Script project first: ' + missing.join(', '));
+  var tpl = dwaTemplate_(cfg);
+  if (!tpl.found) throw new Error(tpl.error);
+  if (tpl.status !== 'APPROVED') throw new Error('The "' + cfg.templateName + '" template is ' + tpl.status + ' in WhatsApp - it can only be sent once Meta approves it.');
+  return { cfg: cfg, tpl: tpl };
+}
+
+/**
+ * Test send to any cell number (e.g. the owner's, who isn't a driver):
+ * the real template, filled with the given name and an example login.
+ * Touches no driver records.
+ */
+function sendDriverInviteTest(phoneRaw, name) {
+  var ready = dwaReady_();
+  var phone = dwaPhone_(phoneRaw);
+  if (!phone) throw new Error('That doesn\'t look like a cell number.');
+  var first = dwaFirstName_(name) || 'Test';
+  var parts = String(name || '').trim().split(/\s+/);
+  var login = first + (parts.length > 1 ? parts[parts.length - 1].charAt(0).toUpperCase() : '');
+  var r = dwaSendInvite_(ready.cfg, ready.tpl, phone, first, login);
+  if (!(r.code === 200 && r.body.messages)) throw new Error('WhatsApp refused it: ' + dwaError_(r));
+  return { ok: true, to: phone, login: login };
+}
+
+/** Sends the invite to the given drivers, one at a time; records Sent/Failed on each. */
+function sendDriverInvites(driverIds) {
+  var ready = dwaReady_(), cfg = ready.cfg, tpl = ready.tpl;
+  var want = {};
+  (driverIds || []).forEach(function (id) { want[String(id)] = true; });
+  var sheet = getSheet_(SHEET_NAMES.DRIVERS);
+  var drivers = sheetToObjects_(sheet).filter(function (d) { return want[String(d.ID)] && d.Active === true; });
+  if (drivers.length > 150) throw new Error('Send at most 150 at a time.');
+  var results = [];
+  drivers.forEach(function (d, i) {
+    var phone = dwaPhone_(d.Contact);
+    var status;
+    if (!phone) {
+      status = 'Failed ' + nowIso_() + ': no usable cell number';
+    } else {
+      var r = dwaSendInvite_(cfg, tpl, phone, dwaFirstName_(d.Name), String(d.Login || d.Name || ''));
+      status = (r.code === 200 && r.body.messages) ? 'Sent ' + nowIso_() : 'Failed ' + nowIso_() + ': ' + dwaError_(r);
+    }
+    updateRowById_(sheet, SHEET_HEADERS.Drivers, d.ID, { InviteStatus: status.slice(0, 400) });
+    results.push({ id: d.ID, name: d.Name, ok: /^Sent/.test(status), status: status });
+    if (i < drivers.length - 1) { try { Utilities.sleep(350); } catch (e) { /* tests */ } }
+  });
+  return { sent: results.filter(function (x) { return x.ok; }).length, failed: results.filter(function (x) { return !x.ok; }).length, results: results };
 }

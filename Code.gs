@@ -4664,19 +4664,35 @@ function trayStopLabel_(stop) {
 
 /**
  * Wooden trays dropped off, by size, from a tray stop's Products text
- * ("Seasonal Variety Medium x1, GIBS - Large x9"): every product whose name
- * says Small, Medium or Large counts as that many trays of that size.
- * Products with no size in the name (e.g. "Mixed Nuts - 30g") aren't trays.
+ * ("Seasonal Variety Medium x1, 70pc - Discovery x5"). Shane's rule
+ * (build-2026-11-11-03): sized by the piece count in the product name -
+ * 0-15pc small, 16-35pc medium, 36-70pc large, more than 70pc goes in boxes
+ * (no tray). Only the "NNpc" number counts (in "45pc + 15sp", 45). A product
+ * with no piece count falls back to Small/Medium/Large in its name; one
+ * with neither (e.g. nuts, biltong) isn't a tray.
  */
+var TRAY_SIZE_MAX_PIECES = { small: 15, medium: 35, large: 70 };
+function traySizeForProduct_(name) {
+  var pc = String(name).match(/(\d+)\s*pc\b/i);
+  if (pc) {
+    var n = Number(pc[1]);
+    if (n <= TRAY_SIZE_MAX_PIECES.small) return 'small';
+    if (n <= TRAY_SIZE_MAX_PIECES.medium) return 'medium';
+    if (n <= TRAY_SIZE_MAX_PIECES.large) return 'large';
+    return ''; // boxes
+  }
+  if (/\blarge\b/i.test(name)) return 'large';
+  if (/\bmedium\b/i.test(name)) return 'medium';
+  if (/\bsmall\b/i.test(name)) return 'small';
+  return '';
+}
 function trayCountsFromProducts_(productsText) {
   var out = { small: 0, medium: 0, large: 0 };
   String(productsText || '').split(/,\s*(?=[^,]* x\d+$|[^,]* x\d+,)/).forEach(function (part) {
     var m = String(part).trim().match(/^(.*) x(\d+)$/);
     if (!m) return;
-    var name = m[1], n = Number(m[2]) || 0;
-    if (/\blarge\b/i.test(name)) out.large += n;
-    else if (/\bmedium\b/i.test(name)) out.medium += n;
-    else if (/\bsmall\b/i.test(name)) out.small += n;
+    var size = traySizeForProduct_(m[1]);
+    if (size) out[size] += Number(m[2]) || 0;
   });
   return out;
 }

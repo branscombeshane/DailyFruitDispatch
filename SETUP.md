@@ -774,6 +774,30 @@ list further, the same way the search and date work together. Clearing
 either the text or the date (or tapping **Clear**) goes back to searching
 every day at once, same as before this was added.
 
+## Dashboard layout and Live deliveries (build-2026-11-11-04)
+
+The Dashboard is split into tabs instead of one long page. Tab labels show
+live counts: red for things needing action, grey for information.
+
+- **Overview:**
+  - *Needs attention* boxes: orders outstanding, trucks out delivering,
+    trucks still loading, open issues, customers not returning trays,
+    trucks often late. Each opens its tab.
+  - Today's orders tiles.
+  - Find an order.
+- **Live deliveries** (new): every truck today as its driver sees it.
+  Shows drivers, route, a progress bar, delivered x of y and last
+  delivery time. Tap a truck for its orders and fruit-tray clients with
+  delivered times, empty trays collected, and problems reported. Refreshes
+  every minute while open. Server: `getLiveDeliveries`.
+- **Trucks:** today's truck tiles and truck cards (tiles filter the cards).
+- **Timeline:** Dispatch Timeline (newest 8, then "Show all") and Trucks
+  Leaving Late.
+- **Issues:** driver reports, packing issues, truck issues and jobs.
+- **Trays:** the wooden tray roster.
+
+History is unchanged apart from its timeline also showing 8 at a time.
+
 ## Wooden tray roster (build-2026-11-11-02)
 
 Fruit trays go out in wooden trays, and the empty tray from the previous

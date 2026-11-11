@@ -351,6 +351,22 @@
     .dash-truck-arrow { font-size: 11px; color: var(--grey); margin-left: 8px; }
     .dash-warning-line { color: var(--red); font-size: 13px; font-weight: 600; margin-top: 6px; }
     .late-reason-line { color: var(--red); font-size: 13px; margin-top: 4px; }
+    /* Dashboard tabs + live deliveries (build-2026-11-11-04) */
+    .dash-tabs { position: sticky; top: 0; z-index: 5; background: var(--bg, #f4f6f5); padding: 8px 0; margin-bottom: 8px; overflow-x: auto; flex-wrap: nowrap; white-space: nowrap; }
+    .dash-tab-count { display: inline-block; min-width: 18px; margin-left: 6px; padding: 0 6px; border-radius: 9px; background: var(--red); color: #fff; font-size: 11px; line-height: 18px; text-align: center; }
+    .dash-tab-count:empty { display: none; }
+    .dash-tab-count.quiet { background: #9aa0a6; }
+    .dash-attention { display: flex; flex-wrap: wrap; gap: 10px; }
+    .dash-attention-chip { flex: 1 1 180px; text-align: left; padding: 12px 14px; border: 1px solid var(--border); border-radius: 10px; background: #fff; cursor: pointer; font-size: 14px; }
+    .dash-attention-chip strong { display: block; font-size: 22px; }
+    .dash-attention-chip.alert { border-color: var(--red); background: #fdf1f0; }
+    .dash-attention-chip.alert strong { color: var(--red); }
+    .dash-attention-chip.ok strong { color: var(--green-dark, #2e7d32); }
+    .live-trip { border: 1px solid var(--border); border-radius: 10px; margin-bottom: 8px; background: #fff; }
+    .live-trip-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 10px 12px; cursor: pointer; }
+    .live-bar { height: 6px; border-radius: 3px; background: #e6e9e7; overflow: hidden; margin-top: 6px; }
+    .live-bar > div { height: 100%; background: var(--green); }
+    .live-trip-body { padding: 0 12px 10px; }
     /* Driver screen (build-2026-11-10-01) - used on a phone in a truck, so
        big tap targets and one stop per row. */
     .driver-stop { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 12px 0; border-top: 1px solid var(--border); }
@@ -1032,60 +1048,86 @@
         <button data-pane="datasource" onclick="showAdminPane('datasource', this)">Data Source</button>
       </div>
 
+      <!-- Dashboard (build-2026-11-11-04 layout): split into tabs so it's
+           no longer one long scroll. Every container keeps its old id, so
+           the render functions are unchanged - only where they sit moved.
+           Tab labels carry live counts (updateDashTabs). -->
       <div class="admin-pane" id="admin-overview">
-        <div class="card">
-          <h3 style="margin-top:0;">Find an order</h3>
-          <p class="hint" style="margin-top:0;">Search by order number or customer to see which truck (and day) it was allocated to - not limited to today. Only orders that have been allocated to a truck will show up here.</p>
-          <div class="row-inline">
-            <input type="text" id="order-search-input" placeholder="Order number or customer" oninput="debouncedOrderSearch()">
-            <button class="btn btn-secondary" onclick="document.getElementById('order-search-input').value=''; runOrderSearch();">Clear</button>
-          </div>
-          <div id="order-search-results" style="margin-top:10px;"></div>
+        <div class="admin-nav dash-tabs" id="dash-tabs">
+          <button data-dtab="overview" class="active" onclick="showDashTab('overview')">Overview</button>
+          <button data-dtab="live" onclick="showDashTab('live')">Live deliveries<span class="dash-tab-count" id="dash-tab-count-live"></span></button>
+          <button data-dtab="trucks" onclick="showDashTab('trucks')">Trucks<span class="dash-tab-count" id="dash-tab-count-trucks"></span></button>
+          <button data-dtab="timeline" onclick="showDashTab('timeline')">Timeline</button>
+          <button data-dtab="issues" onclick="showDashTab('issues')">Issues<span class="dash-tab-count" id="dash-tab-count-issues"></span></button>
+          <button data-dtab="trays" onclick="showDashTab('trays')">Trays<span class="dash-tab-count" id="dash-tab-count-trays"></span></button>
         </div>
-        <div class="card">
-          <h3 style="margin-top:0;">Today's trucks</h3>
-          <p class="hint" style="margin-top:0;">Always shows today - for a past day, use History above.</p>
-          <div id="dashboard-summary" style="display:flex; flex-wrap:wrap; gap:12px;"></div>
-        </div>
-        <!-- Dispatch Timeline (build-2026-10-26, moved here from the Trucks
-             board on 2026-10-26 per Shane) - every truck actually dispatched
-             today, newest first, with how long it took from its first
-             order/trip start to actually leaving. History has its own
-             matching card below for a past day (build-2026-10-27). -->
-        <div class="card">
-          <h3 style="margin-top:0;">Dispatch Timeline (Today)</h3>
-          <p class="hint" style="margin-top:0;">How long each truck took from its first order (or trip start, for a trays/jobs-only run) to actually leaving - newest dispatch first.</p>
-          <div id="dashboard-dispatch-timeline"></div>
-        </div>
-        <!-- Trucks Leaving Late (build-2026-10-27-05, Shane) - a different
-             question from the Dispatch Timeline above: not "was today
-             slow", but "which trucks keep missing the leave-by target,
-             trip after trip". Dashboard-only (his choice when asked) - a
-             rolling 30-day window ending today, so it wouldn't mean the
-             same thing pinned to an arbitrary past History day. Fed by its
-             own getLateTruckLeaderboard call, loaded alongside the rest of
-             the Dashboard - see loadDashboard(). -->
-        <div class="card">
-          <h3 style="margin-top:0;">Trucks Leaving Late</h3>
-          <p class="hint" style="margin-top:0;" id="late-trucks-hint">Trucks whose first trip of the day has left after 07:00 three or more times recently. A truck's 2nd+ trip isn't held to a leave-by target, so only each day's first trip counts.</p>
-          <div id="dashboard-late-trucks"></div>
-        </div>
-        <div class="card">
-          <h3 style="margin-top:0;" id="fulfillment-title">Today's orders - dispatched vs outstanding</h3>
-          <p class="hint" id="fulfillment-hint">Everything due for delivery today, so you can confirm at the end of the day that it's all accounted for. Tap a tile below (including Overdue) to see and act on that list - nothing stays open on its own.</p>
-          <div id="fulfillment-summary" style="display:flex; flex-wrap:wrap; gap:12px; margin-bottom:14px;"></div>
-          <div id="fulfillment-drilldown"></div>
-        </div>
-        <div id="jobs-today"></div>
-        <div id="packing-issues-today"></div>
-        <div id="truck-issues-today"></div>
-        <div id="driver-reports-today"></div>
-        <!-- Wooden trays at customers (build-2026-11-11-02) - see
-             renderTrayRoster / getTrayRoster in Code.gs. -->
-        <div id="tray-roster"></div>
-        <div id="dashboard-trucks"></div>
-      </div>
 
+        <div class="dash-tabpane" data-dtab="overview">
+          <div class="card">
+            <h3 style="margin-top:0;">Needs attention</h3>
+            <div id="dash-attention" class="dash-attention"></div>
+          </div>
+          <div class="card">
+            <h3 style="margin-top:0;" id="fulfillment-title">Today's orders - dispatched vs outstanding</h3>
+            <p class="hint" id="fulfillment-hint">Everything due for delivery today, so you can confirm at the end of the day that it's all accounted for. Tap a tile below (including Overdue) to see and act on that list - nothing stays open on its own.</p>
+            <div id="fulfillment-summary" style="display:flex; flex-wrap:wrap; gap:12px; margin-bottom:14px;"></div>
+            <div id="fulfillment-drilldown"></div>
+          </div>
+          <div class="card">
+            <h3 style="margin-top:0;">Find an order</h3>
+            <p class="hint" style="margin-top:0;">Which truck (and day) an order went on - not limited to today. Only orders that were put on a truck show up.</p>
+            <div class="row-inline">
+              <input type="text" id="order-search-input" placeholder="Order number or customer" oninput="debouncedOrderSearch()">
+              <button class="btn btn-secondary" onclick="document.getElementById('order-search-input').value=''; runOrderSearch();">Clear</button>
+            </div>
+            <div id="order-search-results" style="margin-top:10px;"></div>
+          </div>
+        </div>
+
+        <div class="dash-tabpane" data-dtab="live" style="display:none;">
+          <div class="card">
+            <div class="dash-filter-bar"><h3 style="margin:0;">Live deliveries</h3>
+              <button class="btn btn-secondary" onclick="loadLiveDeliveries()">Refresh</button></div>
+            <p class="hint">Every truck today as its driver sees it - tap a truck for its stops, delivered times, empty trays collected and problems reported. Refreshes every minute while open.</p>
+            <div id="live-deliveries"></div>
+          </div>
+        </div>
+
+        <div class="dash-tabpane" data-dtab="trucks" style="display:none;">
+          <div class="card">
+            <h3 style="margin-top:0;">Today's trucks</h3>
+            <p class="hint" style="margin-top:0;">Tap a tile to filter the trucks below. For a past day, use History.</p>
+            <div id="dashboard-summary" style="display:flex; flex-wrap:wrap; gap:12px;"></div>
+          </div>
+          <div id="dashboard-trucks"></div>
+        </div>
+
+        <div class="dash-tabpane" data-dtab="timeline" style="display:none;">
+          <div class="card">
+            <h3 style="margin-top:0;">Dispatch Timeline (Today)</h3>
+            <p class="hint" style="margin-top:0;">How long each truck took from its first order (or trip start, for a trays/jobs-only run) to actually leaving - newest dispatch first.</p>
+            <div id="dashboard-dispatch-timeline"></div>
+          </div>
+          <div class="card">
+            <h3 style="margin-top:0;">Trucks Leaving Late</h3>
+            <p class="hint" style="margin-top:0;" id="late-trucks-hint">Trucks whose first trip of the day has left after 07:00 three or more times recently.</p>
+            <div id="dashboard-late-trucks"></div>
+          </div>
+        </div>
+
+        <div class="dash-tabpane" data-dtab="issues" style="display:none;">
+          <div id="dash-issues-empty" class="card" style="display:none;"><div class="empty">Nothing open - no jobs, packing issues, truck issues or driver reports waiting.</div></div>
+          <div id="driver-reports-today"></div>
+          <div id="packing-issues-today"></div>
+          <div id="truck-issues-today"></div>
+          <div id="jobs-today"></div>
+        </div>
+
+        <div class="dash-tabpane" data-dtab="trays" style="display:none;">
+          <div id="tray-roster"></div>
+          <div id="dash-trays-empty" class="card" style="display:none;"><div class="empty">No tray deliveries recorded yet - this fills up as drivers mark fruit-tray clients delivered.</div></div>
+        </div>
+      </div>
       <!-- History mirrors Dashboard's cards exactly, but for a picked past
            day instead of always today - see loadHistory()/renderDashboard's
            idSuffix param below. Kept as a separate admin-managed tab
@@ -1239,7 +1281,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-11-11-02';
+  var BUILD_VERSION = 'build-2026-11-11-04';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -1419,6 +1461,7 @@
     // Collection (build-2026-11-10-07): collectOrder leaves an already
     // collected order as it is, so a retry can't double it up.
     getOrderForCollection: true, collectOrder: true, getTrayRoster: true,
+    getLiveDeliveries: true,
     listOpenDriverReports: true, listDriverReportsForDate: true, setDriverReportStatus: true
   };
   // Delays before each automatic retry (~0.8s, then ~2s later) - short
@@ -1607,6 +1650,7 @@
     // detail, or switching truck entirely), restarted by showWsTab()
     // whenever they're actually back on the workspace screen.
     if (id !== 'screen-workspace') stopWorkspacePackPolling();
+    if (id !== 'screen-admin') stopLivePolling();
   }
 
   function showLogin() {
@@ -2600,10 +2644,22 @@
   // board, now in the top banner; Timeline moves to the Dashboard), each
   // fed by its own API call now, so each needs its own render function and
   // its own target element id.
+  // Long lists show the newest 8 with a "Show all" button (build-2026-11-11-04).
+  var timelineShowAll = {};
+  var timelineLast = {};
+  function toggleTimelineAll(containerId) {
+    timelineShowAll[containerId] = !timelineShowAll[containerId];
+    var last = timelineLast[containerId];
+    renderDispatchTimeline(last.timeline, containerId, last.emptyMessage);
+  }
+
   function renderDispatchTimeline(timeline, containerId, emptyMessage) {
     var timelineEl = document.getElementById(containerId);
     if (!timelineEl) return;
     timeline = timeline || [];
+    timelineLast[containerId] = { timeline: timeline, emptyMessage: emptyMessage };
+    var fullLength = timeline.length;
+    if (!timelineShowAll[containerId] && fullLength > 8) timeline = timeline.slice(0, 8);
     if (timeline.length === 0) {
       timelineEl.innerHTML = '<div class="empty">' + (emptyMessage || 'No trucks dispatched yet today.') + '</div>';
     } else {
@@ -2627,7 +2683,11 @@
             onTimeBadgeHtml +
           '</div>' +
         '</div>';
-      }).join('');
+      }).join('') +
+      (fullLength > 8
+        ? '<button class="btn btn-secondary" style="margin-top:8px;" onclick="toggleTimelineAll(' + jsStrAttr_(containerId) + ')">' +
+            (timelineShowAll[containerId] ? 'Show newest 8' : 'Show all ' + fullLength) + '</button>'
+        : '');
     }
   }
 
@@ -4128,6 +4188,8 @@
   var lastSettingsPane = 'users';
 
   function showAdminSection(section, btn) {
+    if (section !== 'overview') stopLivePolling();
+    else if (currentDashTab === 'live' && !livePollTimer) showDashTab('live');
     document.querySelectorAll('.admin-section-btn').forEach(function (b) { b.classList.remove('active'); });
     if (btn) btn.classList.add('active');
     var subnav = document.getElementById('admin-subnav');
@@ -4517,26 +4579,167 @@
   // Dashboard is always today - no date picker of its own any more (see
   // History below for any other day). idSuffix '' throughout the render
   // functions below picks out Dashboard's own set of element ids.
+  // ------------------------------------------------------------------
+  // DASHBOARD TABS + LIVE DELIVERIES (build-2026-11-11-04)
+  // ------------------------------------------------------------------
+  var currentDashTab = 'overview';
+  var dashCounts = {};      // filled in by loadDashboard's callbacks
+  var liveData = null, liveExpanded = {}, livePollTimer = null;
+
+  function showDashTab(tab) {
+    currentDashTab = tab;
+    document.querySelectorAll('#dash-tabs button').forEach(function (b) { b.classList.toggle('active', b.getAttribute('data-dtab') === tab); });
+    document.querySelectorAll('#admin-overview .dash-tabpane').forEach(function (p) { p.style.display = p.getAttribute('data-dtab') === tab ? '' : 'none'; });
+    stopLivePolling();
+    if (tab === 'live') { loadLiveDeliveries(); livePollTimer = setInterval(function () { loadLiveDeliveries(true); }, 60000); }
+    window.scrollTo(0, 0);
+  }
+
+  // The Outstanding chip opens the Outstanding list on Overview itself.
+  function openOutstandingFromAttention() {
+    showDashTab('overview');
+    if (fulfillmentSelectedTile[''] !== 'outstanding' && fulfillmentDataByIdSuffix['']) selectFulfillmentTile('', 'outstanding');
+    var el = document.getElementById('fulfillment-drilldown');
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  function stopLivePolling() { if (livePollTimer) { clearInterval(livePollTimer); livePollTimer = null; } }
+
+  function setDashCount(key, value) { dashCounts[key] = value; updateDashTabs(); }
+
+  function updateDashTabs() {
+    var c = dashCounts;
+    var setTab = function (id, n, quiet) {
+      var el = document.getElementById('dash-tab-count-' + id);
+      if (!el) return;
+      el.textContent = n ? String(n) : '';
+      el.classList.toggle('quiet', !!quiet);
+    };
+    var issues = (c.driverReports || 0) + (c.packingIssues || 0) + (c.truckIssues || 0) + (c.jobsPending || 0);
+    setTab('issues', issues);
+    setTab('trays', c.trayProblems || 0);
+    setTab('live', c.onRoad || 0, true);
+    setTab('trucks', c.inProgress || 0, true);
+    var empty = document.getElementById('dash-issues-empty');
+    if (empty) empty.style.display = (c.issuesLoaded && !issues && !(c.jobsTotal)) ? '' : 'none';
+    var traysEmpty = document.getElementById('dash-trays-empty');
+    if (traysEmpty) traysEmpty.style.display = (c.trayLoaded && !c.trayCustomers) ? '' : 'none';
+
+    var chip = function (n, label, tab, alert, okText) {
+      if (n === undefined) return '';
+      var cls = alert && n ? ' alert' : (!n && okText ? ' ok' : '');
+      var action = tab === 'outstanding' ? 'openOutstandingFromAttention()' : 'showDashTab(\'' + tab + '\')';
+      return '<button class="dash-attention-chip' + cls + '" onclick="' + action + '"><strong>' + (n || (okText ? '✓' : '0')) + '</strong>' +
+        escapeHtml(!n && okText ? okText : label) + '</button>';
+    };
+    var el = document.getElementById('dash-attention');
+    if (!el) return;
+    el.innerHTML =
+      chip(c.outstanding, 'orders outstanding today', 'outstanding', true, 'all orders accounted for') +
+      chip(c.onRoad, 'trucks out delivering', 'live', false) +
+      chip(c.inProgress, 'trucks still loading', 'trucks', false, 'no trucks still loading') +
+      chip(issues === 0 && !c.issuesLoaded ? undefined : issues, 'open issues and reports', 'issues', true, 'no open issues') +
+      chip(c.trayProblems, 'customers not returning trays', 'trays', true, 'trays coming back') +
+      chip(c.lateTrucks, 'trucks often leaving late', 'timeline', true, 'no trucks often late');
+  }
+
+  function loadLiveDeliveries(silent) {
+    callApi('getLiveDeliveries', [], { silent: !!silent }).then(function (data) {
+      liveData = data;
+      setDashCount('onRoad', data.trips.filter(function (t) { return t.status === 'Dispatched' && t.deliveredCount < t.stopCount; }).length);
+      renderLiveDeliveries();
+    }).catch(function (err) {
+      if (err && /Unknown action/.test(err.message || '')) {
+        document.getElementById('live-deliveries').innerHTML = '<div class="hint">Needs the latest Code.gs to be deployed.</div>';
+        return;
+      }
+      if (!silent) showFatalError(err);
+    });
+  }
+
+  function toggleLiveTrip(id) { liveExpanded[id] = !liveExpanded[id]; renderLiveDeliveries(); }
+
+  function renderLiveDeliveries() {
+    var el = document.getElementById('live-deliveries');
+    var trips = (liveData && liveData.trips) || [];
+    if (trips.length === 0) { el.innerHTML = '<div class="empty">No trucks out yet today.</div>'; return; }
+    var stopRow = function (name, sub, st) {
+      return '<div class="dash-order-row"><div><div>' + escapeHtml(name) + '</div>' + (sub ? '<div class="hint">' + escapeHtml(sub) + '</div>' : '') +
+        (st.collected ? '<div class="hint">Empty trays collected: ' + escapeHtml(trayCountText_(st.collected, 'none')) + '</div>' : '') + '</div>' +
+        (st.deliveredAt ? '<span class="badge badge-complete">Delivered ' + formatTime(st.deliveredAt) + '</span>' : '<span class="badge badge-pending">Not yet</span>') + '</div>';
+    };
+    el.innerHTML = trips.map(function (t) {
+      var pct = t.stopCount ? Math.round(100 * t.deliveredCount / t.stopCount) : 0;
+      var status = t.status !== 'Dispatched' ? 'Still loading'
+        : (t.stopCount && t.deliveredCount >= t.stopCount ? 'All delivered' : 'Out since ' + formatTime(t.dispatchedAt));
+      var open = !!liveExpanded[t.sessionId];
+      var body = !open ? '' : '<div class="live-trip-body">' +
+        (t.orders.length ? '<div style="font-weight:600; margin-top:4px;">Orders</div>' + t.orders.map(function (o) { return stopRow(o.customer, o.orderNumber, o); }).join('') : '') +
+        (t.trays.length ? '<div style="font-weight:600; margin-top:10px;">Fruit tray clients</div>' + t.trays.map(function (st) { return stopRow(customerParts_(st.customer).name, st.products, st); }).join('') : '') +
+        (!t.orders.length && !t.trays.length ? '<div class="hint">No stops on this trip.</div>' : '') +
+        (t.reports.length ? '<div style="font-weight:600; margin-top:10px;">Reported from the road</div>' + t.reports.map(function (r) {
+          return '<div class="hint" style="padding:3px 0;">' + formatTime(r.loggedAt) + ' - ' + escapeHtml(r.category) + (r.customer ? ' (' + escapeHtml(customerParts_(r.customer).name) + ')' : '') +
+            (r.note ? ': ' + escapeHtml(r.note) : '') + ' <span class="badge ' + (r.status === 'Resolved' ? 'badge-complete' : 'badge-pending') + '">' + escapeHtml(r.status) + '</span></div>';
+        }).join('') : '') + '</div>';
+      return '<div class="live-trip"><div class="live-trip-head" onclick="toggleLiveTrip(' + jsStrAttr_(t.sessionId) + ')"><div style="flex:1;">' +
+        '<div><strong>' + escapeHtml(t.truckName) + (t.tripNumber > 1 ? ' (Trip ' + t.tripNumber + ')' : '') + '</strong>' +
+          (t.openReports ? ' <span class="badge badge-pack-overdue">' + t.openReports + ' problem' + (t.openReports === 1 ? '' : 's') + '</span>' : '') + '</div>' +
+        '<div class="hint">' + escapeHtml([t.drivers || 'No driver entered', t.route ? 'Route: ' + t.route : ''].filter(Boolean).join(' · ')) + '</div>' +
+        '<div class="hint">' + escapeHtml(status) + ' · ' + t.deliveredCount + ' of ' + t.stopCount + ' delivered' + (t.lastDeliveredAt ? ', last ' + formatTime(t.lastDeliveredAt) : '') + '</div>' +
+        '<div class="live-bar"><div style="width:' + pct + '%;"></div></div>' +
+        '</div><span class="hint">' + (open ? '▲' : '▼') + '</span></div>' + body + '</div>';
+    }).join('');
+  }
+
   function loadDashboard() {
     var todayStr = todayDateInputValue();
-    callApi('getDashboardForDate', [todayStr]).then(function (data) { renderDashboard(data, ''); }).catch(showFatalError);
+    callApi('getDashboardForDate', [todayStr]).then(function (data) {
+      renderDashboard(data, '');
+      setDashCount('inProgress', data.summary.inProgressCount || 0);
+    }).catch(showFatalError);
+    // Live tab's own count (trucks out delivering) - also shown on Overview.
+    callApi('getLiveDeliveries', [], { silent: true }).then(function (data) {
+      liveData = data;
+      setDashCount('onRoad', data.trips.filter(function (t) { return t.status === 'Dispatched' && t.deliveredCount < t.stopCount; }).length);
+      if (currentDashTab === 'live') renderLiveDeliveries();
+    }).catch(function () { /* older server - Live tab says so when opened */ });
     // Trucks Leaving Late (build-2026-10-27-05) - Dashboard-only, its own
     // call (not folded into getDashboardForDate) since it's a rolling
     // 30-day window, not something scoped to todayStr the way everything
     // else on this pane is.
-    callApi('getLateTruckLeaderboard', []).then(function (data) { renderLateTruckLeaderboard(data); }).catch(showFatalError);
-    callApi('getOrderFulfillmentOverview', [todayStr]).then(function (data) { renderFulfillmentOverview(data, ''); }).catch(showFatalError);
-    callApi('listJobsForDate', [todayStr]).then(function (list) { renderJobsToday(list, ''); }).catch(showFatalError);
+    callApi('getLateTruckLeaderboard', []).then(function (data) {
+      renderLateTruckLeaderboard(data);
+      setDashCount('lateTrucks', (data.trucks || []).length);
+    }).catch(showFatalError);
+    callApi('getOrderFulfillmentOverview', [todayStr]).then(function (data) {
+      renderFulfillmentOverview(data, '');
+      setDashCount('outstanding', data.today.outstandingCount || 0);
+    }).catch(showFatalError);
+    callApi('listJobsForDate', [todayStr]).then(function (list) {
+      renderJobsToday(list, '');
+      dashCounts.jobsTotal = list.length;
+      setDashCount('jobsPending', list.filter(function (j) { return j.status !== 'Done'; }).length);
+    }).catch(showFatalError);
     // Packing/Truck Issues on the Dashboard show every still-OPEN one
     // regardless of which day it was raised (Shane's 2026-09-22 request -
     // unlike Jobs, these should stay visible until resolved, not just on
     // the day they were flagged/reported). History keeps its own
     // per-picked-day view below via listPackingIssuesForDate/
     // listTruckIssuesForDate instead.
-    callApi('listOpenPackingIssues', []).then(function (list) { renderPackingIssuesToday(list, ''); }).catch(showFatalError);
-    callApi('listOpenTruckIssues', []).then(function (list) { renderTruckIssuesToday(list, ''); }).catch(showFatalError);
-    callApi('listOpenDriverReports', []).then(function (list) { renderDriverReports(list, ''); }).catch(ignoreUnknownAction_);
-    callApi('getTrayRoster', []).then(function (data) { trayRosterData = data; renderTrayRoster(); }).catch(ignoreUnknownAction_);
+    callApi('listOpenPackingIssues', []).then(function (list) { renderPackingIssuesToday(list, ''); setDashCount('packingIssues', list.length); }).catch(showFatalError);
+    callApi('listOpenTruckIssues', []).then(function (list) {
+      renderTruckIssuesToday(list, '');
+      dashCounts.issuesLoaded = true;
+      setDashCount('truckIssues', list.length);
+    }).catch(showFatalError);
+    callApi('listOpenDriverReports', []).then(function (list) { renderDriverReports(list, ''); setDashCount('driverReports', list.length); }).catch(ignoreUnknownAction_);
+    callApi('getTrayRoster', []).then(function (data) {
+      trayRosterData = data;
+      renderTrayRoster();
+      dashCounts.trayLoaded = true;
+      dashCounts.trayCustomers = (data.customers || []).length;
+      setDashCount('trayProblems', (data.customers || []).filter(function (c) { return c.missedInARow >= 2; }).length);
+    }).catch(function (err) { dashCounts.trayLoaded = true; updateDashTabs(); ignoreUnknownAction_(err); });
   }
 
   // Wooden trays at customers (build-2026-11-11-02): per customer, trays

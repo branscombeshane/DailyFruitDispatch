@@ -318,6 +318,7 @@ var API_ACTIONS = {
   driverMarkTrayDelivered: driverMarkTrayDelivered,
   getOrderForCollection: getOrderForCollection,
   getTrayRoster: getTrayRoster,
+  getLiveDeliveries: getLiveDeliveries,
   collectOrder: collectOrder,
   getMyDriverTrips: getMyDriverTrips,
   driverMarkDelivered: driverMarkDelivered,
@@ -386,7 +387,7 @@ function buildActionRoles_() {
       'listJobsForDate', 'listPackingIssuesForDate', 'listOpenPackingIssues',
       'setPackingIssueStatus', 'listTruckIssuesForDate', 'listOpenTruckIssues',
       'setTruckIssueStatus', 'listOpenDriverReports', 'listDriverReportsForDate', 'setDriverReportStatus',
-      'refreshTrayStops', 'getTrayRoster'
+      'refreshTrayStops', 'getTrayRoster', 'getLiveDeliveries'
     ]],
     // Settings: users, trucks, drivers, data source.
     [ADMIN_ONLY, [
@@ -4940,4 +4941,73 @@ function diagnoseDashboardSpeed() {
   var d = getDashboardForDate(todayString_());
   Logger.log('getDashboardForDate(today): ' + (Date.now() - t1) + ' ms for ' + d.trucks.length + ' truck trip(s), ' +
     d.summary.totalOrders + ' order(s). Paste this log back.');
+}
+
+/**
+ * Dashboard > Live deliveries (build-2026-11-11-04): every truck trip today
+ * with what its driver sees - route, drivers, each stop (orders, plus the
+ * truck's Zoho fruit-tray clients on its first trip of the day) with
+ * delivered time and empty trays collected, and the problems reported on
+ * the road. Same data as getMyDriverTrips, for all trucks, read-only.
+ */
+function getLiveDeliveries() {
+  var today = todayString_();
+  var sessions = sheetToObjects_(getSheet_(SHEET_NAMES.SESSIONS))
+    .filter(function (s) { return normalizeDateStr_(s.Date) === today; })
+    .sort(function (a, b) { return String(a.StartedAt).localeCompare(String(b.StartedAt)); });
+  var tripNumber = {}, perTruck = {}, firstTripOfTruck = {};
+  sessions.forEach(function (s) {
+    perTruck[s.TruckID] = (perTruck[s.TruckID] || 0) + 1;
+    tripNumber[s.ID] = perTruck[s.TruckID];
+    if (!firstTripOfTruck[s.TruckID]) firstTripOfTruck[s.TruckID] = s.ID;
+  });
+  var ids = {};
+  sessions.forEach(function (s) { ids[s.ID] = true; });
+  var orderChecks = sheetToObjects_(getSheet_(SHEET_NAMES.ORDER_CHECKS)).filter(function (c) { return ids[c.TruckSessionID]; });
+  var logs = driverLogsForDate_(today);
+  var deliveredByCheck = {}, deliveredByTray = {};
+  logs.forEach(function (l) {
+    if (l.Type !== DRIVER_LOG_TYPES.DELIVERED) return;
+    if (l.OrderCheckID) deliveredByCheck[l.OrderCheckID] = { at: l.LoggedAt, by: l.DriverName };
+    if (l.TrayStopID) deliveredByTray[l.TrayStopID] = { at: l.LoggedAt, by: l.DriverName };
+  });
+  var trucksById = {};
+  sheetToObjects_(getSheet_(SHEET_NAMES.TRUCKS)).forEach(function (t) { trucksById[t.ID] = t; });
+  var trayByVehicle = trayStopsByVehicle_(today);
+  var ledger = trayLedgerByStopId_(today);
+
+  var trips = sessions.map(function (s) {
+    var truck = trucksById[s.TruckID];
+    var orders = orderChecks.filter(function (c) { return c.TruckSessionID === s.ID; }).map(function (c) {
+      var d = deliveredByCheck[c.ID];
+      return { orderNumber: c.OrderNumber, customer: c.Customer, deliveredAt: d ? d.at : '', deliveredBy: d ? d.by : '' };
+    }).sort(function (a, b) { return String(a.customer).localeCompare(String(b.customer)); });
+    var trays = [];
+    if (truck && truck.ZohoVehicleID && firstTripOfTruck[s.TruckID] === s.ID) {
+      trays = (trayByVehicle[String(truck.ZohoVehicleID)] || []).map(function (st) {
+        var d = deliveredByTray[st.ID], l = ledger[st.ID];
+        return { customer: st.Customer, products: st.Products, deliveredAt: d ? d.at : '', deliveredBy: d ? d.by : '',
+          collected: l ? { small: l.CollectedSmall, medium: l.CollectedMedium, large: l.CollectedLarge } : null };
+      });
+    }
+    var reports = logs.filter(function (l) { return l.TruckSessionID === s.ID && l.Type !== DRIVER_LOG_TYPES.DELIVERED; }).map(function (l) {
+      return { type: l.Type, category: l.Category, note: l.Note, customer: l.Customer, loggedAt: l.LoggedAt, by: l.DriverName, status: l.Status };
+    }).sort(function (a, b) { return String(b.loggedAt).localeCompare(String(a.loggedAt)); });
+    var all = orders.concat(trays);
+    var lastAt = all.reduce(function (m, x) { return x.deliveredAt && x.deliveredAt > m ? x.deliveredAt : m; }, '');
+    return {
+      sessionId: s.ID, truckName: s.TruckName, tripNumber: tripNumber[s.ID], status: s.Status,
+      dispatchedAt: s.DispatchedAt || '', drivers: s.Driver || '', route: s.Route || '',
+      orders: orders, trays: trays, reports: reports,
+      stopCount: all.length, deliveredCount: all.filter(function (x) { return x.deliveredAt; }).length,
+      lastDeliveredAt: lastAt, openReports: reports.filter(function (r) { return r.status === ISSUE_STATUS.OPEN; }).length
+    };
+  });
+  // On the road first (dispatched, not finished), then still loading, then done.
+  var rank = function (t) {
+    if (t.status !== SESSION_STATUS.DISPATCHED) return 1;
+    return (t.stopCount && t.deliveredCount >= t.stopCount) ? 2 : 0;
+  };
+  trips.sort(function (a, b) { return (rank(a) - rank(b)) || String(a.truckName).localeCompare(String(b.truckName), undefined, { numeric: true }); });
+  return { date: today, trips: trips };
 }

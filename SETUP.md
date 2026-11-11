@@ -774,6 +774,29 @@ list further, the same way the search and date work together. Clearing
 either the text or the date (or tapping **Clear**) goes back to searching
 every day at once, same as before this was added.
 
+## Route order for drivers (build-2026-11-11-05)
+
+A driver's orders and fruit-tray clients show as one numbered list, in the
+order the truck usually delivers them.
+
+- **Per truck:** each truck remembers its customers' stop order (`StopOrder`
+  tab, created automatically, one row per truck).
+- **Learned:** every time a driver marks a stop delivered, today's
+  delivered stops move into the order they were actually delivered in. Only
+  today's customers move; everyone else on that truck keeps their place.
+- **Set by the driver:** **Change order** shows ▲ ▼ buttons, and **Save
+  order** keeps that order for the truck from then on. It's learned from
+  again as they deliver.
+- **New customers** (never on that truck before) are listed last until
+  their place is learned. The driver sees a note saying how many.
+- **Next stop:** the first stop not yet delivered is highlighted as Next.
+  **Open in Maps** searches Google Maps for the tray client's address, or
+  the customer name for an order (orders have no address).
+- **Live deliveries** on the Dashboard lists each truck's stops in the same
+  order.
+- No automatic map optimisation: by design, the order comes from how the
+  drivers actually run the routes.
+
 ## Dashboard layout and Live deliveries (build-2026-11-11-04)
 
 The Dashboard is split into tabs instead of one long page. Tab labels show

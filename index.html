@@ -375,6 +375,18 @@
     .driver-stop-actions { display: flex; gap: 8px; flex-shrink: 0; }
     .driver-stop-actions .btn { padding: 12px 14px; font-size: 15px; }
     .driver-delivered .who { color: var(--muted, #6b7280); }
+    /* Route order (build-2026-11-11-05) */
+    .stop-num { flex-shrink: 0; width: 28px; height: 28px; border-radius: 50%; background: #e6e9e7; color: #333; font-weight: 700; font-size: 14px; display: flex; align-items: center; justify-content: center; }
+    .driver-stop.next-stop { background: #fff8ec; margin: 0 -10px; padding-left: 10px; padding-right: 10px; border-radius: 8px; }
+    .driver-stop.next-stop .stop-num { background: var(--green); color: #fff; }
+    .stop-kind { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 6px; background: #eef2ef; color: #555; margin-left: 6px; vertical-align: middle; }
+    .map-link { font-size: 13px; color: var(--green-dark, #2e7d32); text-decoration: underline; }
+    .reorder-btns { display: flex; flex-direction: column; gap: 4px; }
+    /* Routed stops: details full width, buttons on their own row underneath. */
+    .driver-stop.routed { flex-direction: column; align-items: stretch; }
+    .driver-stop.routed .driver-stop-actions { padding-left: 38px; }
+    .driver-stop.routed .driver-stop-actions .btn { flex: 1; }
+    .reorder-btns button { padding: 6px 12px; font-size: 14px; border: 1px solid var(--border); border-radius: 8px; background: #fff; }
     .dash-order-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-top: 1px solid var(--border); font-size: 14px; }
     .dash-nostock-detail { font-size: 12px; color: var(--red); margin-top: 2px; }
     .dash-shortpacked-detail { font-size: 12px; color: var(--amber); margin-top: 2px; }
@@ -1281,7 +1293,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-11-11-04';
+  var BUILD_VERSION = 'build-2026-11-11-05';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -1462,6 +1474,8 @@
     // collected order as it is, so a retry can't double it up.
     getOrderForCollection: true, collectOrder: true, getTrayRoster: true,
     getLiveDeliveries: true,
+    // Saving a stop order sets the same order again if repeated.
+    driverSetStopOrder: true,
     listOpenDriverReports: true, listDriverReportsForDate: true, setDriverReportStatus: true
   };
   // Delays before each automatic retry (~0.8s, then ~2s later) - short
@@ -1896,6 +1910,8 @@
       return;
     }
     el.innerHTML = trips.map(function (t) {
+      // Newer servers send one list in route order (build-2026-11-11-05).
+      if (t.routeStops) return renderDriverTripRouted_(t);
       var deliveredCount = t.stops.filter(function (s) { return s.deliveredAt; }).length;
       var statusLine = t.status === 'Dispatched'
         ? 'Dispatched ' + formatTime(t.dispatchedAt)
@@ -1957,6 +1973,119 @@
         reportsHtml +
       '</div>';
     }).join('');
+  }
+
+  // ------------------------------------------------------------------
+  // ROUTE ORDER on the driver screen (build-2026-11-11-05)
+  // ------------------------------------------------------------------
+  var driverReorder = {}; // sessionId -> working list of stop keys while "Change order" is open
+
+  // Google Maps search for a stop: a tray client's address (last part of
+  // "Company | Contact | Address"), otherwise the customer name.
+  function stopMapUrl_(st) {
+    var parts = String(st.customer || '').split(' | ');
+    var q = st.kind === 'tray' && parts.length > 1 ? parts[0] + ', ' + parts[parts.length - 1] : parts[0];
+    return 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(q);
+  }
+
+  function renderDriverTripRouted_(t) {
+    var editing = driverReorder[t.sessionId];
+    var byKey = {};
+    t.routeStops.forEach(function (st) { byKey[st.key] = st; });
+    var list = editing ? editing.map(function (k) { return byKey[k]; }).filter(Boolean) : t.routeStops;
+    var deliveredCount = list.filter(function (st) { return st.deliveredAt; }).length;
+    var nextKey = null;
+    list.some(function (st) { if (!st.deliveredAt) { nextKey = st.key; return true; } return false; });
+    var statusLine = t.status === 'Dispatched' ? 'Dispatched ' + formatTime(t.dispatchedAt) : 'Still being loaded - not dispatched yet';
+
+    var rows = list.length === 0 ? '<div class="hint" style="padding:10px 0;">No stops on this trip.</div>' : list.map(function (st, i) {
+      var done = !!st.deliveredAt;
+      var cp = customerParts_(st.customer);
+      var isNext = !editing && st.key === nextKey;
+      var sid = jsStrAttr_(t.sessionId), id = jsStrAttr_(st.id);
+      var actions;
+      if (editing) {
+        actions = '<div class="reorder-btns">' +
+          '<button ' + (i === 0 ? 'disabled' : '') + ' onclick="moveDriverStop(' + sid + ', ' + i + ', -1)">▲</button>' +
+          '<button ' + (i === list.length - 1 ? 'disabled' : '') + ' onclick="moveDriverStop(' + sid + ', ' + i + ', 1)">▼</button></div>';
+      } else if (st.kind === 'tray') {
+        actions = (done
+          ? '<button class="btn btn-secondary" onclick="driverSetTrayDelivered(' + sid + ', ' + id + ', false)">Undo</button>'
+          : '<button class="btn btn-primary" onclick="driverSetTrayDelivered(' + sid + ', ' + id + ', true)">Delivered</button>') +
+          '<button class="btn btn-secondary" onclick="openDriverReport(' + sid + ', \'\', ' + id + ')">Problem</button>';
+      } else {
+        actions = (done
+          ? '<button class="btn btn-secondary" onclick="driverSetDelivered(' + id + ', false)">Undo</button>'
+          : '<button class="btn btn-primary" onclick="driverSetDelivered(' + id + ', true)">Delivered</button>') +
+          '<button class="btn btn-secondary" onclick="openDriverReport(' + sid + ', ' + id + ')">Problem</button>';
+      }
+      return '<div class="driver-stop' + (editing ? '' : ' routed') + (done ? ' driver-delivered' : '') + (isNext ? ' next-stop' : '') + '">' +
+        '<div style="display:flex; gap:10px; align-items:flex-start;"><div class="stop-num">' + (i + 1) + '</div><div>' +
+          '<div class="who">' + escapeHtml(cp.name) + (st.kind === 'tray' ? '<span class="stop-kind">Fruit trays</span>' : '') + (isNext ? '<span class="stop-kind" style="background:var(--green);color:#fff;">Next</span>' : '') + '</div>' +
+          (cp.rest ? '<div class="hint">' + escapeHtml(cp.rest) + '</div>' : '') +
+          '<div class="hint">' + escapeHtml(st.detail || '') + '</div>' +
+          (done ? '<div class="when">Delivered ' + formatTime(st.deliveredAt) + (st.deliveredBy ? ' by ' + escapeHtml(st.deliveredBy) : '') +
+            (st.collected ? ' · Empty trays collected: ' + escapeHtml(trayCountText_(st.collected, 'none')) : '') + '</div>' : '') +
+          (!editing && !done ? '<a class="map-link" href="' + escapeHtml(stopMapUrl_(st)) + '" target="_blank" rel="noopener">Open in Maps</a>' : '') +
+        '</div></div>' +
+        '<div class="driver-stop-actions">' + actions + '</div></div>';
+    }).join('');
+
+    var unknown = list.length - (t.routeKnown || 0);
+    var orderBar = editing
+      ? '<div style="display:flex; gap:8px; margin:8px 0;"><button class="btn btn-primary" style="flex:1;" onclick="saveDriverStopOrder(' + jsStrAttr_(t.sessionId) + ')">Save order</button>' +
+        '<button class="btn btn-secondary" style="flex:1;" onclick="cancelDriverReorder(' + jsStrAttr_(t.sessionId) + ')">Cancel</button></div>' +
+        '<div class="hint">Use ▲ ▼ to put the stops in the order you\'ll drive them. Saving keeps this order for this truck next time too.</div>'
+      : (list.length > 1 ? '<button class="btn btn-secondary btn-block" style="margin:8px 0;" onclick="startDriverReorder(' + jsStrAttr_(t.sessionId) + ')">Change order</button>' : '') +
+        (unknown > 0 && list.length > 1 ? '<div class="hint">' + unknown + ' stop' + (unknown === 1 ? ' is' : 's are') + ' new on this truck and listed last - the app learns their place from the order you deliver in.</div>' : '');
+
+    var reportsHtml = t.reports.length === 0 ? '' :
+      '<div style="margin-top:12px;"><div style="font-weight:600; margin-bottom:4px;">Reported on this trip</div>' +
+      t.reports.map(function (r) {
+        return '<div class="hint" style="padding:4px 0;">' + formatTime(r.loggedAt) + ' - ' + escapeHtml(r.category) +
+          (r.customer ? ' (' + escapeHtml(customerParts_(r.customer).name) + ')' : '') + (r.note ? ': ' + escapeHtml(r.note) : '') +
+          ' <span class="badge ' + (r.status === 'Resolved' ? 'badge-complete' : 'badge-pending') + '">' + escapeHtml(r.status) + '</span></div>';
+      }).join('') + '</div>';
+
+    return '<div class="card">' +
+      '<h3 style="margin:0;">' + escapeHtml(t.truckName) + (t.tripNumber > 1 ? ' (Trip ' + t.tripNumber + ')' : '') + '</h3>' +
+      '<div class="hint">' + escapeHtml(statusLine) + (t.route ? ' &middot; Route: ' + escapeHtml(t.route) : '') + '</div>' +
+      '<div class="hint">Drivers: ' + escapeHtml(t.drivers) + '</div>' +
+      '<div style="margin:10px 0 4px; font-weight:600;">Stops in route order - ' + deliveredCount + ' of ' + list.length + ' delivered</div>' +
+      orderBar + rows +
+      (!editing ? '<button class="btn btn-danger btn-block" style="margin-top:12px;" onclick="openDriverReport(' + jsStrAttr_(t.sessionId) + ', \'\')">Report road / vehicle incident</button>' : '') +
+      reportsHtml +
+    '</div>';
+  }
+
+  function findDriverTrip_(sessionId) {
+    return ((driverData && driverData.trips) || []).filter(function (t) { return t.sessionId === sessionId; })[0];
+  }
+
+  function startDriverReorder(sessionId) {
+    var t = findDriverTrip_(sessionId);
+    if (!t) return;
+    driverReorder[sessionId] = t.routeStops.map(function (st) { return st.key; });
+    renderDriverTrips();
+  }
+
+  function cancelDriverReorder(sessionId) { delete driverReorder[sessionId]; renderDriverTrips(); }
+
+  function moveDriverStop(sessionId, index, dir) {
+    var list = driverReorder[sessionId];
+    var j = index + dir;
+    if (!list || j < 0 || j >= list.length) return;
+    var tmp = list[index]; list[index] = list[j]; list[j] = tmp;
+    renderDriverTrips();
+  }
+
+  function saveDriverStopOrder(sessionId) {
+    var keys = driverReorder[sessionId];
+    if (!keys) return;
+    callApi('driverSetStopOrder', [sessionId, keys]).then(function () {
+      delete driverReorder[sessionId];
+      loadDriverTrips();
+    }).catch(showFatalError);
   }
 
   // Zoho tray customers come as "Company | Contact | Contact | Address" -
@@ -4673,7 +4802,16 @@
       var status = t.status !== 'Dispatched' ? 'Still loading'
         : (t.stopCount && t.deliveredCount >= t.stopCount ? 'All delivered' : 'Out since ' + formatTime(t.dispatchedAt));
       var open = !!liveExpanded[t.sessionId];
-      var body = !open ? '' : '<div class="live-trip-body">' +
+      var body = !open ? '' : t.routeStops ? '<div class="live-trip-body">' +
+        (t.routeStops.length ? '<div style="font-weight:600; margin-top:4px;">Stops in route order</div>' + t.routeStops.map(function (st, i) {
+          var cp = customerParts_(st.customer);
+          return stopRow((i + 1) + '. ' + cp.name + (st.kind === 'tray' ? ' (fruit trays)' : ''), st.detail, st);
+        }).join('') : '<div class="hint">No stops on this trip.</div>') +
+        (t.reports.length ? '<div style="font-weight:600; margin-top:10px;">Reported from the road</div>' + t.reports.map(function (r) {
+          return '<div class="hint" style="padding:3px 0;">' + formatTime(r.loggedAt) + ' - ' + escapeHtml(r.category) + (r.customer ? ' (' + escapeHtml(customerParts_(r.customer).name) + ')' : '') +
+            (r.note ? ': ' + escapeHtml(r.note) : '') + ' <span class="badge ' + (r.status === 'Resolved' ? 'badge-complete' : 'badge-pending') + '">' + escapeHtml(r.status) + '</span></div>';
+        }).join('') : '') + '</div>'
+      : '<div class="live-trip-body">' +
         (t.orders.length ? '<div style="font-weight:600; margin-top:4px;">Orders</div>' + t.orders.map(function (o) { return stopRow(o.customer, o.orderNumber, o); }).join('') : '') +
         (t.trays.length ? '<div style="font-weight:600; margin-top:10px;">Fruit tray clients</div>' + t.trays.map(function (st) { return stopRow(customerParts_(st.customer).name, st.products, st); }).join('') : '') +
         (!t.orders.length && !t.trays.length ? '<div class="hint">No stops on this trip.</div>' : '') +

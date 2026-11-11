@@ -29,7 +29,8 @@ var SHEET_NAMES = {
   LATE_REASONS: 'LateReasons',
   DRIVER_LOGS: 'DriverLogs',
   TRAY_STOPS: 'TrayStops',
-  TRAY_LEDGER: 'TrayLedger'
+  TRAY_LEDGER: 'TrayLedger',
+  STOP_ORDER: 'StopOrder'
 };
 
 var SESSION_STATUS = { IN_PROGRESS: 'In Progress', DISPATCHED: 'Dispatched' };
@@ -221,6 +222,12 @@ var SHEET_HEADERS = {
     'DeliveredSmall', 'DeliveredMedium', 'DeliveredLarge', 'CollectedSmall', 'CollectedMedium', 'CollectedLarge', 'LoggedAt']
 };
 var TRAY_LEDGER_KEEP_DAYS = 365;
+// Remembered stop order per truck (build-2026-11-11-05) - one row per
+// truck; Sequence is a JSON list of stop keys ("o:<customer>" for an order,
+// "t:<tray customer>" for a fruit-tray client) in delivery order. Learned
+// from the order drivers actually deliver in, and set directly when a
+// driver reorders their stops. See routeSequenceMerge_.
+SHEET_HEADERS.StopOrder = ['TruckID', 'Sequence', 'UpdatedAt', 'UpdatedBy', 'Source'];
 
 // ---------------------------------------------------------------------------
 // WEB APP ENTRY POINT
@@ -319,6 +326,7 @@ var API_ACTIONS = {
   getOrderForCollection: getOrderForCollection,
   getTrayRoster: getTrayRoster,
   getLiveDeliveries: getLiveDeliveries,
+  driverSetStopOrder: driverSetStopOrder,
   collectOrder: collectOrder,
   getMyDriverTrips: getMyDriverTrips,
   driverMarkDelivered: driverMarkDelivered,
@@ -360,7 +368,7 @@ function buildActionRoles_() {
   var DRIVERS_ONLY = [ROLES.DRIVER];
   var groups = [
     // Drivers only ever see their own trips today (see getMyDriverTrips).
-    [DRIVERS_ONLY, ['getMyDriverTrips', 'driverMarkDelivered', 'driverReport', 'driverMarkTrayDelivered']],
+    [DRIVERS_ONLY, ['getMyDriverTrips', 'driverMarkDelivered', 'driverReport', 'driverMarkTrayDelivered', 'driverSetStopOrder']],
     // Customer Care's order lookup - also used by the Dashboard's own
     // order search, so every role gets it.
     [ALL, ['findOrderAcrossTrucks']],
@@ -4509,6 +4517,12 @@ function driverSessionOrThrow_(sessionId, driver) {
  * time if logged) and the problems/incidents already reported on it.
  */
 function getMyDriverTrips() {
+  var result = getMyDriverTripsUnordered_();
+  attachRouteOrder_(result.trips, 'driver');
+  return result;
+}
+
+function getMyDriverTripsUnordered_() {
   var driver = currentDriver_();
   var today = todayString_();
   var allToday = sheetToObjects_(getSheet_(SHEET_NAMES.SESSIONS))
@@ -4558,7 +4572,7 @@ function getMyDriverTrips() {
         if (l.Type === DRIVER_LOG_TYPES.DELIVERED && l.OrderCheckID) delivered[l.OrderCheckID] = { at: l.LoggedAt, by: l.DriverName };
       });
       return {
-        sessionId: s.ID, truckName: s.TruckName, tripNumber: tripNumber[s.ID], status: s.Status,
+        sessionId: s.ID, truckId: s.TruckID, truckName: s.TruckName, tripNumber: tripNumber[s.ID], status: s.Status,
         route: s.Route || '', drivers: s.Driver || '', dispatchedAt: s.DispatchedAt || '',
         trayStops: trayStops,
         stops: orderChecks.filter(function (c) { return c.TruckSessionID === s.ID; }).map(function (c) {
@@ -4600,6 +4614,7 @@ function driverMarkDelivered(orderCheckId, delivered) {
         OrderCheckID: check.ID, OrderNumber: check.OrderNumber, Customer: check.Customer,
         Category: '', Note: '', LoggedAt: at, Status: '', ResolvedByName: '', ResolvedAt: ''
       });
+      learnStopOrderFromSession_(session, driver.name);
       return { ok: true, deliveredAt: at };
     }
     existing.forEach(function (l) { deleteRowById_(sheet, l.ID); });
@@ -4885,6 +4900,7 @@ function driverMarkTrayDelivered(sessionId, trayStopId, delivered, collected) {
         DeliveredSmall: dropped.small, DeliveredMedium: dropped.medium, DeliveredLarge: dropped.large,
         CollectedSmall: cS, CollectedMedium: cM, CollectedLarge: cL, LoggedAt: at
       });
+      learnStopOrderFromSession_(session, driver.name);
       return { ok: true, deliveredAt: at };
     }
     existing.forEach(function (l) { deleteRowById_(sheet, l.ID); });
@@ -4951,6 +4967,12 @@ function diagnoseDashboardSpeed() {
  * the road. Same data as getMyDriverTrips, for all trucks, read-only.
  */
 function getLiveDeliveries() {
+  var result = getLiveDeliveriesUnordered_();
+  attachRouteOrder_(result.trips, 'live');
+  return result;
+}
+
+function getLiveDeliveriesUnordered_() {
   var today = todayString_();
   var sessions = sheetToObjects_(getSheet_(SHEET_NAMES.SESSIONS))
     .filter(function (s) { return normalizeDateStr_(s.Date) === today; })
@@ -4998,7 +5020,7 @@ function getLiveDeliveries() {
     return {
       sessionId: s.ID, truckName: s.TruckName, tripNumber: tripNumber[s.ID], status: s.Status,
       dispatchedAt: s.DispatchedAt || '', drivers: s.Driver || '', route: s.Route || '',
-      orders: orders, trays: trays, reports: reports,
+      truckId: s.TruckID, orders: orders, trays: trays, reports: reports,
       stopCount: all.length, deliveredCount: all.filter(function (x) { return x.deliveredAt; }).length,
       lastDeliveredAt: lastAt, openReports: reports.filter(function (r) { return r.status === ISSUE_STATUS.OPEN; }).length
     };
@@ -5010,4 +5032,146 @@ function getLiveDeliveries() {
   };
   trips.sort(function (a, b) { return (rank(a) - rank(b)) || String(a.truckName).localeCompare(String(b.truckName), undefined, { numeric: true }); });
   return { date: today, trips: trips };
+}
+
+// ---------------------------------------------------------------------------
+// STOP ORDER (route order) - build-2026-11-11-05
+//
+// Each truck remembers the order its customers get delivered in. A driver's
+// stops (orders + fruit-tray clients, one list) are shown in that order;
+// customers not seen on that truck before go last. The order is learned
+// every time a driver marks a stop delivered (the order they actually went
+// in) and set directly when a driver reorders their stops. Either way only
+// TODAY's customers move - the rest of the truck's remembered order is
+// left where it was (routeSequenceMerge_).
+// ---------------------------------------------------------------------------
+
+function stopKey_(kind, customer) {
+  return (kind === 'tray' ? 't:' : 'o:') + String(customer || '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+/**
+ * Puts newOrder's keys into the same relative order inside oldSeq without
+ * moving anything else: the slots today's known customers held are refilled
+ * in the new order; customers new to this truck go right after the stop
+ * before them in newOrder (or before the next known one, or at the end).
+ */
+function routeSequenceMerge_(oldSeq, newOrder) {
+  var inNew = {};
+  newOrder.forEach(function (k) { inNew[k] = true; });
+  var known = newOrder.filter(function (k) { return oldSeq.indexOf(k) !== -1; });
+  var q = known.slice();
+  var result = oldSeq.map(function (k) { return inNew[k] ? q.shift() : k; });
+  newOrder.forEach(function (k, i) {
+    if (result.indexOf(k) !== -1) return;
+    var at = -1;
+    if (i > 0) at = result.indexOf(newOrder[i - 1]) + 1;
+    if (at <= 0) {
+      for (var j = i + 1; j < newOrder.length && at <= 0; j++) {
+        var nx = result.indexOf(newOrder[j]);
+        if (nx !== -1) at = nx;
+      }
+    }
+    if (at < 0 || (i === 0 && at === 0 && result.length && result.indexOf(newOrder[1]) === -1)) at = result.length;
+    result.splice(at, 0, k);
+  });
+  return result.slice(0, 400);
+}
+
+function stopOrderSheet_() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(SHEET_NAMES.STOP_ORDER);
+  if (!sheet) {
+    sheet = ss.insertSheet(SHEET_NAMES.STOP_ORDER);
+    sheet.getRange(1, 1, 1, SHEET_HEADERS.StopOrder.length).setValues([SHEET_HEADERS.StopOrder]);
+    sheet.setFrozenRows(1);
+  }
+  return sheet;
+}
+
+/** { truckId: [keys...] } */
+function stopSequences_() {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.STOP_ORDER);
+  var map = {};
+  if (!sheet) return map;
+  sheetToObjects_(sheet).forEach(function (r) {
+    try { map[String(r.TruckID)] = JSON.parse(r.Sequence || '[]'); } catch (e) { map[String(r.TruckID)] = []; }
+  });
+  return map;
+}
+
+function saveStopOrder_(truckId, newOrder, by, source) {
+  if (!truckId || !newOrder.length) return;
+  withNamedLock_('stopOrder_' + truckId, function () {
+    var sheet = stopOrderSheet_();
+    var row = sheetToObjects_(sheet).filter(function (r) { return String(r.TruckID) === String(truckId); })[0];
+    var oldSeq = [];
+    if (row) { try { oldSeq = JSON.parse(row.Sequence || '[]'); } catch (e) { oldSeq = []; } }
+    var merged = routeSequenceMerge_(oldSeq, newOrder);
+    var patch = { TruckID: truckId, Sequence: JSON.stringify(merged), UpdatedAt: nowIso_(), UpdatedBy: by || '', Source: source };
+    if (row) updateRowById_(sheet, SHEET_HEADERS.StopOrder, truckId, patch);
+    else appendObject_(sheet, SHEET_HEADERS.StopOrder, patch);
+  });
+}
+
+/** After a stop is marked delivered: today's delivered stops on this trip, in the order they were delivered. Best-effort. */
+function learnStopOrderFromSession_(session, by) {
+  try {
+    var delivered = driverLogsForDate_(todayString_())
+      .filter(function (l) { return l.TruckSessionID === session.ID && l.Type === DRIVER_LOG_TYPES.DELIVERED; })
+      .sort(function (a, b) { return String(a.LoggedAt).localeCompare(String(b.LoggedAt)); })
+      .map(function (l) { return stopKey_(l.TrayStopID ? 'tray' : 'order', l.Customer); });
+    var seen = {};
+    delivered = delivered.filter(function (k) { if (seen[k]) return false; seen[k] = true; return true; });
+    if (delivered.length >= 2) saveStopOrder_(session.TruckID, delivered, by, 'learned');
+  } catch (err) {
+    // Learning the order must never get in the way of recording a delivery.
+  }
+}
+
+/**
+ * Builds trip.routeStops - the trip's orders and fruit-tray clients as one
+ * list in the truck's remembered order (unknown customers last: orders
+ * then tray clients, each by name) - and trip.routeKnown, how many of them
+ * had a remembered place. view 'driver' uses stops/trayStops, 'live' uses
+ * orders/trays.
+ */
+function attachRouteOrder_(trips, view) {
+  if (!trips || !trips.length) return;
+  var seqs = stopSequences_();
+  trips.forEach(function (t) {
+    var items = [];
+    (view === 'driver' ? t.stops : t.orders || []).forEach(function (o) {
+      items.push({ kind: 'order', id: o.orderCheckId || '', key: stopKey_('order', o.customer), customer: o.customer,
+        detail: o.orderNumber, deliveredAt: o.deliveredAt, deliveredBy: o.deliveredBy || '' });
+    });
+    (view === 'driver' ? t.trayStops : t.trays || []).forEach(function (st) {
+      items.push({ kind: 'tray', id: st.trayStopId || '', key: stopKey_('tray', st.customer), customer: st.customer,
+        detail: st.products, deliveredAt: st.deliveredAt, deliveredBy: st.deliveredBy || '', collected: st.collected || null, trays: st.trays || null });
+    });
+    var seq = seqs[String(t.truckId)] || [];
+    var pos = {};
+    seq.forEach(function (k, i) { if (!(k in pos)) pos[k] = i; });
+    items.forEach(function (it, i) { it._i = i; });
+    items.sort(function (a, b) {
+      var pa = a.key in pos ? pos[a.key] : Infinity, pb = b.key in pos ? pos[b.key] : Infinity;
+      if (pa !== pb) return pa < pb ? -1 : 1;
+      if (a.kind !== b.kind) return a.kind === 'order' ? -1 : 1;
+      return String(a.customer).localeCompare(String(b.customer)) || a._i - b._i;
+    });
+    items.forEach(function (it) { delete it._i; });
+    t.routeStops = items;
+    t.routeKnown = items.filter(function (it) { return it.key in pos; }).length;
+  });
+}
+
+/** Driver saves their own stop order for this trip (keys from routeStops). */
+function driverSetStopOrder(sessionId, keys) {
+  var driver = currentDriver_();
+  var session = driverSessionOrThrow_(sessionId, driver);
+  if (!Array.isArray(keys) || keys.length === 0 || keys.length > 300) throw new Error('Nothing to save.');
+  var clean = [];
+  keys.forEach(function (k) { k = String(k || ''); if (/^[ot]:/.test(k) && clean.indexOf(k) === -1) clean.push(k.slice(0, 300)); });
+  saveStopOrder_(session.TruckID, clean, driver.name, 'driver');
+  return { ok: true };
 }

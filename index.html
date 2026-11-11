@@ -1264,7 +1264,7 @@
         <!-- Drivers synced from the Financials app (build-2026-11-11-06). -->
         <div class="card">
           <h3 style="margin-top:0;">Drivers from Financials</h3>
-          <p class="hint">Every active Jhb employee in the Financials app's <strong>Drivers</strong> department is kept on this list automatically (every night, or tap Sync now). They sign in with their login below (first name + surname initial, e.g. SteveR) and their employee number as the PIN. People who leave or are discharged in Financials are switched off here.</p>
+          <p class="hint">Every active Jhb employee in the Financials app's <strong>Drivers</strong> department is kept on this list automatically (every night, or tap Sync now). They sign in with their login below (first name + surname initial, e.g. SteveR) and their employee number as the PIN. People who leave or are discharged in Financials are removed from Dispatch completely (their past trips and deliveries keep their name).</p>
           <div class="row-inline">
             <input type="text" id="fin-source-input" placeholder="Financials spreadsheet URL">
             <button class="btn btn-secondary" onclick="saveFinancialsSourceUi()">Connect</button>
@@ -1337,7 +1337,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-11-11-08';
+  var BUILD_VERSION = 'build-2026-11-11-11';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -4611,7 +4611,8 @@
     var s = st.lastSync;
     el.textContent = !st.financialsSpreadsheetId ? 'Not connected yet - paste the Financials spreadsheet URL and tap Connect.'
       : s ? 'Last sync ' + formatDateForDisplay(String(s.at).slice(0, 10)) + ' ' + formatTime(s.at) + ': ' + s.active + ' active driver(s) in Financials; ' +
-          s.added + ' added, ' + s.updated + ' updated, ' + s.deactivated + ' switched off.'
+          s.added + ' added, ' + s.updated + ' updated, ' + (s.removed !== undefined ? s.removed : s.deactivated) + ' removed' +
+          (s.removedNames && s.removedNames.length ? ' (' + s.removedNames.join(', ') + ')' : '') + '.'
       : 'Connected - not synced yet.';
   }
 

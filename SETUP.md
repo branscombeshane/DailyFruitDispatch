@@ -837,8 +837,15 @@ sheet instead of by hand.
 - **Changes:**
   - New drivers are added.
   - Names and contact numbers follow Financials.
-  - Drivers who are inactive or discharged in Financials, or no longer in
-    the Drivers department, are switched off here, which blocks sign-in.
+  - Drivers who are no longer employed (Active FALSE or a discharge
+    date), or no longer in the Drivers department, are **deleted** from
+    Dispatch's Drivers list (build-2026-11-11-11, Shane's request). Their
+    past trips, deliveries, reports and tray records keep their name as
+    text. Safety net: the sync refuses to delete anything if Financials
+    shows no active drivers, or if it would remove more than half of the
+    synced drivers.
+  - Dispatcher users (Settings > Users) are not synced. When a dispatcher
+    leaves, delete their user there by hand.
   - Drivers added by hand who aren't in Financials are left alone.
 - **Sign-in (Shane's decision):** login = first name + surname initial
   (`SteveR`, case doesn't matter; clashes get more surname letters, e.g.

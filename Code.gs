@@ -5323,7 +5323,7 @@ function syncDriversFromFinancials() {
       if (String(d.EmployeeNumber || '').trim()) byEmp[String(d.EmployeeNumber).trim()] = d;
       byName[String(d.Name || '').replace(/\s+/g, ' ').trim().toLowerCase()] = d;
     });
-    var added = 0, updated = 0, deactivated = 0, matchedIds = {};
+    var added = 0, updated = 0, deactivated = 0, matchedIds = {}, toRemove = [];
 
     fin.forEach(function (f) {
       var d = byEmp[f.empNo] || byName[f.name.toLowerCase()];
@@ -5338,13 +5338,17 @@ function syncDriversFromFinancials() {
         return;
       }
       matchedIds[d.ID] = true;
+      // No longer employed -> removed from Dispatch completely (Shane,
+      // build-2026-11-11-11), not just switched off. Their past trips,
+      // deliveries and reports keep the name as text, so history is intact.
+      if (!f.active) { toRemove.push(d); return; }
       var firstSync = String(d.Source || '') !== 'Financials';
       var patch = {};
       if (d.Name !== f.name) patch.Name = f.name;
       if (f.contact && String(d.Contact || '') !== f.contact) patch.Contact = f.contact;
-      if ((d.Active === true) !== f.active) { patch.Active = f.active; if (!f.active) deactivated++; }
+      if (d.Active !== true) patch.Active = true;
       if (String(d.EmployeeNumber || '') !== f.empNo) patch.EmployeeNumber = f.empNo;
-      var login = f.active ? (logins[f.empNo] || '') : '';
+      var login = logins[f.empNo] || '';
       if (String(d.Login || '') !== login) patch.Login = login;
       if (firstSync) patch.Source = 'Financials';
       if (firstSync || !String(d.PIN || '').trim()) patch.PIN = f.empNo;
@@ -5354,16 +5358,27 @@ function syncDriversFromFinancials() {
       }
     });
 
-    // Synced before, no longer a Jhb driver in Financials -> inactive.
+    // Synced before but no longer a Jhb driver in Financials (left the
+    // Drivers department, or deleted there) -> removed too.
     current.forEach(function (d) {
-      if (String(d.Source || '') !== 'Financials' || matchedIds[d.ID] || d.Active !== true) return;
+      if (String(d.Source || '') !== 'Financials' || matchedIds[d.ID]) return;
       if (finByEmp[String(d.EmployeeNumber || '').trim()]) return;
-      updateRowById_(sheet, SHEET_HEADERS.Drivers, d.ID, { Active: false, Login: '' });
-      deactivated++;
+      toRemove.push(d);
     });
 
+    // Safety net: a wrong or half-read Financials sheet must not wipe the
+    // list. Refuse if Financials has no active drivers, or if this would
+    // remove more than half of the drivers synced from it.
+    var syncedCount = current.filter(function (d) { return String(d.Source || '') === 'Financials'; }).length;
+    if (toRemove.length && (finActive.length === 0 || (syncedCount >= 4 && toRemove.length > syncedCount / 2))) {
+      throw new Error('Sync stopped: it would remove ' + toRemove.length + ' of ' + syncedCount + ' drivers (Financials shows ' +
+        finActive.length + ' active Jhb drivers). Check the Financials spreadsheet is the right one and its Employees tab is correct.');
+    }
+    toRemove.forEach(function (d) { deleteRowById_(sheet, d.ID); deactivated++; });
+
     clearAuthUsersCache_();
-    var info = { at: nowIso_(), financialsDrivers: fin.length, active: finActive.length, added: added, updated: updated, deactivated: deactivated };
+    var info = { at: nowIso_(), financialsDrivers: fin.length, active: finActive.length, added: added, updated: updated, removed: deactivated,
+      removedNames: toRemove.map(function (d) { return d.Name; }) };
     writeSetting_('DriverSyncInfo', JSON.stringify(info));
     return info;
   });

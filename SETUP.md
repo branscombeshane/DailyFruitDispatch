@@ -774,6 +774,36 @@ list further, the same way the search and date work together. Clearing
 either the text or the date (or tapping **Clear**) goes back to searching
 every day at once, same as before this was added.
 
+## Duplicate order lines fixed (build-2026-11-16-01)
+
+INV0142400 (16 Nov) showed each line twice on the check screen and could
+never be Done. 13 order checks had 47 duplicate `ItemChecks` rows, all
+sharing an ItemKey with another row.
+
+- **Causes:**
+  - `allocateOrderToTruck` wrote the OrderChecks row before the
+    ItemChecks rows. A check screen opening between the two writes found
+    the order with no lines, and `reconcileOrderItemsAgainstPacking_`
+    appended them all; then the allocation appended them again.
+  - Two check screens opening at once could both append the same missing
+    lines.
+- **Fixes:**
+  - Allocation writes the ItemChecks rows first, then the OrderChecks row.
+    If that second write fails, it removes the item rows it wrote.
+  - Healing missing lines happens under the order's allocation lock, from a
+    fresh read of that order's ItemChecks, and never appends a key that
+    already exists.
+  - Safety net, `dedupeItemChecks_`: one row per ItemKey wherever lines are
+    shown or counted, or the order status is worked out (check screen,
+    orders list, Dashboard, `deriveOrderStatus_`, so also the Done button
+    and the dispatch check). A ticked row wins over a Pending one, then the
+    latest CheckedAt. A leftover duplicate Pending row can no longer block
+    Done or dispatch.
+- **One-off clean-up:** run `dispatchDupItemsPreview` (reads only, logs
+  what would go), then `dispatchDupItemsCleanup`, ideally when nobody is
+  checking orders. The clean-up deletes the extra rows (same keep rule)
+  and corrects each affected order's status.
+
 ## WhatsApp app-login invites for drivers (build-2026-11-11-08)
 
 **Settings > Drivers > Send login on WhatsApp** sends drivers a WhatsApp

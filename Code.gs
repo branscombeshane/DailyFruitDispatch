@@ -2029,12 +2029,12 @@ function getOrdersForSession(sessionId) {
   }
 
   return orderChecks.map(function (c) {
-    var siblingItems = itemChecks.filter(function (i) { return i.OrderCheckID === c.ID; });
+    var siblingItems = dedupeItemChecks_(itemChecks.filter(function (i) { return i.OrderCheckID === c.ID; }));
     var packingOrder = packingOrdersById[orderIdKey_(c.OrderID)];
     // Self-heal a snapshot Packing & Production has since outgrown - see
     // reconcileOrderItemsAgainstPacking_'s own comment for why this can
     // happen.
-    siblingItems = reconcileOrderItemsAgainstPacking_(c, siblingItems, packingOrder ? packingOrder.items : null);
+    siblingItems = dedupeItemChecks_(reconcileOrderItemsAgainstPacking_(c, siblingItems, packingOrder ? packingOrder.items : null));
     return {
       orderId: c.OrderID,
       orderNumber: c.OrderNumber,
@@ -2413,30 +2413,39 @@ function allocateOrderToTruck(sessionId, orderId) {
     if (!order) throw new Error('Order not found in today\'s Packing & Production data.');
 
     var orderCheckId = Utilities.getUuid();
-    appendObject_(orderChecksSheet, SHEET_HEADERS.OrderChecks, {
-      ID: orderCheckId, TruckSessionID: sessionId, Date: today, OrderID: order.orderId,
-      OrderNumber: order.orderNumber, Customer: order.customer, DeliveryDate: order.deliveryDate,
-      Status: ORDER_STATUS.PENDING, StartedAt: nowIso_(), CompletedAt: '',
-      RequiresCoa: !!order.requiresCoa, CoaConfirmed: false, CoaConfirmedBy: '', CoaConfirmedAt: ''
-    });
-
+    // ItemChecks are written FIRST, then the OrderChecks row
+    // (build-2026-11-16-01). It used to be the other way round, and a check
+    // screen opening in the gap between the two writes (getOrderForChecking
+    // doesn't take this lock) found the OrderCheck with 0 items: its
+    // reconcileOrderItemsAgainstPacking_ then appended every line as
+    // "missing", and a moment later this function appended them again -
+    // INV0142400 on 16 Nov showed each line twice and could never be Done
+    // (13 orders, 47 duplicate rows found). With the items first, nothing
+    // can see the OrderCheck before its items exist.
     var itemChecksSheet = getSheet_(SHEET_NAMES.ITEM_CHECKS);
+    var itemRows = order.items.map(function (item) {
+      return {
+        ID: Utilities.getUuid(), OrderCheckID: orderCheckId, TruckSessionID: sessionId, OrderID: order.orderId,
+        ItemKey: item.itemKey, ProductDescription: item.description, Qty: item.qty, Unit: item.unit,
+        Status: ITEM_STATUS.PENDING, NoStockReasonID: '', NoStockReason: '', CheckedBy: '', CheckedAt: '', PackedQty: ''
+      };
+    });
+    appendObjects_(itemChecksSheet, SHEET_HEADERS.ItemChecks, itemRows);
+
     try {
-      appendObjects_(itemChecksSheet, SHEET_HEADERS.ItemChecks, order.items.map(function (item) {
-        return {
-          ID: Utilities.getUuid(), OrderCheckID: orderCheckId, TruckSessionID: sessionId, OrderID: order.orderId,
-          ItemKey: item.itemKey, ProductDescription: item.description, Qty: item.qty, Unit: item.unit,
-          Status: ITEM_STATUS.PENDING, NoStockReasonID: '', NoStockReason: '', CheckedBy: '', CheckedAt: '', PackedQty: ''
-        };
-      }));
+      appendObject_(orderChecksSheet, SHEET_HEADERS.OrderChecks, {
+        ID: orderCheckId, TruckSessionID: sessionId, Date: today, OrderID: order.orderId,
+        OrderNumber: order.orderNumber, Customer: order.customer, DeliveryDate: order.deliveryDate,
+        Status: ORDER_STATUS.PENDING, StartedAt: nowIso_(), CompletedAt: '',
+        RequiresCoa: !!order.requiresCoa, CoaConfirmed: false, CoaConfirmedBy: '', CoaConfirmedAt: ''
+      });
     } catch (e) {
-      // The OrderCheck row above already exists at this point - if the items
-      // write throws, roll it back rather than leaving an OrderCheck with
-      // zero items sitting in the sheet. Without this, the "already
-      // allocated" check at the top of this function would treat that
-      // half-finished row as done and permanently refuse to ever write its
-      // items, since items are only ever written once, right here.
-      deleteRowById_(orderChecksSheet, orderCheckId);
+      // The item rows above are already written - remove them again (by
+      // their own IDs) rather than leaving orphans behind, then let the
+      // caller see the error.
+      var written = {};
+      itemRows.forEach(function (r) { written[r.ID] = true; });
+      try { deleteRowsWhere_(itemChecksSheet, function (row) { return written[String(row[0])]; }); } catch (e2) { /* best-effort */ }
       throw e;
     }
 
@@ -2973,6 +2982,8 @@ function getOrderForChecking(sessionId, orderId) {
   // happen. packingOrder was already read live, just above, for the
   // productionStatus fields - reused here rather than reading it twice.
   items = reconcileOrderItemsAgainstPacking_(orderCheck, items, packingOrder ? packingOrder.items : null);
+  // Each line once on the check screen, whatever duplicates the sheet holds (build-2026-11-16-01).
+  items = dedupeItemChecks_(items);
 
   // Self-heal a drifted Status before showing it - see
   // reconcileOrderCheckStatus_'s own comment for why this can happen. The
@@ -3153,6 +3164,8 @@ function setItemStatus(itemCheckId, status, checkerName, packedQty) {
  * which is what the original inline version of this logic already did.
  */
 function deriveOrderStatus_(items) {
+  // A leftover duplicate Pending row must never hold an order back (build-2026-11-16-01).
+  items = dedupeItemChecks_(items);
   var allResolved = items.every(function (i) { return i.Status !== ITEM_STATUS.PENDING; });
   if (allResolved) return ORDER_STATUS.COMPLETE;
   var anyResolved = items.some(function (i) { return i.Status !== ITEM_STATUS.PENDING; });
@@ -3246,9 +3259,33 @@ function reconcileOrderItemsAgainstPacking_(orderCheck, siblingItems, packingIte
 
   var knownKeys = {};
   siblingItems.forEach(function (i) { knownKeys[i.ItemKey] = true; });
-  var missing = packingItems.filter(function (pi) { return !knownKeys[pi.itemKey]; });
-  if (missing.length === 0) return siblingItems;
+  if (packingItems.every(function (pi) { return knownKeys[pi.itemKey]; })) return siblingItems;
 
+  // Something looks missing. Decide for real under the same lock
+  // allocateOrderToTruck uses, from a FRESH read of this order check's
+  // ItemChecks (build-2026-11-16-01): the caller's list can be stale, and
+  // two check screens opening at once used to both append the same lines.
+  // A key that already exists for this OrderCheckID is never appended.
+  try {
+    return withOrderAllocationLock_(orderCheck.OrderID, function () {
+      var fresh = sheetToObjects_(getSheet_(SHEET_NAMES.ITEM_CHECKS))
+        .filter(function (i) { return i.OrderCheckID === orderCheck.ID; });
+      var freshKeys = {};
+      fresh.forEach(function (i) { freshKeys[i.ItemKey] = true; });
+      var missingNow = packingItems.filter(function (pi) { return !freshKeys[pi.itemKey]; });
+      if (missingNow.length === 0) return fresh;
+      var added = appendMissingItemChecks_(orderCheck, missingNow);
+      return added ? fresh.concat(added) : fresh;
+    });
+  } catch (err) {
+    // Best-effort healing - show what was already there rather than break
+    // an otherwise-working screen.
+    return siblingItems;
+  }
+}
+
+/** Appends ItemChecks rows for Packing lines the snapshot is missing; returns them, or null if the write failed. */
+function appendMissingItemChecks_(orderCheck, missing) {
   var newRows = missing.map(function (pi) {
     return {
       ID: Utilities.getUuid(), OrderCheckID: orderCheck.ID, TruckSessionID: orderCheck.TruckSessionID, OrderID: orderCheck.OrderID,
@@ -3260,13 +3297,33 @@ function reconcileOrderItemsAgainstPacking_(orderCheck, siblingItems, packingIte
   try {
     appendObjects_(getSheet_(SHEET_NAMES.ITEM_CHECKS), SHEET_HEADERS.ItemChecks, newRows);
   } catch (err) {
-    // Best-effort healing, same spirit as every other best-effort Packing
-    // read in this file - if the write fails, just show what was already
-    // there rather than erroring out an otherwise-working screen.
-    return siblingItems;
+    return null;
   }
+  return newRows;
+}
 
-  return siblingItems.concat(newRows);
+/**
+ * One row per ItemKey (build-2026-11-16-01) - the safety net for duplicate
+ * ItemChecks rows (see allocateOrderToTruck). Of several rows with the same
+ * key, a checked one (Packed / No Stock) wins over Pending; among checked
+ * ones the latest CheckedAt; otherwise the first. Rows with no ItemKey are
+ * all kept. Order of first appearance is preserved.
+ */
+function dedupeItemChecks_(items) {
+  var best = {};
+  (items || []).forEach(function (i) {
+    var k = String(i.ItemKey || '');
+    if (!k) return;
+    var cur = best[k];
+    if (!cur) { best[k] = i; return; }
+    var curChecked = !!cur.Status && cur.Status !== ITEM_STATUS.PENDING;
+    var newChecked = !!i.Status && i.Status !== ITEM_STATUS.PENDING;
+    if (newChecked && (!curChecked || String(i.CheckedAt || '') > String(cur.CheckedAt || ''))) best[k] = i;
+  });
+  return (items || []).filter(function (i) {
+    var k = String(i.ItemKey || '');
+    return !k || best[k] === i;
+  });
 }
 
 /**
@@ -3303,7 +3360,9 @@ function withNamedLock_(lockKey, fn) {
 
 /** Per-order (for today) mutex - see allocateOrderToTruck's own comment. */
 function withOrderAllocationLock_(orderId, fn) {
-  return withNamedLock_('orderAllocLock_' + orderId + '_' + todayString_(), fn);
+  // orderIdKey_ (build-2026-11-16-01) so an OrderID read back from the sheet
+  // as a Number shares the lock with the same order's string ID.
+  return withNamedLock_('orderAllocLock_' + orderIdKey_(orderId) + '_' + todayString_(), fn);
 }
 
 /** Per-truck (for today) mutex - see getOrCreateTodaysOpenSessionId_'s own comment. */
@@ -3702,7 +3761,7 @@ function getDashboardForDate(dateStr) {
     var orderChecks = allOrderChecks.filter(function (c) { return c.TruckSessionID === session.ID; });
 
     var orders = orderChecks.map(function (oc) {
-      var items = itemChecksByOrderCheckId[oc.ID] || [];
+      var items = dedupeItemChecks_(itemChecksByOrderCheckId[oc.ID] || []);
       var noStockItems = items.filter(function (i) { return i.Status === ITEM_STATUS.NO_STOCK; });
       // "Short-packed" = marked Packed but the checker used Edit Qty to
       // record packing something other than the full ordered Qty (a blank
@@ -5552,4 +5611,79 @@ function sendDriverInvites(driverIds) {
     if (i < drivers.length - 1) { try { Utilities.sleep(350); } catch (e) { /* tests */ } }
   });
   return { sent: results.filter(function (x) { return x.ok; }).length, failed: results.filter(function (x) { return !x.ok; }).length, results: results };
+}
+
+// ---------------------------------------------------------------------------
+// ONE-OFF: DUPLICATE ITEMCHECKS CLEAN-UP (build-2026-11-16-01)
+//
+// Removes the duplicate ItemChecks rows the old allocation race left behind
+// (same OrderCheckID + ItemKey more than once - see allocateOrderToTruck).
+// Run dispatchDupItemsPreview first (reads only), check the log, then run
+// dispatchDupItemsCleanup - ideally when nobody is checking orders, because
+// deleting rows moves the rows below them. Same keep rule as the screen
+// (dedupeItemChecks_): a checked row (Packed / No Stock) over Pending, the
+// latest CheckedAt among checked ones, otherwise the first row.
+// ---------------------------------------------------------------------------
+
+function dispatchDupItemsFind_() {
+  var sheet = getSheet_(SHEET_NAMES.ITEM_CHECKS);
+  var values = sheet.getDataRange().getValues();
+  var h = values[0];
+  var groups = {};
+  for (var i = 1; i < values.length; i++) {
+    var item = {};
+    h.forEach(function (name, c) { item[name] = values[i][c]; });
+    item._row = i + 1;
+    if (!item.ItemKey || !item.OrderCheckID) continue;
+    var g = item.OrderCheckID + '|' + item.ItemKey;
+    (groups[g] = groups[g] || []).push(item);
+  }
+  var orderNumbers = {};
+  sheetToObjects_(getSheet_(SHEET_NAMES.ORDER_CHECKS)).forEach(function (c) { orderNumbers[c.ID] = c.OrderNumber + ' (' + c.Customer + ', ' + normalizeDateStr_(c.Date) + ')'; });
+  var dups = [];
+  Object.keys(groups).forEach(function (g) {
+    var rows = groups[g];
+    if (rows.length < 2) return;
+    var keep = dedupeItemChecks_(rows)[0];
+    dups.push({ orderCheckId: rows[0].OrderCheckID, order: orderNumbers[rows[0].OrderCheckID] || '(order check gone)', itemKey: rows[0].ItemKey,
+      description: rows[0].ProductDescription, keep: keep, remove: rows.filter(function (r) { return r !== keep; }) });
+  });
+  return dups;
+}
+
+function dispatchDupItemsPreview() {
+  var dups = dispatchDupItemsFind_();
+  var orders = {}, removeCount = 0;
+  dups.forEach(function (d) {
+    orders[d.orderCheckId] = true;
+    removeCount += d.remove.length;
+    Logger.log(d.order + ' | ' + d.itemKey + ' ' + d.description + ' | keep row ' + d.keep._row + ' (' + d.keep.Status + ')' +
+      ' | delete row(s) ' + d.remove.map(function (r) { return r._row + ' (' + r.Status + ')'; }).join(', '));
+  });
+  Logger.log('PREVIEW ONLY - nothing changed. ' + Object.keys(orders).length + ' order check(s), ' + removeCount +
+    ' duplicate row(s) would be deleted. If that looks right, run dispatchDupItemsCleanup.');
+}
+
+function dispatchDupItemsCleanup() {
+  var dups = dispatchDupItemsFind_();
+  var drop = {}, affected = {};
+  dups.forEach(function (d) {
+    affected[d.orderCheckId] = true;
+    d.remove.forEach(function (r) { drop[String(r.ID)] = true; });
+  });
+  var count = Object.keys(drop).length;
+  if (!count) { Logger.log('No duplicate ItemChecks rows - nothing to do.'); return; }
+  deleteRowsWhere_(getSheet_(SHEET_NAMES.ITEM_CHECKS), function (row) { return drop[String(row[0])]; });
+  // Re-derive each affected order's Status now its duplicates are gone, so
+  // an order whose every real line was already ticked shows Complete.
+  var items = sheetToObjects_(getSheet_(SHEET_NAMES.ITEM_CHECKS));
+  var fixed = 0;
+  sheetToObjects_(getSheet_(SHEET_NAMES.ORDER_CHECKS)).forEach(function (c) {
+    if (!affected[c.ID]) return;
+    var before = c.Status;
+    var after = reconcileOrderCheckStatus_(c, items.filter(function (i) { return i.OrderCheckID === c.ID; }));
+    if (after !== before) fixed++;
+  });
+  Logger.log('Deleted ' + count + ' duplicate ItemChecks row(s) across ' + Object.keys(affected).length +
+    ' order check(s); ' + fixed + ' order status(es) corrected.');
 }

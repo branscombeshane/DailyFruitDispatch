@@ -142,7 +142,10 @@ var SHEET_HEADERS = {
   // on-screen tick, separate from RequiresCoa so "does this order need one"
   // and "has someone actually confirmed it's attached" can never be
   // conflated.
-  OrderChecks: ['ID', 'TruckSessionID', 'Date', 'OrderID', 'OrderNumber', 'Customer', 'DeliveryDate', 'Status', 'StartedAt', 'CompletedAt', 'RequiresCoa', 'CoaConfirmed', 'CoaConfirmedBy', 'CoaConfirmedAt'],
+  // Amend* / PreviousOrderID appended build-2026-11-16-02 - orders changed
+  // in Sage after they were put on a truck (see syncAmendedOrders_).
+  OrderChecks: ['ID', 'TruckSessionID', 'Date', 'OrderID', 'OrderNumber', 'Customer', 'DeliveryDate', 'Status', 'StartedAt', 'CompletedAt', 'RequiresCoa', 'CoaConfirmed', 'CoaConfirmedBy', 'CoaConfirmedAt',
+    'PreviousOrderID', 'AmendedAt', 'AmendedNote', 'AmendedAfterDispatch', 'AmendedToOrderID', 'AmendHandledBy', 'AmendHandledAt'],
   // NoStockReasonID/NoStockReason are vestigial - the admin-managed
   // No-Stock Reasons feature they served was removed (No Stock is now a
   // single tap, no reason picker), but the columns are kept rather than
@@ -333,6 +336,8 @@ var API_ACTIONS = {
   getOrderForCollection: getOrderForCollection,
   getTrayRoster: getTrayRoster,
   getLiveDeliveries: getLiveDeliveries,
+  listAmendedAfterDispatch: listAmendedAfterDispatch,
+  setAmendHandled: setAmendHandled,
   driverSetStopOrder: driverSetStopOrder,
   getDriverSyncSettings: getDriverSyncSettings,
   saveFinancialsSource: saveFinancialsSource,
@@ -408,7 +413,7 @@ function buildActionRoles_() {
       'listJobsForDate', 'listPackingIssuesForDate', 'listOpenPackingIssues',
       'setPackingIssueStatus', 'listTruckIssuesForDate', 'listOpenTruckIssues',
       'setTruckIssueStatus', 'listOpenDriverReports', 'listDriverReportsForDate', 'setDriverReportStatus',
-      'refreshTrayStops', 'getTrayRoster', 'getLiveDeliveries'
+      'refreshTrayStops', 'getTrayRoster', 'getLiveDeliveries', 'listAmendedAfterDispatch', 'setAmendHandled'
     ]],
     // Settings: users, trucks, drivers, data source.
     [ADMIN_ONLY, [
@@ -2017,16 +2022,17 @@ function searchOrders(sessionId, query) {
  * successful read.
  */
 function getOrdersForSession(sessionId) {
-  var orderChecks = sheetToObjects_(getSheet_(SHEET_NAMES.ORDER_CHECKS))
-    .filter(function (c) { return c.TruckSessionID === sessionId; });
-  var itemChecks = sheetToObjects_(getSheet_(SHEET_NAMES.ITEM_CHECKS));
-
   var packingOrdersById = {};
   try {
-    fetchAllOrdersFromPacking_().forEach(function (o) { packingOrdersById[orderIdKey_(o.orderId)] = o; });
+    var allPacking = fetchAllOrdersFromPacking_();
+    allPacking.forEach(function (o) { packingOrdersById[orderIdKey_(o.orderId)] = o; });
+    syncAmendedOrders_(readTodaysOrdersFromPacking_(null, allPacking));
   } catch (err) {
     // best-effort - see this function's own comment above
   }
+  var orderChecks = sheetToObjects_(getSheet_(SHEET_NAMES.ORDER_CHECKS))
+    .filter(function (c) { return c.TruckSessionID === sessionId; });
+  var itemChecks = sheetToObjects_(getSheet_(SHEET_NAMES.ITEM_CHECKS));
 
   return orderChecks.map(function (c) {
     var siblingItems = dedupeItemChecks_(itemChecks.filter(function (i) { return i.OrderCheckID === c.ID; }));
@@ -2045,7 +2051,8 @@ function getOrdersForSession(sessionId) {
       status: reconcileOrderCheckStatus_(c, siblingItems),
       productionDone: packingOrder ? packingOrder.productionDone : true,
       productionStatus: packingOrder ? packingOrder.productionStatus : 'none',
-      productionNote: packingOrder ? packingOrder.productionNote : ''
+      productionNote: packingOrder ? packingOrder.productionNote : '',
+      amendedNote: c.AmendedNote || ''
     };
   });
 }
@@ -2411,6 +2418,15 @@ function allocateOrderToTruck(sessionId, orderId) {
     var orders = readTodaysOrdersFromPacking_();
     var order = orders.filter(function (o) { return o.orderId === orderId; })[0];
     if (!order) throw new Error('Order not found in today\'s Packing & Production data.');
+    // The same invoice already on a truck today under an older OrderID (it
+    // was changed in Sage) - never allocate it a second time (build-2026-11-16-02).
+    var sameInvoice = existingChecks.filter(function (c) {
+      return normalizeDateStr_(c.Date) === today && String(c.OrderNumber || '').trim() === String(order.orderNumber || '').trim() &&
+        normalizeDateStr_(c.DeliveryDate) === normalizeDateStr_(order.deliveryDate);
+    })[0];
+    if (sameInvoice) {
+      throw new Error(order.orderNumber + ' is already on a truck today (it was changed in Sage) - refresh the board.');
+    }
 
     var orderCheckId = Utilities.getUuid();
     // ItemChecks are written FIRST, then the OrderChecks row
@@ -2682,6 +2698,9 @@ function getTruckAssignmentBoardUncached_() {
   var trucks = listTrucks(true);
   var today = todayString_();
   var todaysOrders = readTodaysOrdersFromPacking_();
+  // Orders changed in Sage since they were put on a truck move over to
+  // their new version before anything below reads OrderChecks.
+  syncAmendedOrders_(todaysOrders);
   // Keyed lookup so orders already allocated to a truck (built from
   // OrderChecks below, which doesn't carry Production status of its own)
   // can still show the same live productionDone/productionStatus/
@@ -2737,6 +2756,7 @@ function getTruckAssignmentBoardUncached_() {
       // so the drag-and-drop code, which reads/mutates this same array
       // directly, needs no changes at all.
       tripNumber: tripNumberBySessionId[session.ID],
+      amended: !!c.AmendedNote,
       // Live Production status (see deriveProductionStatus_) - an order
       // already on a truck is exactly where Shane wants to see Production
       // still hasn't finished, per his 2026-09-16 request. Defaults to
@@ -2831,6 +2851,8 @@ function getTruckAssignmentBoardUncached_() {
   // would risk a checker finishing a stale checklist with no way to
   // notice Sage already changed the order out from under them; only a
   // truck that's already gone gets this "assume it's handled" treatment.
+  var onTruckOrderNumbersToday = {};
+  orderChecksToday.forEach(function (c) { if (sessionsById[c.TruckSessionID]) onTruckOrderNumbersToday[String(c.OrderNumber || '').trim()] = true; });
   var dispatchedOrderNumbersToday = {};
   orderChecksToday.forEach(function (c) {
     var session = sessionsById[c.TruckSessionID];
@@ -2848,6 +2870,9 @@ function getTruckAssignmentBoardUncached_() {
       return !collectedLookups.byId[orderIdKey_(o.orderId)] && !collectedLookups.byNumber[String(o.orderNumber || '').trim()];
     })
     .filter(function (o) { return !dispatchedOrderNumbersToday[String(o.orderNumber || '').trim()]; })
+    // Same invoice already on any of today's trucks (an order changed in
+    // Sage that syncAmendedOrders_ couldn't move yet) - never show it twice.
+    .filter(function (o) { return !onTruckOrderNumbersToday[String(o.orderNumber || '').trim()]; })
     .map(function (o) {
       return {
         orderId: o.orderId, orderNumber: o.orderNumber, customer: o.customer, itemCount: o.items.length,
@@ -2923,7 +2948,16 @@ function getTruckPackTimerInfo(sessionId) {
 function getOrderForChecking(sessionId, orderId) {
   var orderChecksSheet = getSheet_(SHEET_NAMES.ORDER_CHECKS);
   var today = todayString_();
+  try { syncAmendedOrders_(readTodaysOrdersFromPacking_()); } catch (errSync) { /* best-effort */ }
   var existingChecks = sheetToObjects_(orderChecksSheet);
+  // A screen opened before the order was changed in Sage still asks by the
+  // old OrderID - follow it to the order's new version.
+  var moved = existingChecks.filter(function (c) {
+    return orderIdKey_(c.PreviousOrderID) === orderIdKey_(orderId) && normalizeDateStr_(c.Date) === today;
+  })[0];
+  if (moved && !existingChecks.some(function (c) { return orderIdKey_(c.OrderID) === orderIdKey_(orderId) && normalizeDateStr_(c.Date) === today; })) {
+    orderId = String(moved.OrderID);
+  }
   // See the matching comment in allocateOrderToTruck - OrderID can come back
   // from the sheet as a Number even though orderId here is always a string.
   var orderCheck = existingChecks.filter(function (c) { return orderIdKey_(c.OrderID) === orderIdKey_(orderId) && normalizeDateStr_(c.Date) === today; })[0];
@@ -3458,6 +3492,12 @@ function markTruckDispatched(sessionId, checkerName, force, lateReason, lateReas
           : fetchAllOrdersFromPackingUncached_(dispatchSettings.PackingSpreadsheetId);
         if (!force) cachePackingOrders_(dispatchSettings.PackingSpreadsheetId, packingOrdersForReconcile);
         packingOrdersForReconcile.forEach(function (o) { packingOrdersForDispatch[orderIdKey_(o.orderId)] = o; });
+        // An order changed in Sage must be brought up to date (and its new
+        // lines checked) before this truck can go (build-2026-11-16-02).
+        if (syncAmendedOrders_(readTodaysOrdersFromPacking_(null, packingOrdersForReconcile)) > 0) {
+          state = getTruckSessionState(sessionId);
+          itemChecksForDispatch = sheetToObjects_(getSheet_(SHEET_NAMES.ITEM_CHECKS));
+        }
       }
     } catch (err) {
       // best-effort - a Packing & Production hiccup here shouldn't itself
@@ -5686,4 +5726,186 @@ function dispatchDupItemsCleanup() {
   });
   Logger.log('Deleted ' + count + ' duplicate ItemChecks row(s) across ' + Object.keys(affected).length +
     ' order check(s); ' + fixed + ' order status(es) corrected.');
+}
+
+// ---------------------------------------------------------------------------
+// ORDERS CHANGED IN SAGE AFTER THEY WERE PUT ON A TRUCK (build-2026-11-16-02)
+//
+// When an invoice is amended in Sage, Packing & Production doesn't edit its
+// copy: it deletes the order and imports it again under a NEW OrderID (same
+// invoice number). Dispatch used to see that as a brand-new order - the old
+// one stayed on its truck with the old lines, and the new one appeared in
+// Unassigned, so the same invoice showed twice. Now, wherever today's
+// orders are read, an order on today's trucks that has vanished from
+// Packing & Production is matched to a new order with the same invoice
+// number and delivery date:
+// - truck not dispatched yet: the order moves to the new version on the
+//   same truck. Unchanged lines (same product, qty and unit) keep their
+//   ticks, new/changed lines are added as Pending, removed lines go, and
+//   AmendedNote says what changed (shown to the checker). Its status is
+//   recalculated, so it can't be Done or dispatched until the new lines are
+//   checked.
+// - truck already dispatched: nothing on the truck changes; the order is
+//   flagged AmendedAfterDispatch for the Dashboard's Issues tab.
+// ---------------------------------------------------------------------------
+
+function ensureAmendSchema_() {
+  var cache = CacheService.getScriptCache();
+  if (cache.get('amendSchemaOk_v1')) return;
+  ensureHeaderCells_(getSheet_(SHEET_NAMES.ORDER_CHECKS), SHEET_HEADERS.OrderChecks,
+    ['PreviousOrderID', 'AmendedAt', 'AmendedNote', 'AmendedAfterDispatch', 'AmendedToOrderID', 'AmendHandledBy', 'AmendHandledAt']);
+  try { cache.put('amendSchemaOk_v1', '1', 6 * 60 * 60); } catch (e) { /* best-effort */ }
+}
+
+function amendLineSig_(description, qty, unit) {
+  return String(description || '').trim().toLowerCase() + '|' + (Number(qty) || 0) + '|' + String(unit || '').trim().toLowerCase();
+}
+
+function amendLineText_(description, qty, unit) {
+  return String(description || '') + ' ' + qty + (unit ? ' ' + unit : '');
+}
+
+/** Old ItemChecks vs new Packing lines: { keep: [[itemCheck, newLine]], added: [newLine], removed: [itemCheck] }. */
+function amendDiff_(oldItems, newLines) {
+  var pool = {};
+  oldItems.forEach(function (i) {
+    var sig = amendLineSig_(i.ProductDescription, i.Qty, i.Unit);
+    (pool[sig] = pool[sig] || []).push(i);
+  });
+  var keep = [], added = [];
+  newLines.forEach(function (l) {
+    var list = pool[amendLineSig_(l.description, l.qty, l.unit)];
+    if (list && list.length) keep.push([list.shift(), l]); else added.push(l);
+  });
+  var removed = [];
+  Object.keys(pool).forEach(function (k) { removed = removed.concat(pool[k]); });
+  return { keep: keep, added: added, removed: removed };
+}
+
+function amendNoteText_(diff) {
+  var parts = [];
+  if (diff.added.length) parts.push('Added: ' + diff.added.map(function (l) { return amendLineText_(l.description, l.qty, l.unit); }).join('; '));
+  if (diff.removed.length) parts.push('Removed: ' + diff.removed.map(function (i) { return amendLineText_(i.ProductDescription, i.Qty, i.Unit); }).join('; '));
+  return parts.join('. ');
+}
+
+/**
+ * Finds today's order checks whose order was replaced in Packing & Production
+ * and handles each (see above). todaysOrders: today's Packing orders.
+ * Returns how many order checks were changed. Best-effort per order.
+ */
+function syncAmendedOrders_(todaysOrders) {
+  if (!todaysOrders || !todaysOrders.length) return 0;
+  var today = todayString_();
+  var checks = sheetToObjects_(getSheet_(SHEET_NAMES.ORDER_CHECKS)).filter(function (c) { return normalizeDateStr_(c.Date) === today; });
+  if (!checks.length) return 0;
+  var packingIds = {};
+  todaysOrders.forEach(function (o) { packingIds[orderIdKey_(o.orderId)] = true; });
+  var orphans = checks.filter(function (c) { return !packingIds[orderIdKey_(c.OrderID)]; });
+  if (!orphans.length) return 0;
+
+  var attached = {};
+  checks.forEach(function (c) { attached[orderIdKey_(c.OrderID)] = true; });
+  var byInvoice = {};
+  todaysOrders.forEach(function (o) {
+    if (attached[orderIdKey_(o.orderId)]) return;
+    var k = String(o.orderNumber || '').trim() + '|' + normalizeDateStr_(o.deliveryDate);
+    (byInvoice[k] = byInvoice[k] || []).push(o);
+  });
+  var sessionsById = null, changed = 0;
+  orphans.forEach(function (c) {
+    var cand = (byInvoice[String(c.OrderNumber || '').trim() + '|' + normalizeDateStr_(c.DeliveryDate)] || [])[0];
+    if (!cand) return; // gone from Sage altogether - leave it as it is
+    if (orderIdKey_(c.AmendedToOrderID) === orderIdKey_(cand.orderId)) return; // already flagged
+    if (!sessionsById) {
+      sessionsById = {};
+      sheetToObjects_(getSheet_(SHEET_NAMES.SESSIONS)).forEach(function (s) { sessionsById[s.ID] = s; });
+    }
+    var session = sessionsById[c.TruckSessionID];
+    try {
+      ensureAmendSchema_();
+      if (session && session.Status === SESSION_STATUS.DISPATCHED) flagAmendedAfterDispatch_(c, cand);
+      else relinkAmendedOrder_(c, cand);
+      byInvoice[String(c.OrderNumber || '').trim() + '|' + normalizeDateStr_(c.DeliveryDate)].shift();
+      changed++;
+    } catch (err) {
+      Logger.log('Amended order ' + c.OrderNumber + ' not synced: ' + (err && err.message));
+    }
+  });
+  if (changed) { try { CacheService.getScriptCache().remove('truckBoard'); } catch (e) { /* best-effort */ } }
+  return changed;
+}
+
+/** Truck not dispatched: move the order check (and its lines) to the new OrderID. */
+function relinkAmendedOrder_(c, order) {
+  withOrderAllocationLock_(order.orderId, function () {
+    var checksSheet = getSheet_(SHEET_NAMES.ORDER_CHECKS);
+    var current = sheetToObjects_(checksSheet).filter(function (x) { return x.ID === c.ID; })[0];
+    if (!current || orderIdKey_(current.OrderID) !== orderIdKey_(c.OrderID)) return; // someone else just did it
+    var itemSheet = getSheet_(SHEET_NAMES.ITEM_CHECKS);
+    var oldItems = dedupeItemChecks_(sheetToObjects_(itemSheet).filter(function (i) { return i.OrderCheckID === c.ID; }));
+    var diff = amendDiff_(oldItems, order.items);
+
+    // New lines first, then re-key the kept ones, then drop the removed ones
+    // - so the order is never left with fewer lines than it should have.
+    if (diff.added.length) {
+      appendObjects_(itemSheet, SHEET_HEADERS.ItemChecks, diff.added.map(function (l) {
+        return {
+          ID: Utilities.getUuid(), OrderCheckID: c.ID, TruckSessionID: c.TruckSessionID, OrderID: order.orderId,
+          ItemKey: l.itemKey, ProductDescription: l.description, Qty: l.qty, Unit: l.unit,
+          Status: ITEM_STATUS.PENDING, NoStockReasonID: '', NoStockReason: '', CheckedBy: '', CheckedAt: '', PackedQty: ''
+        };
+      }));
+    }
+    diff.keep.forEach(function (pair) {
+      updateRowById_(itemSheet, SHEET_HEADERS.ItemChecks, pair[0].ID, { ItemKey: pair[1].itemKey, OrderID: order.orderId });
+    });
+    var drop = {};
+    diff.removed.forEach(function (i) { drop[String(i.ID)] = true; });
+    // Duplicate rows dedupeItemChecks_ left out belong to the old order too.
+    sheetToObjects_(itemSheet).forEach(function (i) {
+      if (i.OrderCheckID === c.ID && orderIdKey_(i.OrderID) === orderIdKey_(c.OrderID)) drop[String(i.ID)] = true;
+    });
+    if (Object.keys(drop).length) deleteRowsWhere_(itemSheet, function (row) { return drop[String(row[0])]; });
+
+    var note = amendNoteText_(diff);
+    updateRowById_(checksSheet, SHEET_HEADERS.OrderChecks, c.ID, {
+      OrderID: order.orderId, PreviousOrderID: c.OrderID, Customer: order.customer, RequiresCoa: !!order.requiresCoa,
+      AmendedAt: note ? nowIso_() : (current.AmendedAt || ''), AmendedNote: note || (current.AmendedNote || '')
+    });
+    var fresh = sheetToObjects_(checksSheet).filter(function (x) { return x.ID === c.ID; })[0];
+    reconcileOrderCheckStatus_(fresh, sheetToObjects_(itemSheet).filter(function (i) { return i.OrderCheckID === c.ID; }));
+  });
+}
+
+/** Truck already gone: leave its record alone, flag for the Dashboard. */
+function flagAmendedAfterDispatch_(c, order) {
+  var oldItems = dedupeItemChecks_(sheetToObjects_(getSheet_(SHEET_NAMES.ITEM_CHECKS)).filter(function (i) { return i.OrderCheckID === c.ID; }));
+  var note = amendNoteText_(amendDiff_(oldItems, order.items));
+  updateRowById_(getSheet_(SHEET_NAMES.ORDER_CHECKS), SHEET_HEADERS.OrderChecks, c.ID, {
+    AmendedToOrderID: order.orderId, AmendedAt: nowIso_(), AmendedAfterDispatch: !!note,
+    AmendedNote: note || 'Changed in Sage after dispatch (no line changes)'
+  });
+}
+
+/** Dashboard > Issues: orders changed in Sage after their truck left, not yet marked handled. */
+function listAmendedAfterDispatch() {
+  var sessionsById = {};
+  sheetToObjects_(getSheet_(SHEET_NAMES.SESSIONS)).forEach(function (s) { sessionsById[s.ID] = s; });
+  return sheetToObjects_(getSheet_(SHEET_NAMES.ORDER_CHECKS))
+    .filter(function (c) { return (c.AmendedAfterDispatch === true || String(c.AmendedAfterDispatch).toUpperCase() === 'TRUE') && !c.AmendHandledAt; })
+    .map(function (c) {
+      var s = sessionsById[c.TruckSessionID];
+      return { id: c.ID, orderNumber: c.OrderNumber, customer: c.Customer, date: normalizeDateStr_(c.Date),
+        truckName: s ? s.TruckName : '', dispatchedAt: s ? s.DispatchedAt : '', amendedAt: c.AmendedAt, note: c.AmendedNote };
+    })
+    .sort(function (a, b) { return String(b.amendedAt).localeCompare(String(a.amendedAt)); });
+}
+
+function setAmendHandled(orderCheckId) {
+  ensureAmendSchema_();
+  updateRowById_(getSheet_(SHEET_NAMES.ORDER_CHECKS), SHEET_HEADERS.OrderChecks, orderCheckId, {
+    AmendHandledBy: (CURRENT_USER_ && CURRENT_USER_.name) || '', AmendHandledAt: nowIso_()
+  });
+  return { ok: true };
 }

@@ -1156,6 +1156,7 @@
 
         <div class="dash-tabpane" data-dtab="issues" style="display:none;">
           <div id="dash-issues-empty" class="card" style="display:none;"><div class="empty">Nothing open - no jobs, packing issues, truck issues or driver reports waiting.</div></div>
+          <div id="amended-after-dispatch"></div>
           <div id="driver-reports-today"></div>
           <div id="packing-issues-today"></div>
           <div id="truck-issues-today"></div>
@@ -1337,7 +1338,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-11-11-11';
+  var BUILD_VERSION = 'build-2026-11-16-02';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -1517,7 +1518,7 @@
     // Collection (build-2026-11-10-07): collectOrder leaves an already
     // collected order as it is, so a retry can't double it up.
     getOrderForCollection: true, collectOrder: true, getTrayRoster: true,
-    getLiveDeliveries: true,
+    getLiveDeliveries: true, listAmendedAfterDispatch: true, setAmendHandled: true,
     // Driver sync replaces the same rows each time; settings is a read.
     getDriverSyncSettings: true, syncDriversFromFinancials: true, getDriverInviteInfo: true,
     // Saving a stop order sets the same order again if repeated.
@@ -2519,7 +2520,8 @@
     return '<div class="board-order-chip' + (locked ? ' locked' : '') + (saving ? ' saving' : '') + (isSearchMatch ? ' chip-match' : '') + '" data-order-id="' + o.orderId + '"' + (draggable ? ' data-draggable="1"' : '') + '>' +
       dot + '<span>' + escapeHtml(o.orderNumber) + ' - ' + escapeHtml(o.customer) +
       (locked ? ' <span class="hint">(dispatched)</span>' : (saving ? ' <span class="hint">saving...</span>' : '')) +
-      productionWarningBadge(o) + '</span>' +
+      productionWarningBadge(o) +
+      (o.amended ? ' <span class="badge badge-pack-overdue">Changed in Sage</span>' : '') + '</span>' +
       (showCollect && !saving ? '<button class="chip-collect-btn" onclick="openCollection(' + jsStrAttr_(o.orderId) + ')">Collect</button>' : '') +
       '</div>';
   }
@@ -3673,7 +3675,8 @@
       var badgeClass = o.status === 'Complete' ? 'badge-complete' : (o.status === 'In Progress' ? 'badge-progress' : 'badge-pending');
       return '<div class="tile" onclick="openOrder(\'' + o.orderId + '\')">' +
         '<div><div class="name">' + escapeHtml(o.orderNumber) + ' - ' + escapeHtml(o.customer) + '</div>' +
-        '<div class="meta">' + o.itemCount + ' item(s)</div>' + productionWarningLineHtml(o) + '</div>' +
+        '<div class="meta">' + o.itemCount + ' item(s)</div>' + productionWarningLineHtml(o) +
+        (o.amendedNote ? '<div class="late-reason-line">Changed in Sage - ' + escapeHtml(o.amendedNote) + '</div>' : '') + '</div>' +
         '<div style="display:flex; align-items:center; gap:10px;">' +
           '<span class="badge ' + badgeClass + '">' + escapeHtml(o.status) + '</span>' +
           '<button class="tile-remove-btn" onclick="event.stopPropagation(); removeOrderFromTruckUi(\'' + o.orderId + '\', ' + jsStrAttr_(o.orderNumber) + ')">Remove</button>' +
@@ -3863,7 +3866,11 @@
 
   function renderOrderDetail() {
     var result = state.currentOrder;
-    document.getElementById('od-warning').textContent = result.warning || '';
+    // Changed in Sage after it was put on this truck (build-2026-11-16-02):
+    // new lines are Pending and must be checked again.
+    var amended = result.orderCheck && result.orderCheck.AmendedNote
+      ? 'Changed in Sage - check the new lines. ' + result.orderCheck.AmendedNote : '';
+    document.getElementById('od-warning').textContent = [result.warning || '', amended].filter(Boolean).join(' ');
     var el = document.getElementById('od-items');
     var doneBtn = document.getElementById('od-done-btn');
 
@@ -4901,7 +4908,7 @@
       el.textContent = n ? String(n) : '';
       el.classList.toggle('quiet', !!quiet);
     };
-    var issues = (c.driverReports || 0) + (c.packingIssues || 0) + (c.truckIssues || 0) + (c.jobsPending || 0);
+    var issues = (c.driverReports || 0) + (c.packingIssues || 0) + (c.truckIssues || 0) + (c.jobsPending || 0) + (c.amendedAfterDispatch || 0);
     setTab('issues', issues);
     setTab('trays', c.trayProblems || 0);
     setTab('live', c.onRoad || 0, true);
@@ -5028,6 +5035,7 @@
       setDashCount('truckIssues', list.length);
     }).catch(showFatalError);
     callApi('listOpenDriverReports', []).then(function (list) { renderDriverReports(list, ''); setDashCount('driverReports', list.length); }).catch(ignoreUnknownAction_);
+    callApi('listAmendedAfterDispatch', []).then(function (list) { renderAmendedAfterDispatch(list); setDashCount('amendedAfterDispatch', list.length); }).catch(ignoreUnknownAction_);
     callApi('getTrayRoster', []).then(function (data) {
       trayRosterData = data;
       renderTrayRoster();
@@ -5240,6 +5248,28 @@
   function ignoreUnknownAction_(err) {
     if (err && /Unknown action/.test(err.message || '')) return;
     showFatalError(err);
+  }
+
+  // Orders changed in Sage after their truck had already left
+  // (build-2026-11-16-02) - someone needs to sort out the difference with
+  // the customer, then tick it off.
+  function renderAmendedAfterDispatch(list) {
+    var el = document.getElementById('amended-after-dispatch');
+    if (!el) return;
+    if (!list.length) { el.innerHTML = ''; return; }
+    el.innerHTML = '<div class="card"><h3 style="margin-top:0;">Changed in Sage after dispatch (' + list.length + ')</h3>' +
+      '<p class="hint" style="margin-top:0;">These invoices were edited in Sage after the truck had already left with the old version. Sort out the difference with the customer, then mark it handled.</p>' +
+      list.map(function (a) {
+        return '<div class="dash-order-row"><div><div>' + escapeHtml(a.orderNumber) + ' - ' + escapeHtml(a.customer) +
+          ' <span class="hint">(' + escapeHtml(a.truckName || '?') + ', ' + escapeHtml(formatDateForDisplay(a.date)) + ')</span></div>' +
+          '<div class="late-reason-line">' + escapeHtml(a.note || '') + '</div>' +
+          '<div class="hint">Changed ' + formatTime(a.amendedAt) + (a.dispatchedAt ? ', truck left ' + formatTime(a.dispatchedAt) : '') + '</div></div>' +
+          '<button class="btn btn-secondary" style="padding:6px 10px; font-size:13px;" onclick="markAmendHandled(' + jsStrAttr_(a.id) + ')">Mark handled</button></div>';
+      }).join('') + '</div>';
+  }
+
+  function markAmendHandled(id) {
+    callApi('setAmendHandled', [id]).then(loadDashboard).catch(showFatalError);
   }
 
   function toggleDriverReportResolved(reportId, currentStatus, idSuffix) {

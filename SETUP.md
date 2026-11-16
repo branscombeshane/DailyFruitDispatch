@@ -774,6 +774,41 @@ list further, the same way the search and date work together. Clearing
 either the text or the date (or tapping **Clear**) goes back to searching
 every day at once, same as before this was added.
 
+## Orders changed in Sage after they were put on a truck (build-2026-11-16-02)
+
+When an invoice is amended in Sage, Packing & Production deletes its copy
+of the order and imports it again under a **new OrderID**, with the same
+invoice number. Dispatch used to treat that as a brand-new order, so the
+same invoice could show twice: old version on the truck, new version in
+Unassigned.
+
+Now, wherever today's orders are read (Trucks board, a truck's order list,
+the check screen, the dispatch check), `syncAmendedOrders_` looks for an
+order on today's trucks that has vanished from Packing & Production, and a
+new order with the **same invoice number and delivery date**.
+
+- **Truck not dispatched yet:** the order moves to the new version on the
+  same truck.
+  - Lines with the same product, qty and unit keep their ticks.
+  - New or changed lines are added as Pending; removed lines go.
+  - `AmendedNote` lists what changed ("Added: … Removed: …"). It's shown
+    on the board chip ("Changed in Sage"), in the truck's order list and
+    on the check screen.
+  - The status is recalculated, so the order can't be Done or dispatched
+    until the new lines are checked.
+  - A screen still open on the old OrderID follows it to the new version.
+- **Truck already dispatched:** nothing on the truck changes. The order is
+  flagged (`AmendedAfterDispatch`) and listed under **Dashboard > Issues
+  > Changed in Sage after dispatch** with what changed, plus a **Mark
+  handled** button.
+- **Never twice:** an invoice already on one of today's trucks never shows
+  in Unassigned, and allocating its new ID is refused.
+- **Not covered:** if the delivery date changed in Sage too, they don't
+  match and the new version shows as a new order (as before).
+- New OrderChecks columns (`PreviousOrderID`, `AmendedAt`, `AmendedNote`,
+  `AmendedAfterDispatch`, `AmendedToOrderID`, `AmendHandledBy`,
+  `AmendHandledAt`) are added automatically.
+
 ## Duplicate order lines fixed (build-2026-11-16-01)
 
 INV0142400 (16 Nov) showed each line twice on the check screen and could

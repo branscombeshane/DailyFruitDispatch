@@ -938,13 +938,24 @@ A driver's orders and fruit-tray clients show as one numbered list, in the
 order the truck usually delivers them.
 
 - **Per truck:** each truck remembers its customers' stop order (`StopOrder`
-  tab, created automatically, one row per truck).
+  tab, created automatically, one row per truck per weekday).
 - **Learned:** every time a driver marks a stop delivered, today's
   delivered stops move into the order they were actually delivered in. Only
   today's customers move; everyone else on that truck keeps their place.
-- **Set by the driver:** **Change order** shows ▲ ▼ buttons, and **Save
-  order** keeps that order for the truck from then on. It's learned from
-  again as they deliver.
+- **Per weekday** (build-2026-11-17-03): routes run weekly, so each truck
+  keeps a separate order for each day of the week (`Weekday` column, Mon to
+  Sun, added automatically). Monday's list comes only from Mondays. Rows
+  from before then have a blank Weekday: they're used for a day that has no
+  order of its own yet, and are copied into that day's row the first time
+  it's saved. The driver screen and Live deliveries say which day's route
+  they're showing.
+- **Set by an Admin only** (build-2026-11-17-03; drivers could until then):
+  Dashboard > **Live deliveries** > tap a truck > **Change order** shows ▲ ▼
+  buttons; **Save order** keeps it for that truck on that trip's weekday
+  only. It's learned from again as drivers deliver. Server:
+  `adminSetStopOrder` (Admin role only; `driverSetStopOrder` is gone).
+  Drivers see a reminder to tap Delivered at each stop, because ticking in
+  a batch teaches the app the wrong order.
 - **New customers** (never on that truck before) are listed last until
   their place is learned. The driver sees a note saying how many.
 - **Next stop:** the first stop not yet delivered is highlighted as Next.

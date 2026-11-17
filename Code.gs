@@ -237,7 +237,7 @@ var TRAY_LEDGER_KEEP_DAYS = 365;
 // "t:<tray customer>" for a fruit-tray client) in delivery order. Learned
 // from the order drivers actually deliver in, and set directly when a
 // driver reorders their stops. See routeSequenceMerge_.
-SHEET_HEADERS.StopOrder = ['TruckID', 'Sequence', 'UpdatedAt', 'UpdatedBy', 'Source'];
+SHEET_HEADERS.StopOrder = ['TruckID', 'Sequence', 'UpdatedAt', 'UpdatedBy', 'Source', 'Weekday'];
 
 // ---------------------------------------------------------------------------
 // WEB APP ENTRY POINT
@@ -338,7 +338,7 @@ var API_ACTIONS = {
   getLiveDeliveries: getLiveDeliveries,
   listAmendedAfterDispatch: listAmendedAfterDispatch,
   setAmendHandled: setAmendHandled,
-  driverSetStopOrder: driverSetStopOrder,
+  adminSetStopOrder: adminSetStopOrder,
   getDriverSyncSettings: getDriverSyncSettings,
   saveFinancialsSource: saveFinancialsSource,
   syncDriversFromFinancials: syncDriversFromFinancials,
@@ -386,7 +386,7 @@ function buildActionRoles_() {
   var DRIVERS_ONLY = [ROLES.DRIVER];
   var groups = [
     // Drivers only ever see their own trips today (see getMyDriverTrips).
-    [DRIVERS_ONLY, ['getMyDriverTrips', 'driverMarkDelivered', 'driverReport', 'driverMarkTrayDelivered', 'driverSetStopOrder']],
+    [DRIVERS_ONLY, ['getMyDriverTrips', 'driverMarkDelivered', 'driverReport', 'driverMarkTrayDelivered']],
     // Customer Care's order lookup - also used by the Dashboard's own
     // order search, so every role gets it.
     [ALL, ['findOrderAcrossTrucks']],
@@ -422,7 +422,7 @@ function buildActionRoles_() {
       'addDriver', 'updateDriver', 'deleteDriver',
       'listLateReasons', 'addLateReason', 'updateLateReason', 'deleteLateReason', 'getZohoTraySettings',
       'getDriverSyncSettings', 'saveFinancialsSource', 'syncDriversFromFinancials', 'getDriverInviteInfo', 'sendDriverInvites', 'sendDriverInviteTest',
-      'getAdminSettings', 'probeSpreadsheet', 'saveDataSourceConfig'
+      'getAdminSettings', 'probeSpreadsheet', 'saveDataSourceConfig', 'adminSetStopOrder'
     ]]
   ];
   var map = {};
@@ -4653,7 +4653,7 @@ function driverSessionOrThrow_(sessionId, driver) {
  */
 function getMyDriverTrips() {
   var result = getMyDriverTripsUnordered_();
-  attachRouteOrder_(result.trips, 'driver');
+  attachRouteOrder_(result.trips, 'driver', todayString_());
   return result;
 }
 
@@ -5110,7 +5110,7 @@ function diagnoseDashboardSpeed() {
  */
 function getLiveDeliveries() {
   var result = getLiveDeliveriesUnordered_();
-  attachRouteOrder_(result.trips, 'live');
+  attachRouteOrder_(result.trips, 'live', todayString_());
   return result;
 }
 
@@ -5183,9 +5183,16 @@ function getLiveDeliveriesUnordered_() {
 // stops (orders + fruit-tray clients, one list) are shown in that order;
 // customers not seen on that truck before go last. The order is learned
 // every time a driver marks a stop delivered (the order they actually went
-// in) and set directly when a driver reorders their stops. Either way only
-// TODAY's customers move - the rest of the truck's remembered order is
-// left where it was (routeSequenceMerge_).
+// in) and set directly when an Admin reorders a trip's stops (Dashboard >
+// Live deliveries; drivers could do this until build-2026-11-17-03). Either
+// way only TODAY's customers move - the rest of the truck's remembered order
+// is left where it was (routeSequenceMerge_).
+//
+// Per weekday (build-2026-11-17-03): routes run weekly, so a truck keeps one
+// order per day of the week (Weekday column, Mon..Sun) and Monday learns only
+// from Mondays. Rows from before then have a blank Weekday: they're the
+// fallback for a day that has no order of its own yet, and seed that day's
+// row the first time it's saved.
 // ---------------------------------------------------------------------------
 
 function stopKey_(kind, customer) {
@@ -5228,31 +5235,63 @@ function stopOrderSheet_() {
     sheet.getRange(1, 1, 1, SHEET_HEADERS.StopOrder.length).setValues([SHEET_HEADERS.StopOrder]);
     sheet.setFrozenRows(1);
   }
+  ensureHeaderCells_(sheet, SHEET_HEADERS.StopOrder, ['Weekday']);
   return sheet;
 }
 
-/** { truckId: [keys...] } */
-function stopSequences_() {
-  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.STOP_ORDER);
-  var map = {};
-  if (!sheet) return map;
-  sheetToObjects_(sheet).forEach(function (r) {
-    try { map[String(r.TruckID)] = JSON.parse(r.Sequence || '[]'); } catch (e) { map[String(r.TruckID)] = []; }
-  });
-  return map;
+var WEEKDAYS_ = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+var WEEKDAY_NAMES_ = { Sun: 'Sunday', Mon: 'Monday', Tue: 'Tuesday', Wed: 'Wednesday', Thu: 'Thursday', Fri: 'Friday', Sat: 'Saturday' };
+
+/** 'yyyy-MM-dd' -> 'Mon' etc. (the calendar date's weekday, no time zone shift). */
+function weekdayOfDate_(dateStr) {
+  var m = String(dateStr || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return '';
+  return WEEKDAYS_[new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], 12)).getUTCDay()];
 }
 
-function saveStopOrder_(truckId, newOrder, by, source) {
-  if (!truckId || !newOrder.length) return;
+/** { byDay: { 'truckId|Mon': [keys] }, legacy: { truckId: [keys] } } */
+function stopSequences_() {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.STOP_ORDER);
+  var out = { byDay: {}, legacy: {} };
+  if (!sheet) return out;
+  sheetToObjects_(sheet).forEach(function (r) {
+    var seq;
+    try { seq = JSON.parse(r.Sequence || '[]'); } catch (e) { seq = []; }
+    var wd = String(r.Weekday || '').trim();
+    if (wd) out.byDay[String(r.TruckID) + '|' + wd] = seq;
+    else out.legacy[String(r.TruckID)] = seq;
+  });
+  return out;
+}
+
+/** The remembered order for one truck on one weekday (falls back to the pre-weekday order). */
+function stopSequenceFor_(seqs, truckId, weekday) {
+  return seqs.byDay[String(truckId) + '|' + weekday] || seqs.legacy[String(truckId)] || [];
+}
+
+function saveStopOrder_(truckId, weekday, newOrder, by, source) {
+  if (!truckId || !weekday || !newOrder.length) return;
   withNamedLock_('stopOrder_' + truckId, function () {
     var sheet = stopOrderSheet_();
-    var row = sheetToObjects_(sheet).filter(function (r) { return String(r.TruckID) === String(truckId); })[0];
-    var oldSeq = [];
-    if (row) { try { oldSeq = JSON.parse(row.Sequence || '[]'); } catch (e) { oldSeq = []; } }
-    var merged = routeSequenceMerge_(oldSeq, newOrder);
-    var patch = { TruckID: truckId, Sequence: JSON.stringify(merged), UpdatedAt: nowIso_(), UpdatedBy: by || '', Source: source };
-    if (row) updateRowById_(sheet, SHEET_HEADERS.StopOrder, truckId, patch);
-    else appendObject_(sheet, SHEET_HEADERS.StopOrder, patch);
+    var headers = SHEET_HEADERS.StopOrder;
+    var values = sheet.getDataRange().getValues();
+    var h = values[0].map(function (x) { return String(x).trim(); });
+    var cT = h.indexOf('TruckID'), cS = h.indexOf('Sequence'), cW = h.indexOf('Weekday');
+    var rowIndex = -1, legacySeq = null, oldSeq = null;
+    for (var i = 1; i < values.length; i++) {
+      if (String(values[i][cT]) !== String(truckId)) continue;
+      var wd = String(values[i][cW] || '').trim();
+      var seq;
+      try { seq = JSON.parse(values[i][cS] || '[]'); } catch (e) { seq = []; }
+      if (wd === weekday) { rowIndex = i + 1; oldSeq = seq; }
+      else if (!wd) legacySeq = seq;
+    }
+    // A weekday's first save starts from the old all-days order, if any.
+    var merged = routeSequenceMerge_(oldSeq || legacySeq || [], newOrder);
+    var rec = { TruckID: truckId, Sequence: JSON.stringify(merged), UpdatedAt: nowIso_(), UpdatedBy: by || '', Source: source, Weekday: weekday };
+    var row = headers.map(function (name) { return rec[name]; });
+    if (rowIndex !== -1) sheet.getRange(rowIndex, 1, 1, headers.length).setValues([row]);
+    else appendObjectForcingText_(sheet, headers, rec, ['TruckID', 'Weekday']);
   });
 }
 
@@ -5265,7 +5304,7 @@ function learnStopOrderFromSession_(session, by) {
       .map(function (l) { return stopKey_(l.TrayStopID ? 'tray' : 'order', l.Customer); });
     var seen = {};
     delivered = delivered.filter(function (k) { if (seen[k]) return false; seen[k] = true; return true; });
-    if (delivered.length >= 2) saveStopOrder_(session.TruckID, delivered, by, 'learned');
+    if (delivered.length >= 2) saveStopOrder_(session.TruckID, weekdayOfDate_(normalizeDateStr_(session.Date)), delivered, by, 'learned');
   } catch (err) {
     // Learning the order must never get in the way of recording a delivery.
   }
@@ -5278,9 +5317,10 @@ function learnStopOrderFromSession_(session, by) {
  * had a remembered place. view 'driver' uses stops/trayStops, 'live' uses
  * orders/trays.
  */
-function attachRouteOrder_(trips, view) {
+function attachRouteOrder_(trips, view, dateStr) {
   if (!trips || !trips.length) return;
   var seqs = stopSequences_();
+  var weekday = weekdayOfDate_(dateStr || todayString_());
   trips.forEach(function (t) {
     var items = [];
     (view === 'driver' ? t.stops : t.orders || []).forEach(function (o) {
@@ -5291,7 +5331,7 @@ function attachRouteOrder_(trips, view) {
       items.push({ kind: 'tray', id: st.trayStopId || '', key: stopKey_('tray', st.customer), customer: st.customer,
         detail: st.products, deliveredAt: st.deliveredAt, deliveredBy: st.deliveredBy || '', collected: st.collected || null, trays: st.trays || null });
     });
-    var seq = seqs[String(t.truckId)] || [];
+    var seq = stopSequenceFor_(seqs, t.truckId, weekday);
     var pos = {};
     seq.forEach(function (k, i) { if (!(k in pos)) pos[k] = i; });
     items.forEach(function (it, i) { it._i = i; });
@@ -5304,18 +5344,26 @@ function attachRouteOrder_(trips, view) {
     items.forEach(function (it) { delete it._i; });
     t.routeStops = items;
     t.routeKnown = items.filter(function (it) { return it.key in pos; }).length;
+    t.routeWeekday = WEEKDAY_NAMES_[weekday] || '';
   });
 }
 
-/** Driver saves their own stop order for this trip (keys from routeStops). */
-function driverSetStopOrder(sessionId, keys) {
-  var driver = currentDriver_();
-  var session = driverSessionOrThrow_(sessionId, driver);
+/**
+ * Admin sets a trip's stop order (Dashboard > Live deliveries; keys from
+ * routeStops). Saved for that truck on that trip's weekday only. Drivers
+ * can't do this since build-2026-11-17-03 - their order is learned from
+ * the order they deliver in.
+ */
+function adminSetStopOrder(sessionId, keys) {
+  var session = sheetToObjects_(getSheet_(SHEET_NAMES.SESSIONS)).filter(function (x) { return x.ID === sessionId; })[0];
+  if (!session) throw new Error('That trip no longer exists. Refresh and try again.');
   if (!Array.isArray(keys) || keys.length === 0 || keys.length > 300) throw new Error('Nothing to save.');
   var clean = [];
   keys.forEach(function (k) { k = String(k || ''); if (/^[ot]:/.test(k) && clean.indexOf(k) === -1) clean.push(k.slice(0, 300)); });
-  saveStopOrder_(session.TruckID, clean, driver.name, 'driver');
-  return { ok: true };
+  if (!clean.length) throw new Error('Nothing to save.');
+  var weekday = weekdayOfDate_(normalizeDateStr_(session.Date));
+  saveStopOrder_(session.TruckID, weekday, clean, CURRENT_USER_ ? CURRENT_USER_.name : '', 'admin');
+  return { ok: true, weekday: WEEKDAY_NAMES_[weekday] || weekday };
 }
 
 // ---------------------------------------------------------------------------

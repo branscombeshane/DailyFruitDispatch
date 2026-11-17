@@ -381,6 +381,9 @@
     .driver-stop.next-stop .stop-num { background: var(--green); color: #fff; }
     .stop-kind { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 6px; background: #eef2ef; color: #555; margin-left: 6px; vertical-align: middle; }
     .map-link { font-size: 13px; color: var(--green-dark, #2e7d32); text-decoration: underline; }
+    .driver-search { position: sticky; top: 0; z-index: 5; display: flex; gap: 8px; align-items: center; background: var(--bg, #f3f4f3); padding: 8px 0; margin-bottom: 4px; }
+    .driver-search input { flex: 1; font-size: 16px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 10px; background: #fff; }
+    .driver-search button { font-size: 18px; padding: 10px 14px; border: 1px solid var(--border); border-radius: 10px; background: #fff; }
     .reorder-btns { display: flex; flex-direction: column; gap: 4px; }
     /* Routed stops: details full width, buttons on their own row underneath. */
     .driver-stop.routed { flex-direction: column; align-items: stretch; }
@@ -819,6 +822,11 @@
       <div class="actions"><button onclick="loadDriverTrips()">Refresh</button><button onclick="logout()">Log out</button></div>
     </div>
     <div class="content">
+      <!-- Search my stops (build-2026-11-17-04): filters on the phone, no server call. -->
+      <div class="driver-search">
+        <input type="text" enterkeyhint="search" id="driver-search" placeholder="Search customer, order no. or address" autocomplete="off" oninput="renderDriverTrips()">
+        <button type="button" id="driver-search-clear" onclick="clearDriverSearch()" aria-label="Clear search" style="display:none;">✕</button>
+      </div>
       <div id="driver-trips"></div>
     </div>
   </div>
@@ -1338,7 +1346,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-11-17-03';
+  var BUILD_VERSION = 'build-2026-11-17-04';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -1940,6 +1948,7 @@
   function showDriverHome(preloaded) {
     document.getElementById('driver-user-name').textContent = state.checker.name;
     showScreen('screen-driver');
+    document.getElementById('driver-search').value = '';
     if (preloaded && preloaded.trips) { driverData = preloaded; renderDriverTrips(); return; }
     document.getElementById('driver-trips').innerHTML = '<div class="hint">Loading your trips...</div>';
     loadDriverTrips();
@@ -1950,6 +1959,24 @@
       driverData = data;
       renderDriverTrips();
     }).catch(showFatalError);
+  }
+
+  // Text typed in the driver's search box, lower-cased ('' = show all).
+  function driverSearchQuery_() {
+    var box = document.getElementById('driver-search');
+    var q = box ? box.value.trim().toLowerCase() : '';
+    var clr = document.getElementById('driver-search-clear');
+    if (clr) clr.style.display = q ? '' : 'none';
+    return q;
+  }
+  function clearDriverSearch() {
+    document.getElementById('driver-search').value = '';
+    renderDriverTrips();
+  }
+  function driverStopMatches_(st, q) {
+    if (!q) return true;
+    var hay = [st.customer, st.detail, st.orderNumber, st.deliveredBy].join(' ').toLowerCase();
+    return q.split(/\s+/).every(function (w) { return hay.indexOf(w) !== -1; });
   }
 
   function renderDriverTrips() {
@@ -2047,7 +2074,13 @@
     list.some(function (st) { if (!st.deliveredAt) { nextKey = st.key; return true; } return false; });
     var statusLine = t.status === 'Dispatched' ? 'Dispatched ' + formatTime(t.dispatchedAt) : 'Still being loaded - not dispatched yet';
 
-    var rows = list.length === 0 ? '<div class="hint" style="padding:10px 0;">No stops on this trip.</div>' : list.map(function (st, i) {
+    var query = driverSearchQuery_();
+    var matchCount = list.filter(function (st) { return driverStopMatches_(st, query); }).length;
+    var rows = list.length === 0 ? '<div class="hint" style="padding:10px 0;">No stops on this trip.</div>'
+      : query && matchCount === 0 ? '<div class="hint" style="padding:10px 0;">No stops on this trip match "' + escapeHtml(query) + '".</div>'
+      : list.map(function (st, i) {
+      // Search hides non-matching stops but keeps each stop's route number.
+      if (!driverStopMatches_(st, query)) return '';
       var done = !!st.deliveredAt;
       var cp = customerParts_(st.customer);
       var isNext = !editing && st.key === nextKey;
@@ -2092,7 +2125,7 @@
       '<h3 style="margin:0;">' + escapeHtml(t.truckName) + (t.tripNumber > 1 ? ' (Trip ' + t.tripNumber + ')' : '') + '</h3>' +
       '<div class="hint">' + escapeHtml(statusLine) + (t.route ? ' &middot; Route: ' + escapeHtml(t.route) : '') + '</div>' +
       '<div class="hint">Drivers: ' + escapeHtml(t.drivers) + '</div>' +
-      '<div style="margin:10px 0 4px; font-weight:600;">Stops in route order - ' + deliveredCount + ' of ' + list.length + ' delivered</div>' +
+      '<div style="margin:10px 0 4px; font-weight:600;">Stops in route order - ' + deliveredCount + ' of ' + list.length + ' delivered' + (query ? ' · ' + matchCount + ' match' + (matchCount === 1 ? '' : 'es') : '') + '</div>' +
       orderBar + rows +
       (!editing ? '<button class="btn btn-danger btn-block" style="margin-top:12px;" onclick="openDriverReport(' + jsStrAttr_(t.sessionId) + ', \'\')">Report road / vehicle incident</button>' : '') +
       reportsHtml +

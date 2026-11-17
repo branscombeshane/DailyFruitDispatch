@@ -2067,3 +2067,12 @@ either order.
 twice, the TrayLedger at most once (it was read once per trip), and the
 tray sheets are skipped completely unless one of the driver's trucks is
 linked to a Zoho vehicle.
+
+## Driver search (build-2026-11-17-04)
+
+A search box at the top of the driver's screen (it stays at the top while
+scrolling) filters their stops as they type: customer name, order number,
+fruit-tray address and products. Several words must all match, in any order
+("tsebo africa"). Stops keep their route number, the heading shows how many
+match, and ✕ clears it. It searches what's already on the phone, so there is
+no server call and nothing to deploy in `Code.gs`.

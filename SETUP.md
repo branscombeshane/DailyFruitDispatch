@@ -2042,3 +2042,17 @@ exactly like "this field is blank" or "this field won't save" in the app,
 even though the data is actually sitting in the sheet a column or two over.
 If a field looks empty right after an update, re-run `setupSpreadsheet`
 first before troubleshooting anything else.
+
+## Faster driver sign-in (build-2026-11-17-02)
+
+Drivers waited for two server calls after tapping Sign in: the login check,
+then `getMyDriverTrips`. Now `authenticateUser` sends a driver's trips back
+in the same answer (`driverTrips`), and the app shows them straight away.
+If that part fails, or the server is older, the app asks for them
+separately as before, so the front end and `Code.gs` can be deployed in
+either order.
+
+`getMyDriverTrips` also does less work: DriverLogs is read once instead of
+twice, the TrayLedger at most once (it was read once per trip), and the
+tray sheets are skipped completely unless one of the driver's trucks is
+linked to a Zoho vehicle.

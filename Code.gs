@@ -1113,7 +1113,14 @@ function pruneOldRecords() {
 function authenticateUser(name, pin) {
   var check = verifyCredentials_(name, pin);
   if (!check.ok) return { ok: false, error: check.error };
-  return { ok: true, user: check.user };
+  var out = { ok: true, user: check.user };
+  // Drivers get today's trips in the same answer (build-2026-11-17-02), so
+  // their phone doesn't wait for a second round trip to the server after
+  // signing in. If it fails, the app simply asks for them as before.
+  if (check.user.role === ROLES.DRIVER) {
+    try { CURRENT_USER_ = check.user; out.driverTrips = getMyDriverTrips(); } catch (e) { /* app falls back to getMyDriverTrips */ }
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -4664,7 +4671,10 @@ function getMyDriverTripsUnordered_() {
   var mineIds = {};
   mine.forEach(function (s) { mineIds[s.ID] = true; });
   var orderChecks = sheetToObjects_(getSheet_(SHEET_NAMES.ORDER_CHECKS)).filter(function (c) { return mineIds[c.TruckSessionID]; });
-  var logs = driverLogs_().filter(function (l) { return mineIds[l.TruckSessionID]; });
+  // DriverLogs is read once and shared with the tray ticks below (it used
+  // to be read twice per request - build-2026-11-17-02).
+  var allLogs = driverLogs_();
+  var logs = allLogs.filter(function (l) { return mineIds[l.TruckSessionID]; });
 
   // Fruit-tray stops from Zoho: shown on the driver's FIRST trip today on
   // each truck (tray clients are one run a day), via the truck's Zoho
@@ -4672,8 +4682,12 @@ function getMyDriverTripsUnordered_() {
   // they show whichever of the truck's drivers ticked them.
   var trucksById = {};
   sheetToObjects_(getSheet_(SHEET_NAMES.TRUCKS)).forEach(function (t) { trucksById[t.ID] = t; });
-  var trayByVehicle = trayStopsByVehicle_(today);
-  var trayDelivered = trayDeliveredMap_(today);
+  // Tray sheets are only read if one of this driver's trucks is linked to a
+  // Zoho vehicle, and the ledger at most once.
+  var anyTrayTruck = mine.some(function (s) { return trucksById[s.TruckID] && trucksById[s.TruckID].ZohoVehicleID; });
+  var trayByVehicle = anyTrayTruck ? trayStopsByVehicle_(today) : {};
+  var trayDelivered = anyTrayTruck ? trayDeliveredMap_(today, allLogs) : {};
+  var ledgerToday = null;
   var trayShownForTruck = {};
 
   return {
@@ -4684,7 +4698,7 @@ function getMyDriverTripsUnordered_() {
       var trayStops = [];
       if (truck && truck.ZohoVehicleID && !trayShownForTruck[s.TruckID]) {
         trayShownForTruck[s.TruckID] = true;
-        var ledgerToday = trayLedgerByStopId_(today);
+        if (!ledgerToday) ledgerToday = trayLedgerByStopId_(today);
         trayStops = (trayByVehicle[String(truck.ZohoVehicleID)] || []).map(function (st) {
           var d = trayDelivered[st.ID];
           var l = ledgerToday[st.ID];

@@ -5308,7 +5308,7 @@ function driverSetStopOrder(sessionId, keys) {
 // DRIVERS FROM THE FINANCIALS APP (build-2026-11-11-06)
 //
 // Shane's request: the Drivers list is kept up to date from Financials'
-// Employees sheet - Department "Drivers", company group "group" (Jhb) -
+// Employees sheet - Job title "Driver", company group "group" (Jhb) -
 // instead of by hand. Each driver signs in with a short login (first name +
 // surname initial, e.g. "SteveR") and their employee number as the PIN
 // (Shane's call, 11 Nov 2026: low-risk data, easy for drivers). Only name,
@@ -5318,7 +5318,10 @@ function driverSetStopOrder(sessionId, keys) {
 // ---------------------------------------------------------------------------
 
 var FIN_EMPLOYEES_TAB = 'Employees';
-var FIN_DRIVER_DEPARTMENT = 'Drivers';
+// Who counts as a driver: Job title "Driver" (any case), whatever the
+// department - night-shift drivers sit under Veg Night, some under Market
+// (build-2026-11-17-01; was Department = Drivers).
+var FIN_DRIVER_JOB_TITLE_RE = /^drivers?$/i;
 var FIN_COMPANY_GROUP = 'group'; // Jhb
 
 function finCell_(row, col) { return col === -1 ? '' : row[col]; }
@@ -5335,12 +5338,12 @@ function readFinancialsDrivers_(spreadsheetId) {
     if (i === -1 && required) throw new Error('Financials Employees tab has no "' + name + '" column.');
     return i;
   };
-  var cEmp = col('EmployeeNumber', true), cName = col('Name', true), cDept = col('Department', true), cActive = col('Active', true);
+  var cEmp = col('EmployeeNumber', true), cName = col('Name', true), cTitle = col('JobTitle', true), cActive = col('Active', true);
   var cGroup = col('CompanyGroup', false), cContact = col('ContactNumber', false), cDischarged = col('DateDischarged', false);
   var out = [];
   for (var i = 1; i < values.length; i++) {
     var r = values[i];
-    if (String(finCell_(r, cDept)).trim() !== FIN_DRIVER_DEPARTMENT) continue;
+    if (!FIN_DRIVER_JOB_TITLE_RE.test(String(finCell_(r, cTitle)).trim())) continue;
     if ((String(finCell_(r, cGroup)).trim() || 'group') !== FIN_COMPANY_GROUP) continue;
     var empNo = String(finCell_(r, cEmp)).trim();
     var name = String(finCell_(r, cName)).replace(/\s+/g, ' ').trim();
@@ -5458,7 +5461,7 @@ function syncDriversFromFinancials() {
     });
 
     // Synced before but no longer a Jhb driver in Financials (left the
-    // Drivers department, or deleted there) -> removed too.
+    // Driver job title, or deleted there) -> removed too.
     current.forEach(function (d) {
       if (String(d.Source || '') !== 'Financials' || matchedIds[d.ID]) return;
       if (finByEmp[String(d.EmployeeNumber || '').trim()]) return;

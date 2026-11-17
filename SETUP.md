@@ -879,8 +879,10 @@ PIN is never sent: the message says it's their employee number.
 The Drivers list is kept up to date from the Financials app's **Employees**
 sheet instead of by hand.
 
-- **Who:** active employees in the **Drivers** department of company group
-  `group` (Jhb). Cape Town / Blendid and other departments are ignored.
+- **Who:** active employees whose **Job title** is `Driver` (any case),
+  in any department, of company group `group` (Jhb). Cape Town / Blendid
+  are ignored. (build-2026-11-17-01; before that it used the Drivers
+  department, which missed night-shift drivers under Veg Night/Market.)
 - **When:** every night (inside `pruneOldRecords`, so the 02:00 trigger
   from `setupDailyPruneTrigger` covers it), and from **Settings > Drivers
   > Sync now**.
@@ -888,7 +890,7 @@ sheet instead of by hand.
   and tap **Connect**. It's stored as Setting `FinancialsSpreadsheetId`.
   Dispatch's Apps Script must be able to open that spreadsheet (same
   Google account).
-- **Data read:** only `EmployeeNumber`, `Name`, `Department`,
+- **Data read:** only `EmployeeNumber`, `Name`, `JobTitle`,
   `CompanyGroup`, `Active`, `DateDischarged`, `ContactNumber`. No pay, ID
   or bank details.
 - **Active rule** (build-2026-11-11-10): a driver has left if `Active` is
@@ -903,7 +905,7 @@ sheet instead of by hand.
   - New drivers are added.
   - Names and contact numbers follow Financials.
   - Drivers who are no longer employed (Active FALSE or a discharge
-    date), or no longer in the Drivers department, are **deleted** from
+    date), or whose job title is no longer Driver, are **deleted** from
     Dispatch's Drivers list (build-2026-11-11-11, Shane's request). Their
     past trips, deliveries, reports and tray records keep their name as
     text. Safety net: the sync refuses to delete anything if Financials

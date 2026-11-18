@@ -1371,7 +1371,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-11-18-01';
+  var BUILD_VERSION = 'build-2026-11-18-02';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -2007,6 +2007,14 @@
     return q.split(/\s+/).every(function (w) { return hay.indexOf(w) !== -1; });
   }
 
+  // Status badge for a driver report; resolved ones say who and when
+  // (build-2026-11-18-02; older servers send no resolvedBy - badge only).
+  function reportStatusBadge_(r) {
+    var done = r.status === 'Resolved';
+    var who = done && r.resolvedBy ? ' by ' + r.resolvedBy + (r.resolvedAt ? ' at ' + formatTime(r.resolvedAt) : '') : '';
+    return '<span class="badge ' + (done ? 'badge-complete' : 'badge-pending') + '">' + escapeHtml(r.status + who) + '</span>';
+  }
+
   function renderDriverTrips() {
     var el = document.getElementById('driver-trips');
     var trips = (driverData && driverData.trips) || [];
@@ -2065,7 +2073,7 @@
         t.reports.map(function (r) {
           return '<div class="hint" style="padding:4px 0;">' + formatTime(r.loggedAt) + ' - ' + escapeHtml(r.category) +
             (r.customer ? ' (' + escapeHtml(r.customer) + ')' : '') + (r.note ? ': ' + escapeHtml(r.note) : '') +
-            ' <span class="badge ' + (r.status === 'Resolved' ? 'badge-complete' : 'badge-pending') + '">' + escapeHtml(r.status) + '</span></div>';
+            ' ' + reportStatusBadge_(r) + '</div>';
         }).join('') + '</div>';
       return '<div class="card">' +
         '<h3 style="margin:0;">' + escapeHtml(t.truckName) + (t.tripNumber > 1 ? ' (Trip ' + t.tripNumber + ')' : '') + '</h3>' +
@@ -2146,7 +2154,7 @@
       t.reports.map(function (r) {
         return '<div class="hint" style="padding:4px 0;">' + formatTime(r.loggedAt) + ' - ' + escapeHtml(r.category) +
           (r.customer ? ' (' + escapeHtml(customerParts_(r.customer).name) + ')' : '') + (r.note ? ': ' + escapeHtml(r.note) : '') +
-          ' <span class="badge ' + (r.status === 'Resolved' ? 'badge-complete' : 'badge-pending') + '">' + escapeHtml(r.status) + '</span></div>';
+          ' ' + reportStatusBadge_(r) + '</div>';
       }).join('') + '</div>';
 
     return '<div class="card">' +
@@ -5161,7 +5169,7 @@
         }).join('') : '<div class="hint">No stops on this trip.</div>') +
         (t.reports.length ? '<div style="font-weight:600; margin-top:10px;">Reported from the road</div>' + t.reports.map(function (r) {
           return '<div class="hint" style="padding:3px 0;">' + formatTime(r.loggedAt) + ' - ' + escapeHtml(r.category) + (r.customer ? ' (' + escapeHtml(customerParts_(r.customer).name) + ')' : '') +
-            (r.note ? ': ' + escapeHtml(r.note) : '') + ' <span class="badge ' + (r.status === 'Resolved' ? 'badge-complete' : 'badge-pending') + '">' + escapeHtml(r.status) + '</span></div>';
+            (r.note ? ': ' + escapeHtml(r.note) : '') + ' ' + reportStatusBadge_(r) + '</div>';
         }).join('') : '') + '</div>'
       : '<div class="live-trip-body">' +
         (t.orders.length ? '<div style="font-weight:600; margin-top:4px;">Orders</div>' + t.orders.map(function (o) { return stopRow(o.customer, o.orderNumber, o); }).join('') : '') +
@@ -5169,7 +5177,7 @@
         (!t.orders.length && !t.trays.length ? '<div class="hint">No stops on this trip.</div>' : '') +
         (t.reports.length ? '<div style="font-weight:600; margin-top:10px;">Reported from the road</div>' + t.reports.map(function (r) {
           return '<div class="hint" style="padding:3px 0;">' + formatTime(r.loggedAt) + ' - ' + escapeHtml(r.category) + (r.customer ? ' (' + escapeHtml(customerParts_(r.customer).name) + ')' : '') +
-            (r.note ? ': ' + escapeHtml(r.note) : '') + ' <span class="badge ' + (r.status === 'Resolved' ? 'badge-complete' : 'badge-pending') + '">' + escapeHtml(r.status) + '</span></div>';
+            (r.note ? ': ' + escapeHtml(r.note) : '') + ' ' + reportStatusBadge_(r) + '</div>';
         }).join('') : '') + '</div>';
       return '<div class="live-trip"><div class="live-trip-head" onclick="toggleLiveTrip(' + jsStrAttr_(t.sessionId) + ')"><div style="flex:1;">' +
         '<div><strong>' + escapeHtml(t.truckName) + (t.tripNumber > 1 ? ' (Trip ' + t.tripNumber + ')' : '') + '</strong>' +

@@ -2111,3 +2111,15 @@ connection can't record it twice. Server: `driverTrayCollectInfo`,
 `driverCollectTrays`, `driverUndoTrayCollection` (drivers only).
 When a driver is delivering to the client, trays still go on the Delivered
 prompt as before.
+
+## Who resolved a driver report; duplicate reports (build-2026-11-18-02)
+
+- **Who resolved it:** driver reports on Dashboard > Live deliveries and on
+  the driver's own screen now show "Resolved by <name> at <time>" (the
+  Issues tab already did). Server: reports carry `resolvedBy` /
+  `resolvedAt` from DriverLogs `ResolvedByName` / `ResolvedAt`.
+- **Duplicates:** drivers sometimes sent the same report two or three
+  times (slow signal), and each copy had to be resolved separately.
+  `driverReport` now treats the same driver, trip, stop, category and note
+  within 15 minutes as the same report and keeps the first one. Older
+  copies already in the sheet stay as they are.

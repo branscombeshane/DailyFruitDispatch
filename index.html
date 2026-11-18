@@ -827,6 +827,7 @@
         <input type="text" enterkeyhint="search" id="driver-search" placeholder="Search customer, order no. or address" autocomplete="off" oninput="renderDriverTrips()">
         <button type="button" id="driver-search-clear" onclick="clearDriverSearch()" aria-label="Clear search" style="display:none;">✕</button>
       </div>
+      <button class="btn btn-secondary btn-block" style="margin:0 0 10px;" onclick="openTrayPickup()">Collect empty trays (no delivery)</button>
       <div id="driver-trips"></div>
     </div>
   </div>
@@ -873,6 +874,30 @@
       <div class="error" id="tray-collect-error"></div>
       <button class="btn btn-primary btn-block" style="margin:10px 0;" onclick="submitTrayCollect()">Mark delivered</button>
       <button class="btn btn-secondary btn-block" onclick="closeTrayCollectModal()">Cancel</button>
+    </div>
+  </div>
+
+  <!-- Driver: empty trays picked up from a client with no delivery (build-2026-11-18-01) -->
+  <div class="modal-backdrop" id="tray-pickup-modal">
+    <div class="modal">
+      <h3 style="margin-top:0;">Collect empty trays</h3>
+      <p class="hint" style="margin-top:0;">For trays picked up from a fruit-tray client you're <strong>not</strong> delivering to. When you deliver, enter trays on the Delivered prompt instead.</p>
+      <div id="tray-pickup-choose">
+        <input type="text" id="tray-pickup-search" placeholder="Search client" autocomplete="off" oninput="renderTrayPickupClients()" style="width:100%; box-sizing:border-box; font-size:16px; padding:10px; border:1px solid var(--border); border-radius:8px;">
+        <div id="tray-pickup-clients" style="max-height:45vh; overflow-y:auto; margin-top:6px;"></div>
+      </div>
+      <div id="tray-pickup-form" style="display:none;">
+        <div id="tray-pickup-customer" style="font-weight:600;"></div>
+        <div class="hint" id="tray-pickup-out"></div>
+        <button type="button" class="btn btn-secondary" style="margin:6px 0;" onclick="trayPickupChoose(null)">Change client</button>
+        <div class="tray-field-row"><label for="tray-pickup-small">Small</label><input type="number" inputmode="numeric" min="0" id="tray-pickup-small" value="0" oninput="document.getElementById('tray-pickup-error').textContent = ''"></div>
+        <div class="tray-field-row"><label for="tray-pickup-medium">Medium</label><input type="number" inputmode="numeric" min="0" id="tray-pickup-medium" value="0" oninput="document.getElementById('tray-pickup-error').textContent = ''"></div>
+        <div class="tray-field-row"><label for="tray-pickup-large">Large</label><input type="number" inputmode="numeric" min="0" id="tray-pickup-large" value="0" oninput="document.getElementById('tray-pickup-error').textContent = ''"></div>
+        <button class="btn btn-primary btn-block" style="margin:10px 0 0;" onclick="submitTrayPickup()">Save collection</button>
+      </div>
+      <div class="error" id="tray-pickup-error"></div>
+      <div id="tray-pickup-today"></div>
+      <button class="btn btn-secondary btn-block" style="margin-top:10px;" onclick="closeTrayPickup()">Close</button>
     </div>
   </div>
 
@@ -1346,7 +1371,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-11-17-04';
+  var BUILD_VERSION = 'build-2026-11-18-01';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -1531,6 +1556,9 @@
     getDriverSyncSettings: true, syncDriversFromFinancials: true, getDriverInviteInfo: true,
     // Saving a stop order sets the same order again if repeated.
     adminSetStopOrder: true,
+    // Tray collection with no delivery: info is a read, collect carries a
+    // request id from the phone (a repeat is ignored), undo is a delete.
+    driverTrayCollectInfo: true, driverCollectTrays: true, driverUndoTrayCollection: true,
     listOpenDriverReports: true, listDriverReportsForDate: true, setDriverReportStatus: true
   };
   // Delays before each automatic retry (~0.8s, then ~2s later) - short
@@ -2194,6 +2222,113 @@
   }
 
   function closeTrayCollectModal() { document.getElementById('tray-collect-modal').classList.remove('active'); }
+
+  // ------------------------------------------------------------------
+  // Empty trays collected with no delivery (build-2026-11-18-01)
+  // ------------------------------------------------------------------
+  var trayPickup = { clients: [], today: [], chosen: null };
+
+  function newRequestId_() {
+    if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+    return 'r' + Date.now().toString(36) + Math.random().toString(36).slice(2, 12);
+  }
+
+  function openTrayPickup() {
+    callApi('driverTrayCollectInfo', []).then(function (info) {
+      trayPickup.clients = info.clients || [];
+      trayPickup.today = info.today || [];
+      document.getElementById('tray-pickup-search').value = '';
+      document.getElementById('tray-pickup-error').textContent = '';
+      trayPickupChoose(null);
+      renderTrayPickupToday();
+      document.getElementById('tray-pickup-modal').classList.add('active');
+    }).catch(function (err) {
+      if (err && /Unknown action/.test(err.message || '')) { alert('This needs the latest Dispatch update. Ask the office.'); return; }
+      showFatalError(err);
+    });
+  }
+
+  function closeTrayPickup() { document.getElementById('tray-pickup-modal').classList.remove('active'); }
+
+  function renderTrayPickupClients() {
+    var q = document.getElementById('tray-pickup-search').value.trim().toLowerCase();
+    var words = q ? q.split(/\s+/) : [];
+    var list = trayPickup.clients.filter(function (c) {
+      var hay = c.customer.toLowerCase();
+      return words.every(function (w) { return hay.indexOf(w) !== -1; });
+    });
+    var el = document.getElementById('tray-pickup-clients');
+    if (!trayPickup.clients.length) { el.innerHTML = '<div class="hint">No fruit-tray clients on record yet.</div>'; return; }
+    if (!list.length) { el.innerHTML = '<div class="hint" style="padding:8px 0;">No client matches "' + escapeHtml(q) + '".</div>'; return; }
+    el.innerHTML = list.slice(0, 40).map(function (c) {
+      var i = trayPickup.clients.indexOf(c);
+      var cp = customerParts_(c.customer);
+      return '<div class="dash-order-row" style="cursor:pointer;" onclick="trayPickupChoose(' + i + ')"><div><div>' + escapeHtml(cp.name) + '</div>' +
+        (cp.rest ? '<div class="hint">' + escapeHtml(cp.rest) + '</div>' : '') + '</div><span class="hint">Choose ›</span></div>';
+    }).join('') + (list.length > 40 ? '<div class="hint" style="padding:6px 0;">' + (list.length - 40) + ' more - type more of the name.</div>' : '');
+  }
+
+  function trayPickupChoose(index) {
+    var c = index === null ? null : trayPickup.clients[index];
+    trayPickup.chosen = c;
+    document.getElementById('tray-pickup-choose').style.display = c ? 'none' : '';
+    document.getElementById('tray-pickup-form').style.display = c ? '' : 'none';
+    document.getElementById('tray-pickup-error').textContent = '';
+    if (!c) { renderTrayPickupClients(); return; }
+    var cp = customerParts_(c.customer);
+    document.getElementById('tray-pickup-customer').textContent = cp.name;
+    var outBits = [];
+    ['small', 'medium', 'large'].forEach(function (k) { if (c.out && c.out[k] > 0) outBits.push(c.out[k] + ' ' + k); });
+    document.getElementById('tray-pickup-out').textContent = (cp.rest ? cp.rest + ' · ' : '') + 'Trays out there: ' + (outBits.length ? outBits.join(', ') : 'none on record');
+    ['small', 'medium', 'large'].forEach(function (k) { document.getElementById('tray-pickup-' + k).value = '0'; });
+  }
+
+  function submitTrayPickup() {
+    var c = trayPickup.chosen;
+    if (!c) return;
+    var counts = {}, bad = false, total = 0;
+    ['small', 'medium', 'large'].forEach(function (k) {
+      var v = String(document.getElementById('tray-pickup-' + k).value).trim();
+      var n = v === '' ? 0 : Number(v);
+      if (!(n >= 0) || Math.floor(n) !== n) bad = true;
+      counts[k] = n; total += n || 0;
+    });
+    var errEl = document.getElementById('tray-pickup-error');
+    if (bad) { errEl.textContent = 'Use whole numbers, 0 or more.'; return; }
+    if (!total) { errEl.textContent = 'Enter how many empty trays you collected.'; return; }
+    callApi('driverCollectTrays', [newRequestId_(), c.customer, counts]).then(function () {
+      return callApi('driverTrayCollectInfo', []);
+    }).then(function (info) {
+      trayPickup.clients = info.clients || trayPickup.clients;
+      trayPickup.today = info.today || [];
+      document.getElementById('tray-pickup-search').value = '';
+      trayPickupChoose(null);
+      renderTrayPickupToday();
+      errEl.innerHTML = '<span style="color:var(--green);">Saved: ' + escapeHtml(trayCountText_(counts, '')) + ' from ' + escapeHtml(customerParts_(c.customer).name) + '.</span>';
+    }).catch(function (err) { errEl.textContent = (err && err.message) || 'Could not save.'; });
+  }
+
+  function renderTrayPickupToday() {
+    var el = document.getElementById('tray-pickup-today');
+    if (!trayPickup.today.length) { el.innerHTML = ''; return; }
+    el.innerHTML = '<div style="font-weight:600; margin-top:12px;">Your collections today</div>' + trayPickup.today.map(function (r) {
+      return '<div class="dash-order-row"><div><div>' + escapeHtml(customerParts_(r.customer).name) + '</div>' +
+        '<div class="hint">' + formatTime(r.at) + ' · ' + escapeHtml(trayCountText_(r.collected, '0')) + '</div></div>' +
+        '<button class="btn btn-secondary" onclick="undoTrayPickup(' + jsStrAttr_(r.id) + ')">Undo</button></div>';
+    }).join('');
+  }
+
+  function undoTrayPickup(id) {
+    if (!confirm('Remove this collection?')) return;
+    callApi('driverUndoTrayCollection', [id]).then(function () {
+      return callApi('driverTrayCollectInfo', []);
+    }).then(function (info) {
+      trayPickup.clients = info.clients || trayPickup.clients;
+      trayPickup.today = info.today || [];
+      renderTrayPickupToday();
+      if (!trayPickup.chosen) renderTrayPickupClients();
+    }).catch(showFatalError);
+  }
 
   function driverSetDelivered(orderCheckId, delivered) {
     callApi('driverMarkDelivered', [orderCheckId, delivered]).then(loadDriverTrips).catch(function (err) {
@@ -5128,7 +5263,8 @@
       shown.map(function (c) {
         var cp = customerParts_(c.customer);
         return '<div class="dash-order-row"><div><div>' + escapeHtml(cp.name) + (c.truck ? ' <span class="hint">(' + escapeHtml(c.truck) + ')</span>' : '') + '</div>' +
-          '<div class="hint">' + c.deliveries + ' deliver' + (c.deliveries === 1 ? 'y' : 'ies') + ', last ' + escapeHtml(formatDateForDisplay(c.lastDelivery)) +
+          '<div class="hint">' + c.deliveries + ' deliver' + (c.deliveries === 1 ? 'y' : 'ies') + (c.lastDelivery ? ', last ' + escapeHtml(formatDateForDisplay(c.lastDelivery)) : '') +
+            (c.collectionVisits ? ' · ' + c.collectionVisits + ' collection-only visit' + (c.collectionVisits === 1 ? '' : 's') : '') +
             ' · last trays back: ' + (c.lastCollection ? escapeHtml(formatDateForDisplay(c.lastCollection)) : 'never') + '</div>' +
           (c.missedInARow >= 2 ? '<div class="late-reason-line">' + c.missedInARow + ' deliveries in a row with nothing collected</div>' : '') +
           '</div><div style="text-align:right;"><strong>' + escapeHtml(outText(c.out)) + '</strong><div class="hint">out</div></div></div>';

@@ -229,8 +229,13 @@ var SHEET_HEADERS = {
   // (entered by the driver). Kept TRAY_LEDGER_KEEP_DAYS, not the usual 14,
   // so a customer who keeps not returning trays shows up over weeks.
   TrayLedger: ['ID', 'Date', 'TrayStopID', 'Customer', 'ZohoVehicle', 'TruckName', 'DriverName',
-    'DeliveredSmall', 'DeliveredMedium', 'DeliveredLarge', 'CollectedSmall', 'CollectedMedium', 'CollectedLarge', 'LoggedAt']
+    'DeliveredSmall', 'DeliveredMedium', 'DeliveredLarge', 'CollectedSmall', 'CollectedMedium', 'CollectedLarge', 'LoggedAt',
+    // Kind (build-2026-11-18-01): blank = a delivery; 'Collection' = the
+    // driver only picked up empty trays (no delivery to that client that
+    // day). Those rows have TrayStopID 'collect:<id>' and 0 delivered.
+    'Kind']
 };
+var TRAY_KIND_COLLECTION = 'Collection';
 var TRAY_LEDGER_KEEP_DAYS = 365;
 // Remembered stop order per truck (build-2026-11-11-05) - one row per
 // truck; Sequence is a JSON list of stop keys ("o:<customer>" for an order,
@@ -279,6 +284,9 @@ var API_ACTIONS = {
   listTrucks: listTrucks,
   getTrucksForSelection: getTrucksForSelection,
   addTruck: addTruck,
+  driverTrayCollectInfo: driverTrayCollectInfo,
+  driverCollectTrays: driverCollectTrays,
+  driverUndoTrayCollection: driverUndoTrayCollection,
   updateTruck: updateTruck,
   deleteTruck: deleteTruck,
   listDrivers: listDrivers,
@@ -386,7 +394,7 @@ function buildActionRoles_() {
   var DRIVERS_ONLY = [ROLES.DRIVER];
   var groups = [
     // Drivers only ever see their own trips today (see getMyDriverTrips).
-    [DRIVERS_ONLY, ['getMyDriverTrips', 'driverMarkDelivered', 'driverReport', 'driverMarkTrayDelivered']],
+    [DRIVERS_ONLY, ['getMyDriverTrips', 'driverMarkDelivered', 'driverReport', 'driverMarkTrayDelivered', 'driverTrayCollectInfo', 'driverCollectTrays', 'driverUndoTrayCollection']],
     // Customer Care's order lookup - also used by the Dashboard's own
     // order search, so every role gets it.
     [ALL, ['findOrderAcrossTrucks']],
@@ -4880,7 +4888,15 @@ function getTrayRoster() {
   rows.forEach(function (r) {
     var key = String(r.Customer || '').trim();
     var c = by[key] || (by[key] = { customer: key, deliveries: 0, delivered: { small: 0, medium: 0, large: 0 },
-      collected: { small: 0, medium: 0, large: 0 }, lastDelivery: '', lastCollection: '', missedInARow: 0, notAsked: 0, truck: '' });
+      collected: { small: 0, medium: 0, large: 0 }, lastDelivery: '', lastCollection: '', missedInARow: 0, notAsked: 0, truck: '', collectionVisits: 0 });
+    var num3 = num(r.CollectedSmall) + num(r.CollectedMedium) + num(r.CollectedLarge);
+    if (String(r.Kind || '') === TRAY_KIND_COLLECTION) {
+      // Collection-only visit (build-2026-11-18-01): trays back, no delivery.
+      c.collectionVisits++;
+      c.collected.small += num(r.CollectedSmall); c.collected.medium += num(r.CollectedMedium); c.collected.large += num(r.CollectedLarge);
+      if (num3 > 0) { c.lastCollection = r.Date; c.missedInARow = 0; }
+      return;
+    }
     c.deliveries++;
     c.delivered.small += num(r.DeliveredSmall); c.delivered.medium += num(r.DeliveredMedium); c.delivered.large += num(r.DeliveredLarge);
     var asked = r.CollectedSmall !== '' || r.CollectedMedium !== '' || r.CollectedLarge !== '';
@@ -4903,7 +4919,7 @@ function getTrayRoster() {
 /** Creates the TrayStops tab and the new Trucks/DriverLogs headers if missing. */
 function ensureTraySchema_() {
   var cache = CacheService.getScriptCache();
-  var flagKey = 'traySchemaOk_v2';
+  var flagKey = 'traySchemaOk_v3';
   if (cache.get(flagKey)) return;
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var stops = ss.getSheetByName(SHEET_NAMES.TRAY_STOPS);
@@ -5051,6 +5067,102 @@ function driverMarkTrayDelivered(sessionId, trayStopId, delivered, collected) {
       .forEach(function (r) { deleteRowById_(ledger, r.ID); });
     return { ok: true, deliveredAt: '' };
   });
+}
+
+// ---------------------------------------------------------------------------
+// TRAY COLLECTION WITHOUT A DELIVERY (build-2026-11-18-01)
+//
+// Drivers sometimes pick up empty wooden trays from a fruit-tray client they
+// aren't delivering to that day. They pick the client from every tray client
+// on record (TrayStops + TrayLedger, same names the roster uses) and enter
+// the counts; it's a TrayLedger row with Kind 'Collection' and 0 delivered,
+// so the Dashboard's tray roster tally includes it.
+// ---------------------------------------------------------------------------
+
+/** Every known fruit-tray client (exact roster names), with trays still out. */
+function trayClientsKnown_() {
+  var roster = getTrayRoster().customers;
+  var out = {};
+  roster.forEach(function (c) { if (c.customer) out[c.customer] = c.out; });
+  var stopsSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.TRAY_STOPS);
+  if (stopsSheet) {
+    sheetToObjects_(stopsSheet).forEach(function (st) {
+      var k = String(st.Customer || '').trim();
+      if (k && !out[k]) out[k] = { small: 0, medium: 0, large: 0 };
+    });
+  }
+  return out;
+}
+
+/** Driver's "Collect empty trays" screen: the client list and their own collections today. */
+function driverTrayCollectInfo() {
+  var driver = currentDriver_();
+  ensureTraySchema_();
+  var known = trayClientsKnown_();
+  var today = todayString_();
+  var mine = sheetToObjects_(getSheet_(SHEET_NAMES.TRAY_LEDGER)).filter(function (r) {
+    return String(r.Kind || '') === TRAY_KIND_COLLECTION && normalizeDateStr_(r.Date) === today && String(r.DriverName) === driver.name;
+  }).sort(function (a, b) { return String(b.LoggedAt).localeCompare(String(a.LoggedAt)); }).map(function (r) {
+    return { id: r.ID, customer: r.Customer, at: r.LoggedAt,
+      collected: { small: Number(r.CollectedSmall) || 0, medium: Number(r.CollectedMedium) || 0, large: Number(r.CollectedLarge) || 0 } };
+  });
+  return {
+    clients: Object.keys(known).sort(function (a, b) { return a.toLowerCase().localeCompare(b.toLowerCase()); })
+      .map(function (k) { return { customer: k, out: known[k] }; }),
+    today: mine
+  };
+}
+
+/**
+ * Records empty trays picked up from a client with no delivery. requestId
+ * comes from the phone, so a retry after a lost answer can't count it twice.
+ */
+function driverCollectTrays(requestId, customer, collected) {
+  var driver = currentDriver_();
+  requestId = String(requestId || '').trim();
+  if (!/^[A-Za-z0-9-]{8,64}$/.test(requestId)) throw new Error('Please refresh the app and try again.');
+  customer = String(customer || '').trim();
+  var count = function (k) {
+    var v = collected ? collected[k] : 0;
+    var n = (v === '' || v === undefined || v === null) ? 0 : Number(v);
+    if (!(n >= 0) || Math.floor(n) !== n || n > 999) throw new Error('Enter how many empty trays you collected (whole numbers, 0 or more).');
+    return n;
+  };
+  var cS = count('small'), cM = count('medium'), cL = count('large');
+  if (cS + cM + cL === 0) throw new Error('Enter how many empty trays you collected.');
+  ensureTraySchema_();
+  if (!trayClientsKnown_()[customer]) throw new Error('Pick the client from the list.');
+  var id = 'collect-' + requestId;
+  return withNamedLock_('trayCollect_' + id, function () {
+    var sheet = getSheet_(SHEET_NAMES.TRAY_LEDGER);
+    if (findRowIndexById_(sheet, id) !== -1) return { ok: true, id: id };
+    // Truck: the driver's latest trip today, if any (collections can also
+    // happen with no trip on record).
+    var today = todayString_();
+    var trip = sheetToObjects_(getSheet_(SHEET_NAMES.SESSIONS)).filter(function (x) {
+      return normalizeDateStr_(x.Date) === today && driverIsOnSession_(x, driver.name);
+    }).sort(function (a, b) { return String(b.StartedAt).localeCompare(String(a.StartedAt)); })[0];
+    appendObject_(sheet, SHEET_HEADERS.TrayLedger, {
+      ID: id, Date: today, TrayStopID: 'collect:' + requestId, Customer: customer, ZohoVehicle: '',
+      TruckName: trip ? trip.TruckName : '', DriverName: driver.name,
+      DeliveredSmall: 0, DeliveredMedium: 0, DeliveredLarge: 0,
+      CollectedSmall: cS, CollectedMedium: cM, CollectedLarge: cL, LoggedAt: nowIso_(), Kind: TRAY_KIND_COLLECTION
+    });
+    return { ok: true, id: id };
+  });
+}
+
+/** Undo one of the driver's own collections from today (a mistake). */
+function driverUndoTrayCollection(id) {
+  var driver = currentDriver_();
+  var sheet = getSheet_(SHEET_NAMES.TRAY_LEDGER);
+  var row = sheetToObjects_(sheet).filter(function (r) { return r.ID === id; })[0];
+  if (!row) return { ok: true };
+  if (String(row.Kind || '') !== TRAY_KIND_COLLECTION || String(row.DriverName) !== driver.name || normalizeDateStr_(row.Date) !== todayString_()) {
+    throw new Error('You can only undo your own collections from today.');
+  }
+  deleteRowById_(sheet, id);
+  return { ok: true };
 }
 
 function driverReportsWhere_(fn) {

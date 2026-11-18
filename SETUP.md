@@ -2076,3 +2076,32 @@ fruit-tray address and products. Several words must all match, in any order
 ("tsebo africa"). Stops keep their route number, the heading shows how many
 match, and ✕ clears it. It searches what's already on the phone, so there is
 no server call and nothing to deploy in `Code.gs`.
+
+## Collecting empty trays with no delivery (build-2026-11-18-01)
+
+Drivers sometimes pick up empty wooden trays from a fruit-tray client they
+aren't delivering to that day. The driver screen has a **Collect empty
+trays (no delivery)** button:
+
+1. Search for and choose the client. The list is every fruit-tray client
+   on record (the tray roster plus Zoho's tray stops), under the same names
+   the roster uses. It shows how many trays the app thinks are out there.
+2. Enter Small / Medium / Large and **Save collection**. At least one tray
+   is needed.
+3. **Your collections today** lists what that driver logged today, with
+   **Undo** for mistakes. A driver can only undo their own collections from
+   the same day.
+
+It's stored as a `TrayLedger` row with `Kind` = `Collection` (new column,
+added automatically; blank = a delivery), `TrayStopID` `collect:<id>`, 0
+delivered, and the truck from the driver's latest trip that day (blank if
+they have none). On the Dashboard's tray roster it lowers the trays-out
+balance, counts as trays back (resets "deliveries in a row with nothing
+collected" and sets "last trays back"), and shows as "N collection-only
+visits". It does not count as a delivery.
+
+The phone sends a request id with each save, so a retry after a dropped
+connection can't record it twice. Server: `driverTrayCollectInfo`,
+`driverCollectTrays`, `driverUndoTrayCollection` (drivers only).
+When a driver is delivering to the client, trays still go on the Delivered
+prompt as before.

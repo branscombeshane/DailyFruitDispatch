@@ -1,5 +1,11 @@
 # Daily Fruit - Dispatch: Setup Guide
 
+> **Where the back end lives (from 18 Nov 2026):** the Apps Script files
+> (`Code.gs`, `ZohoCreator.gs`, `appsscript.json`) are no longer in this public
+> repo. They're in the private repo `DFDispatchPrivate`, which deploys them to
+> Apps Script automatically with clasp on every push. Sections below that say
+> "paste this repo's `Code.gs`" describe the original manual setup.
+
 This follows the same pattern as the Procure and Packing & Production systems:
 a static frontend on GitHub Pages, backed by a Google Apps Script Web App and
 a Google Sheet as the database.

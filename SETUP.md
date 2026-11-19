@@ -2137,3 +2137,6 @@ At the bottom of each dispatched trip on the driver's screen there's a
 - Dashboard > Live deliveries shows "Back at factory 09:40 (out 03:00)". A
   returned truck no longer counts as "out delivering" and is listed with the
   finished trucks.
+- Dashboard > **Trucks** tab (and History, which uses the same cards), from
+  build-2026-11-19-02: each truck card shows "Back at factory 11:40 (out 8h
+  40m, by Mak L)", where "out" is the time from dispatch to return.

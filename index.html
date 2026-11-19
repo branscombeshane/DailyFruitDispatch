@@ -1371,7 +1371,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-11-19-01';
+  var BUILD_VERSION = 'build-2026-11-19-02';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -5850,6 +5850,12 @@
         'Started ' + formatTime(t.startedAt)
       ];
       if (t.dispatchedAt) metaParts.push('Dispatched ' + formatTime(t.dispatchedAt) + (durationText ? ' (' + durationText + ')' : ''));
+      // Back at the factory (build-2026-11-19-02): return time, time on the road, who tapped it.
+      if (t.returnedAt) {
+        var outMins = t.dispatchedAt ? Math.round((new Date(t.returnedAt) - new Date(t.dispatchedAt)) / 60000) : null;
+        var outText = outMins !== null && outMins >= 0 ? 'out ' + (outMins >= 60 ? Math.floor(outMins / 60) + 'h ' : '') + (outMins % 60) + 'm' : '';
+        metaParts.push('Back at factory ' + formatTime(t.returnedAt) + ((outText || t.returnedBy) ? ' (' + [outText, t.returnedBy ? 'by ' + t.returnedBy : ''].filter(Boolean).join(', ') + ')' : ''));
+      }
       if (t.deliveredCount) metaParts.push('Delivered ' + t.deliveredCount + '/' + t.orderCount + (t.lastDeliveredAt ? ' (last ' + formatTime(t.lastDeliveredAt) + ')' : ''));
       if (t.trayStopCount) metaParts.push('Tray clients delivered ' + (t.trayDeliveredCount || 0) + '/' + t.trayStopCount);
 

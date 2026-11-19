@@ -2123,3 +2123,17 @@ prompt as before.
   `driverReport` now treats the same driver, trip, stop, category and note
   within 15 minutes as the same report and keeps the first one. Older
   copies already in the sheet stay as they are.
+
+## Back at the factory (build-2026-11-19-01)
+
+At the bottom of each dispatched trip on the driver's screen there's a
+**Back at the factory** button. Tapping it timestamps the truck's return
+(TruckSessions `ReturnedAt` / `ReturnedBy`, columns added automatically).
+
+- If stops are still not marked delivered, the driver is asked to confirm first.
+- Tapping again keeps the first time. **Undo** clears it, for a mistaken tap.
+- Only a driver on that trip, today, once it's dispatched. Server:
+  `driverMarkReturned(sessionId, returned)`.
+- Dashboard > Live deliveries shows "Back at factory 09:40 (out 03:00)". A
+  returned truck no longer counts as "out delivering" and is listed with the
+  finished trucks.

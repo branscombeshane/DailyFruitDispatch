@@ -1371,7 +1371,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-11-18-02';
+  var BUILD_VERSION = 'build-2026-11-19-01';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -1559,6 +1559,8 @@
     // Tray collection with no delivery: info is a read, collect carries a
     // request id from the phone (a repeat is ignored), undo is a delete.
     driverTrayCollectInfo: true, driverCollectTrays: true, driverUndoTrayCollection: true,
+    // Back at the factory keeps the first time if repeated.
+    driverMarkReturned: true,
     listOpenDriverReports: true, listDriverReportsForDate: true, setDriverReportStatus: true
   };
   // Delays before each automatic retry (~0.8s, then ~2s later) - short
@@ -2163,9 +2165,34 @@
       '<div class="hint">Drivers: ' + escapeHtml(t.drivers) + '</div>' +
       '<div style="margin:10px 0 4px; font-weight:600;">Stops in route order - ' + deliveredCount + ' of ' + list.length + ' delivered' + (query ? ' · ' + matchCount + ' match' + (matchCount === 1 ? '' : 'es') : '') + '</div>' +
       orderBar + rows +
+      returnBlock_(t, list.length - deliveredCount) +
       (!editing ? '<button class="btn btn-danger btn-block" style="margin-top:12px;" onclick="openDriverReport(' + jsStrAttr_(t.sessionId) + ', \'\')">Report road / vehicle incident</button>' : '') +
       reportsHtml +
     '</div>';
+  }
+
+  // "Back at the factory" (build-2026-11-19-01): only once the trip is
+  // dispatched, and only on servers that send returnedAt.
+  function returnBlock_(t, notDelivered) {
+    if (t.status !== 'Dispatched' || t.returnedAt === undefined) return '';
+    var sid = jsStrAttr_(t.sessionId);
+    if (t.returnedAt) {
+      return '<div class="card" style="margin:12px 0 0; padding:10px 12px; background:#f1f7f1; display:flex; justify-content:space-between; align-items:center; gap:10px;">' +
+        '<div><strong>Back at the factory ' + formatTime(t.returnedAt) + '</strong>' + (t.returnedBy ? '<div class="hint">by ' + escapeHtml(t.returnedBy) + '</div>' : '') + '</div>' +
+        '<button class="btn btn-secondary" onclick="driverSetReturned(' + sid + ', false)">Undo</button></div>';
+    }
+    return '<button class="btn btn-primary btn-block" style="margin-top:12px;" onclick="driverSetReturned(' + sid + ', true, ' + notDelivered + ')">Back at the factory</button>';
+  }
+
+  function driverSetReturned(sessionId, returned, notDelivered) {
+    if (returned && notDelivered > 0 &&
+        !confirm(notDelivered + ' stop' + (notDelivered === 1 ? ' is' : 's are') + ' not marked delivered. Mark the truck back at the factory anyway?')) return;
+    if (!returned && !confirm('Remove the "back at the factory" time?')) return;
+    callApi('driverMarkReturned', [sessionId, returned]).then(loadDriverTrips).catch(function (err) {
+      if (err && /Unknown action/.test(err.message || '')) { alert('This needs the latest Dispatch update. Ask the office.'); return; }
+      showFatalError(err);
+      loadDriverTrips();
+    });
   }
 
   function findDriverTrip_(sessionId) {
@@ -5084,7 +5111,7 @@
   function loadLiveDeliveries(silent) {
     callApi('getLiveDeliveries', [], { silent: !!silent }).then(function (data) {
       liveData = data;
-      setDashCount('onRoad', data.trips.filter(function (t) { return t.status === 'Dispatched' && t.deliveredCount < t.stopCount; }).length);
+      setDashCount('onRoad', data.trips.filter(function (t) { return t.status === 'Dispatched' && !t.returnedAt && t.deliveredCount < t.stopCount; }).length);
       renderLiveDeliveries();
     }).catch(function (err) {
       if (err && /Unknown action/.test(err.message || '')) {
@@ -5140,6 +5167,7 @@
     el.innerHTML = trips.map(function (t) {
       var pct = t.stopCount ? Math.round(100 * t.deliveredCount / t.stopCount) : 0;
       var status = t.status !== 'Dispatched' ? 'Still loading'
+        : t.returnedAt ? 'Back at factory ' + formatTime(t.returnedAt) + ' (out ' + formatTime(t.dispatchedAt) + ')'
         : (t.stopCount && t.deliveredCount >= t.stopCount ? 'All delivered' : 'Out since ' + formatTime(t.dispatchedAt));
       var open = !!liveExpanded[t.sessionId];
       var editing = liveReorder[t.sessionId];
@@ -5198,7 +5226,7 @@
     // Live tab's own count (trucks out delivering) - also shown on Overview.
     callApi('getLiveDeliveries', [], { silent: true }).then(function (data) {
       liveData = data;
-      setDashCount('onRoad', data.trips.filter(function (t) { return t.status === 'Dispatched' && t.deliveredCount < t.stopCount; }).length);
+      setDashCount('onRoad', data.trips.filter(function (t) { return t.status === 'Dispatched' && !t.returnedAt && t.deliveredCount < t.stopCount; }).length);
       if (currentDashTab === 'live') renderLiveDeliveries();
     }).catch(function () { /* older server - Live tab says so when opened */ });
     // Trucks Leaving Late (build-2026-10-27-05) - Dashboard-only, its own

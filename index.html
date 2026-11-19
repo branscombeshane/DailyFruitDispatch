@@ -1120,6 +1120,7 @@
         <button data-pane="drivers" onclick="showAdminPane('drivers', this)">Drivers</button>
         <button data-pane="latereasons" onclick="showAdminPane('latereasons', this)">Late Reasons</button>
         <button data-pane="datasource" onclick="showAdminPane('datasource', this)">Data Source</button>
+        <button data-pane="speed" onclick="showAdminPane('speed', this)">Speed log</button>
       </div>
 
       <!-- Dashboard (build-2026-11-11-04 layout): split into tabs so it's
@@ -1338,6 +1339,20 @@
         <div class="card"><p class="hint">Click a reason to rename it - changes save automatically. Untick Active to stop offering it without losing it from past records. Tick "Pick order(s)" when management needs to know which order it was (e.g. night shift reasons) - each picked order then shows on the Dashboard's Flagged Packing Issues list to resolve.</p><table id="late-reasons-table"></table></div>
       </div>
 
+      <!-- Speed log (build-2026-11-19-06): server counts/slow requests + this device's round trips. -->
+      <div class="admin-pane" id="admin-speed" style="display:none;">
+        <div class="card">
+          <h3 style="margin-top:0;">Speed log</h3>
+          <p class="hint">All Daily Fruit apps share one Google allowance (about 30 requests at the same moment, 90 trigger-minutes a day). This shows what Dispatch uses: requests per 10 minutes, requests slower than 1.5 s with the sheets they read, and this device's round trips. Kept for 6 hours.</p>
+          <div style="display:flex; gap:8px; flex-wrap:wrap;">
+            <button class="btn btn-primary" onclick="loadSpeedLog()">Refresh</button>
+            <button class="btn btn-secondary" onclick="downloadSpeedCsv()">Download CSV</button>
+            <button class="btn btn-secondary" onclick="clearSpeedLogNow()">Clear</button>
+          </div>
+        </div>
+        <div id="speed-log"></div>
+      </div>
+
       <div class="admin-pane" id="admin-datasource" style="display:none;">
         <div class="card">
           <h3 style="margin-top:0;">Packing & Production connection</h3>
@@ -1373,7 +1388,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-11-19-05';
+  var BUILD_VERSION = 'build-2026-11-19-06';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -1644,6 +1659,16 @@
     document.getElementById('login-error').textContent = (err && err.message) || 'Please sign in again.';
   }
 
+  // This device's round trips (build-2026-11-19-06), for Admin > Settings >
+  // Speed log: round trip minus the server's own time = Google start-up,
+  // queueing for one of the shared execution slots, and the network.
+  var callTimings = [];
+  function recordCallTiming_(action, rtt, perf) {
+    callTimings.push({ at: new Date().toISOString(), action: action, rtt: rtt, serverMs: perf ? perf.ms : null,
+      readMs: perf ? perf.readMs : null, lockMs: perf ? perf.lockMs : null });
+    if (callTimings.length > 500) callTimings.splice(0, callTimings.length - 500);
+  }
+
   function callApiAttempt_(action, params, retryCount) {
     // Every call is a GET (see SETUP.md - Apps Script's /exec redirect drops
     // a POST body), which means browsers and some mobile/carrier proxies can
@@ -1670,12 +1695,14 @@
     var timeoutMs = EXTENDED_TIMEOUT_ACTIONS[action] || DEFAULT_TIMEOUT_MS;
     var timeoutId = controller ? setTimeout(function () { controller.abort(); }, timeoutMs) : null;
 
+    var sentAt = Date.now();
     return fetch(url, { cache: 'no-store', signal: controller ? controller.signal : undefined })
       .then(function (r) {
         if (timeoutId) clearTimeout(timeoutId);
         return r.json();
       })
       .then(function (res) {
+        recordCallTiming_(action, Date.now() - sentAt, res && res._perf);
         if (!res.success) {
           var apiErr = new Error(res.error || 'Request failed');
           // Login no longer valid (PIN changed, user deactivated/deleted,
@@ -2627,7 +2654,19 @@
   // issue - a background refresh is exactly the kind of failure that
   // should just quietly try again next tick instead of interrupting
   // whatever the person is doing.
+  // Screen off / tab hidden (build-2026-11-19-06): polls skip, and one
+  // refresh runs as soon as it's visible again - every poll is one of the ~30
+  // executions all of Shane's apps share.
+  function pageHidden_() { return document.visibilityState === 'hidden'; }
+  document.addEventListener('visibilitychange', function () {
+    if (pageHidden_()) return;
+    if (boardPollTimer) pollTruckBoard();
+    if (wsPackPollTimer) pollWorkspacePackTimer();
+    if (livePollTimer) loadLiveDeliveries(true);
+  });
+
   function pollTruckBoard() {
+    if (pageHidden_()) return;
     if (boardDrag || Object.keys(savingOrderIds).length > 0) return;
     // silent: this refresh happens on its own, every 15s, whether or not
     // anything actually changed - popping the global loading overlay for
@@ -2682,6 +2721,7 @@
   }
 
   function pollWorkspacePackTimer() {
+    if (pageHidden_()) return;
     var sessionId = wsPackPollSessionId;
     if (!sessionId) return;
     callApi('getTruckPackTimerInfo', [sessionId], { silent: true }).then(function (info) {
@@ -4582,6 +4622,79 @@
     }
   }
 
+  // ---- Speed log (build-2026-11-19-06) ----
+  var speedLogData = null;
+  function loadSpeedLog() {
+    callApi('getSpeedLog', []).then(function (data) { speedLogData = data; renderSpeedLog(); }).catch(function (err) {
+      if (err && /Unknown action/.test(err.message || '')) { document.getElementById('speed-log').innerHTML = '<div class="card hint">Needs the latest Code.gs to be deployed.</div>'; return; }
+      showFatalError(err);
+    });
+  }
+  function clearSpeedLogNow() {
+    if (!confirm('Clear the speed log?')) return;
+    callApi('clearSpeedLog', []).then(function () { callTimings = []; loadSpeedLog(); }).catch(showFatalError);
+  }
+  function speedDeviceSummary_() {
+    var by = {};
+    callTimings.forEach(function (t) {
+      var a = by[t.action] || (by[t.action] = { action: t.action, n: 0, rtt: 0, server: 0, withServer: 0, max: 0 });
+      a.n++; a.rtt += t.rtt; a.max = Math.max(a.max, t.rtt);
+      if (t.serverMs !== null) { a.server += t.serverMs; a.withServer++; }
+    });
+    return Object.keys(by).map(function (k) {
+      var a = by[k];
+      var avgServer = a.withServer ? Math.round(a.server / a.withServer) : null;
+      return { action: a.action, calls: a.n, avgRtt: Math.round(a.rtt / a.n), maxRtt: a.max, avgServer: avgServer,
+        avgWait: avgServer === null ? null : Math.round(a.rtt / a.n) - avgServer };
+    }).sort(function (x, y) { return y.avgRtt * y.calls - x.avgRtt * x.calls; });
+  }
+  function renderSpeedLog() {
+    var d = speedLogData || { buckets: [], slow: [] };
+    var el = document.getElementById('speed-log');
+    var td = function (v) { return '<td style="padding:4px 8px; border-bottom:1px solid var(--border);">' + escapeHtml(v === null || v === undefined ? '-' : String(v)) + '</td>'; };
+    var th = function (v) { return '<th style="text-align:left; padding:4px 8px; border-bottom:1px solid var(--border);">' + escapeHtml(v) + '</th>'; };
+    var table = function (heads, rows) {
+      return '<div style="overflow-x:auto;"><table style="width:100%; border-collapse:collapse; font-size:13px;"><tr>' + heads.map(th).join('') + '</tr>' +
+        rows.map(function (r) { return '<tr>' + r.map(td).join('') + '</tr>'; }).join('') + '</table></div>';
+    };
+    // Requests per 10 minutes, all actions together, busiest first.
+    var per10 = {};
+    d.buckets.forEach(function (b) { var x = per10[b.bucket] || (per10[b.bucket] = { n: 0, ms: 0 }); x.n += b.requests; x.ms += b.totalMs; });
+    var periods = Object.keys(per10).sort().reverse();
+    var peak = periods.reduce(function (m, k) { return per10[k].n > m.n ? { k: k, n: per10[k].n } : m; }, { k: '', n: 0 });
+    var dev = speedDeviceSummary_();
+    el.innerHTML =
+      '<div class="card"><h3 style="margin-top:0;">Server: requests per 10 minutes</h3>' +
+        (periods.length ? '<p class="hint">Busiest: ' + escapeHtml(peak.k) + ' with ' + peak.n + ' requests (about ' + Math.round(peak.n / 10) + ' a minute).</p>' +
+          table(['10 minutes from', 'Requests', 'Per minute', 'Server time (s)'], periods.slice(0, 36).map(function (k) { return [k, per10[k].n, Math.round(per10[k].n / 10 * 10) / 10, Math.round(per10[k].ms / 100) / 10]; }))
+          : '<p class="hint">Nothing recorded yet.</p>') + '</div>' +
+      '<div class="card"><h3 style="margin-top:0;">Server: by action (last 6 hours)</h3>' +
+        table(['Action', 'Requests', 'Avg ms', 'Max ms', 'Errors'], (function () {
+          var by = {};
+          d.buckets.forEach(function (b) { var x = by[b.action] || (by[b.action] = { n: 0, ms: 0, max: 0, err: 0 }); x.n += b.requests; x.ms += b.totalMs; x.max = Math.max(x.max, b.maxMs); x.err += b.errors; });
+          return Object.keys(by).sort(function (a, b) { return by[b].ms - by[a].ms; }).map(function (k) { return [k, by[k].n, Math.round(by[k].ms / by[k].n), by[k].max, by[k].err]; });
+        })()) + '</div>' +
+      '<div class="card"><h3 style="margin-top:0;">Server: slow requests (over ' + (d.slowMs || 1500) + ' ms) and timed jobs</h3>' +
+        table(['When', 'Action', 'ms', 'Reading sheets ms', 'Waiting for locks ms', 'Sheets read'], d.slow.slice(0, 100).map(function (r) {
+          return [formatTime(r.at), r.action + (r.ok ? '' : ' (error)'), r.ms, r.readMs, r.lockMs, r.reads];
+        })) + '</div>' +
+      '<div class="card"><h3 style="margin-top:0;">This device: round trips</h3><p class="hint">Wait = round trip minus server time: Google start-up, queueing for a free slot, and the network.</p>' +
+        table(['Action', 'Calls', 'Avg round trip ms', 'Max ms', 'Avg server ms', 'Avg wait ms'], dev.map(function (r) { return [r.action, r.calls, r.avgRtt, r.maxRtt, r.avgServer, r.avgWait]; })) + '</div>';
+  }
+  function downloadSpeedCsv() {
+    var d = speedLogData || { buckets: [], slow: [] };
+    var q = function (v) { v = v === null || v === undefined ? '' : String(v); return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
+    var lines = ['section,when,action,requests_or_calls,avg_ms,max_ms,errors,read_ms,lock_ms,wait_ms,sheets'];
+    d.buckets.forEach(function (b) { lines.push(['server_10min', b.bucket, b.action, b.requests, b.avgMs, b.maxMs, b.errors, '', '', '', ''].map(q).join(',')); });
+    d.slow.forEach(function (r) { lines.push(['server_slow', r.at, r.action + (r.ok ? '' : ' (error)'), 1, r.ms, r.ms, r.ok ? 0 : 1, r.readMs, r.lockMs, '', r.reads].map(q).join(',')); });
+    speedDeviceSummary_().forEach(function (r) { lines.push(['device', '', r.action, r.calls, r.avgRtt, r.maxRtt, '', '', '', r.avgWait, ''].map(q).join(',')); });
+    var blob = new Blob([lines.join('\n')], { type: 'text/csv' });
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'dispatch-speed-log-' + todayDateInputValue() + '.csv';
+    document.body.appendChild(a); a.click(); a.remove();
+  }
+
   function showAdminPane(name, btn) {
     document.querySelectorAll('.admin-pane').forEach(function (p) { p.style.display = 'none'; });
     document.getElementById('admin-' + name).style.display = 'block';
@@ -4603,6 +4716,7 @@
     if (name === 'trucks') loadTrucks();
     if (name === 'drivers') loadDrivers();
     if (name === 'latereasons') loadLateReasons();
+    if (name === 'speed') loadSpeedLog();
     if (name === 'datasource') loadDataSource();
     if (name === 'overview') loadDashboard();
     if (name === 'history') loadHistory();
@@ -5080,7 +5194,7 @@
     document.querySelectorAll('#dash-tabs button').forEach(function (b) { b.classList.toggle('active', b.getAttribute('data-dtab') === tab); });
     document.querySelectorAll('#admin-overview .dash-tabpane').forEach(function (p) { p.style.display = p.getAttribute('data-dtab') === tab ? '' : 'none'; });
     stopLivePolling();
-    if (tab === 'live') { loadLiveDeliveries(); livePollTimer = setInterval(function () { loadLiveDeliveries(true); }, 60000); }
+    if (tab === 'live') { loadLiveDeliveries(); livePollTimer = setInterval(function () { if (!pageHidden_()) loadLiveDeliveries(true); }, 60000); }
     window.scrollTo(0, 0);
   }
 

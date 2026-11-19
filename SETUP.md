@@ -2196,3 +2196,31 @@ Fixes (`getTruckAssignmentBoard`):
 - The page waits 45 s for the board (was 20 s).
 - Each rebuild logs "Truck board: trucks+packing N ms, amended-order sync N
   ms" to Apps Script > Executions, for checking if it is still slow.
+
+## Speed log and pausing hidden polls (build-2026-11-19-06)
+
+All Daily Fruit apps run as Shane's Google account and share one allowance
+(about 30 executions at once, 90 trigger-minutes a day on a free account),
+so one busy app slows the others. Following the Financials handover: measure
+first, then fix the biggest number.
+
+- **Server:** every request records its total time, each sheet read (tab,
+  times read, rows, ms; `sheetToObjects_` and `perfValues_`, which every
+  whole-sheet read now goes through, Packing's Orders/OrderItems included)
+  and time spent waiting for locks (`withNamedLock_`). Replies carry
+  `_perf: {ms, readMs, lockMs}`. Kept in CacheService for 6 hours: counts per
+  10 minutes per action, plus every request over 1.5 s and every timed
+  trigger run (`trayPullTick`, `pruneOldRecords`, via `perfTrigger_`). Only
+  sheet names, row counts and times; no names, data or PINs. Best-effort:
+  writes go to 10 shards, so under heavy load a few counts may be lost.
+- **Admin > Settings > Speed log** (Admin only): requests per 10 minutes and
+  the busiest period, time by action, the slow requests with the sheets they
+  read, and this device's round trips (round trip minus server time = Google
+  start-up + queueing + network). **Download CSV** to send the numbers on.
+- **Polls pause while the screen is off / tab hidden:** Trucks board (15 s),
+  the checker's pack timer (15 s), Live deliveries (60 s). One refresh runs
+  as soon as the page is visible again.
+- Already in place, not changed here: every request needs name + PIN and a
+  role (build-2026-11-06-01; the "Dispatch API has no auth" note in Packing's
+  CLAUDE.md is out of date), and TruckSessions/OrderChecks/ItemChecks are
+  pruned to 14 days every night.

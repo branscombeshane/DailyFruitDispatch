@@ -1371,7 +1371,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-11-19-02';
+  var BUILD_VERSION = 'build-2026-11-19-03';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -2024,9 +2024,18 @@
       el.innerHTML = '<div class="card"><div class="empty">You\'re not on any truck yet today. Once the checker adds you as a driver on a trip, tap Refresh.</div></div>';
       return;
     }
-    el.innerHTML = trips.map(function (t) {
+    // Several trips today (build-2026-11-19-03): the latest trip first and
+    // open; earlier trips folded into one tappable line (opened while
+    // searching), so Trip 1 doesn't push the current trip down the screen.
+    var multi = trips.length > 1;
+    var searching = !!driverSearchQuery_();
+    if (multi) trips = trips.slice().reverse();
+    el.innerHTML = trips.map(function (t, idx) {
+      if (multi && idx > 0 && !searching && !driverTripOpen[t.sessionId]) return renderDriverTripFolded_(t);
+      var foldBar = multi && idx > 0 && !searching
+        ? '<button class="btn btn-secondary btn-block" style="margin:0 0 6px;" onclick="toggleDriverTrip(' + jsStrAttr_(t.sessionId) + ')">▲ Hide ' + escapeHtml(t.truckName) + ' Trip ' + t.tripNumber + '</button>' : '';
       // Newer servers send one list in route order (build-2026-11-11-05).
-      if (t.routeStops) return renderDriverTripRouted_(t);
+      if (t.routeStops) return foldBar + renderDriverTripRouted_(t);
       var deliveredCount = t.stops.filter(function (s) { return s.deliveredAt; }).length;
       var statusLine = t.status === 'Dispatched'
         ? 'Dispatched ' + formatTime(t.dispatchedAt)
@@ -2160,7 +2169,7 @@
       }).join('') + '</div>';
 
     return '<div class="card">' +
-      '<h3 style="margin:0;">' + escapeHtml(t.truckName) + (t.tripNumber > 1 ? ' (Trip ' + t.tripNumber + ')' : '') + '</h3>' +
+      '<h3 style="margin:0;">' + escapeHtml(t.truckName) + ((t.tripNumber > 1 || ((driverData && driverData.trips) || []).length > 1) ? ' (Trip ' + t.tripNumber + ')' : '') + '</h3>' +
       '<div class="hint">' + escapeHtml(statusLine) + (t.route ? ' &middot; Route: ' + escapeHtml(t.route) : '') + '</div>' +
       '<div class="hint">Drivers: ' + escapeHtml(t.drivers) + '</div>' +
       '<div style="margin:10px 0 4px; font-weight:600;">Stops in route order - ' + deliveredCount + ' of ' + list.length + ' delivered' + (query ? ' · ' + matchCount + ' match' + (matchCount === 1 ? '' : 'es') : '') + '</div>' +
@@ -2169,6 +2178,22 @@
       (!editing ? '<button class="btn btn-danger btn-block" style="margin-top:12px;" onclick="openDriverReport(' + jsStrAttr_(t.sessionId) + ', \'\')">Report road / vehicle incident</button>' : '') +
       reportsHtml +
     '</div>';
+  }
+
+  var driverTripOpen = {}; // sessionId -> true when an earlier trip is unfolded
+
+  function toggleDriverTrip(sessionId) { driverTripOpen[sessionId] = !driverTripOpen[sessionId]; renderDriverTrips(); }
+
+  function renderDriverTripFolded_(t) {
+    var list = t.routeStops || t.stops || [];
+    var done = list.filter(function (st) { return st.deliveredAt; }).length;
+    var bits = ['Earlier trip', done + ' of ' + list.length + ' delivered'];
+    if (t.returnedAt) bits.push('back ' + formatTime(t.returnedAt));
+    else if (t.status !== 'Dispatched') bits.push('not dispatched yet');
+    return '<div class="card" style="cursor:pointer; padding:12px 16px;" onclick="toggleDriverTrip(' + jsStrAttr_(t.sessionId) + ')">' +
+      '<div style="display:flex; justify-content:space-between; align-items:center; gap:10px;">' +
+      '<div><strong>' + escapeHtml(t.truckName) + ' (Trip ' + t.tripNumber + ')</strong><div class="hint">' + escapeHtml(bits.join(' · ')) + '</div></div>' +
+      '<span class="hint">Show ▼</span></div></div>';
   }
 
   // "Back at the factory" (build-2026-11-19-01): only once the trip is

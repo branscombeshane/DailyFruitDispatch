@@ -2140,3 +2140,17 @@ At the bottom of each dispatched trip on the driver's screen there's a
 - Dashboard > **Trucks** tab (and History, which uses the same cards), from
   build-2026-11-19-02: each truck card shows "Back at factory 11:40 (out 8h
   40m, by Mak L)", where "out" is the time from dispatch to return.
+
+## Trip 2 drivers saw Trip 1's tray stops (build-2026-11-19-03)
+
+- **Bug:** fruit-tray stops belong to a truck's first trip of the day. The
+  driver screen put them on the *driver's* first trip on that truck instead,
+  so a driver who only drove Trip 2 (e.g. Truck 16 on 19 Nov: Trip 1 Robert,
+  Trip 2 Makhosani) was shown Trip 1's tray clients. `getMyDriverTrips` now
+  uses the truck's first trip, the same rule as Live deliveries and the
+  Dashboard.
+- **Drivers on more than one trip:** the latest trip is shown first and open;
+  earlier trips fold into one line ("Truck 7 (Trip 1) - Earlier trip - 12 of
+  12 delivered - back 08:10") that opens on tap, and open by themselves while
+  searching. Headings show the trip number whenever a driver has more than one
+  trip.

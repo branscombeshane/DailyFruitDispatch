@@ -1373,7 +1373,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-11-19-04';
+  var BUILD_VERSION = 'build-2026-11-19-05';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -1597,7 +1597,7 @@
   // The Dashboard's big reads (build-2026-11-10-03): each reads several
   // whole sheets, and a 20s cut-off followed by automatic retries only
   // restarts the same slow work - better to wait a little longer once.
-  var EXTENDED_TIMEOUT_ACTIONS = { sendDriverInvites: 240000, getDriverInviteInfo: 45000, syncDriversFromFinancials: 60000, saveFinancialsSource: 45000, getDashboardForDate: 45000, getOrderFulfillmentOverview: 45000, getLateTruckLeaderboard: 45000,
+  var EXTENDED_TIMEOUT_ACTIONS = { getTruckAssignmentBoard: 45000, sendDriverInvites: 240000, getDriverInviteInfo: 45000, syncDriversFromFinancials: 60000, saveFinancialsSource: 45000, getDashboardForDate: 45000, getOrderFulfillmentOverview: 45000, getLateTruckLeaderboard: 45000,
     refreshTrayStops: 90000, setItemStatus: 35000, allocateOrderToTruck: 35000, updateSessionTrip: 35000, markTruckDispatched: 35000 };
   var DEFAULT_TIMEOUT_MS = 20000;
 

@@ -2171,3 +2171,28 @@ match anyone's login, so that driver never saw the trip.
   Drivers list, will be removed when you save".
 - A new driver has to be added by an Admin in Settings > Drivers first
   (Financials drivers arrive with the nightly sync or Sync now).
+
+## Trucks board timing out (build-2026-11-19-05)
+
+Symptom: "Still waiting to hear back from the server for getTruckAssignmentBoard"
+and an empty board. Causes found in the code:
+
+- The cached board lived 5 s but every tablet polls every 15 s, so nearly every
+  poll rebuilt it (Packing orders + OrderChecks + sessions + jobs ...).
+- A board over CacheService's 100 KB limit was silently never cached.
+- When several tablets missed the cache together, they all rebuilt at once
+  and slowed each other down.
+
+Fixes (`getTruckAssignmentBoard`):
+- The cached copy is gzipped (`truckBoardCachePut_`/`truckBoardCacheGet_`)
+  and split into parts if still too big. It lives 10 s.
+- Only one request rebuilds at a time (`truckBoardBuilding`); others wait up
+  to ~15 s for that result.
+- Every action that changes the board (`BOARD_CHANGING_ACTIONS_`: allocate,
+  assign, unallocate, dispatch, start trip, trip drivers, item ticks, jobs,
+  trays, collections, trucks) clears the cache at once
+  (`invalidateTruckBoard_`), and a rebuild that overlapped a change isn't
+  cached. Before this, only collections and the Sage-amendment sync cleared it.
+- The page waits 45 s for the board (was 20 s).
+- Each rebuild logs "Truck board: trucks+packing N ms, amended-order sync N
+  ms" to Apps Script > Executions, for checking if it is still slow.

@@ -944,7 +944,7 @@
     <div class="modal">
       <h3 style="margin-top:0;">Driver(s) & route for this truck today</h3>
       <div class="hint" id="trip-modal-hint" style="display:none; margin-bottom:10px;">Enter at least one driver and a route before checking this truck, or tap "Skip for now" below to come back to it later - it'll keep asking until it's set.</div>
-      <label>Driver(s) - pick up to 3 from the list. Picking a driver fills in their contact number automatically, but you can still edit it.</label>
+      <label>Driver(s) - pick up to 4 from the list. Picking a driver fills in their contact number automatically, but you can still edit it.</label>
       <div style="display:flex; gap:8px;">
         <select id="driver-select-1" style="flex:1; margin-bottom:8px;" onchange="onDriverSelectChange(1)"></select>
         <input type="tel" id="driver-phone-input-1" placeholder="Contact number" autocomplete="off" style="flex:1; margin-bottom:8px;">
@@ -954,14 +954,16 @@
         <input type="tel" id="driver-phone-input-2" placeholder="Contact number" autocomplete="off" style="flex:1; margin-bottom:8px;">
       </div>
       <div style="display:flex; gap:8px;">
-        <select id="driver-select-3" style="flex:1; margin-bottom:12px;" onchange="onDriverSelectChange(3)"></select>
-        <input type="tel" id="driver-phone-input-3" placeholder="Contact number" autocomplete="off" style="flex:1; margin-bottom:12px;">
+        <select id="driver-select-3" style="flex:1; margin-bottom:8px;" onchange="onDriverSelectChange(3)"></select>
+        <input type="tel" id="driver-phone-input-3" placeholder="Contact number" autocomplete="off" style="flex:1; margin-bottom:8px;">
       </div>
-      <label>New driver not on the list yet (optional)</label>
       <div style="display:flex; gap:8px;">
-        <input type="text" id="driver-manual-name-input" placeholder="Driver name" autocomplete="off" style="flex:1; margin-bottom:12px;">
-        <input type="tel" id="driver-manual-phone-input" placeholder="Contact number" autocomplete="off" style="flex:1; margin-bottom:12px;">
+        <select id="driver-select-4" style="flex:1; margin-bottom:8px;" onchange="onDriverSelectChange(4)"></select>
+        <input type="tel" id="driver-phone-input-4" placeholder="Contact number" autocomplete="off" style="flex:1; margin-bottom:8px;">
       </div>
+      <!-- Pick-from-list only (build-2026-11-19-04): no typed names, they never match a driver's login. -->
+      <div class="hint" id="trip-modal-unlisted" style="display:none; color:var(--red); margin-bottom:8px;"></div>
+      <div class="hint" style="margin-bottom:12px;">Driver not in the list? An Admin adds them in Settings &gt; Drivers (Financials drivers appear automatically after Sync).</div>
       <input type="text" id="route-name-input" placeholder="Route / area" autocomplete="off">
       <div class="error" id="trip-modal-error"></div>
       <button class="btn btn-primary btn-block" style="margin-bottom:10px;" onclick="saveTrip()">Save</button>
@@ -1371,7 +1373,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-11-19-03';
+  var BUILD_VERSION = 'build-2026-11-19-04';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -3570,7 +3572,7 @@
       tripModalDriversById[d.ID] = d;
       return '<option value="' + d.ID + '">' + escapeHtml(d.Name) + '</option>';
     }).join('');
-    for (var i = 1; i <= 3; i++) {
+    for (var i = 1; i <= 4; i++) {
       document.getElementById('driver-select-' + i).innerHTML = optionsHtml;
     }
   }
@@ -3597,26 +3599,23 @@
     getActiveDriversCached().then(function (drivers) {
       populateDriverSelects(drivers);
 
-      for (var i = 1; i <= 3; i++) {
+      for (var i = 1; i <= 4; i++) {
         document.getElementById('driver-select-' + i).value = '';
         document.getElementById('driver-phone-input-' + i).value = '';
       }
-      document.getElementById('driver-manual-name-input').value = '';
-      document.getElementById('driver-manual-phone-input').value = '';
 
       var nextSlot = 1;
-      var manualUsed = false;
+      var unlisted = [];
+      var norm = function (n) { return String(n || '').replace(/\s+/g, ' ').trim().toLowerCase(); };
       existingDrivers.forEach(function (name, idx) {
         var contact = existingContacts[idx] || '';
-        var match = drivers.filter(function (d) { return d.Name === name; })[0];
-        if (match && nextSlot <= 3) {
+        var match = drivers.filter(function (d) { return norm(d.Name) === norm(name); })[0];
+        if (match && nextSlot <= 4) {
           document.getElementById('driver-select-' + nextSlot).value = match.ID;
           document.getElementById('driver-phone-input-' + nextSlot).value = contact || match.Contact || '';
           nextSlot++;
-        } else if (!manualUsed) {
-          document.getElementById('driver-manual-name-input').value = name;
-          document.getElementById('driver-manual-phone-input').value = contact;
-          manualUsed = true;
+        } else if (!match) {
+          unlisted.push(name);
         }
         // A 5th+ name (only possible on a legacy record saved before the
         // 4-driver cap) has nowhere left to go in this modal and is
@@ -3624,6 +3623,12 @@
         // updateSessionTrip on the server - it's lost from the record only
         // if the trip is re-saved from here.
       });
+
+      // Typed names saved before pick-from-list (e.g. "Levy") can't be kept.
+      var unlistedEl = document.getElementById('trip-modal-unlisted');
+      unlistedEl.textContent = unlisted.length
+        ? 'Not on the Drivers list, will be removed when you save: ' + unlisted.join(', ') + '. Pick the right driver above.' : '';
+      unlistedEl.style.display = unlisted.length ? 'block' : 'none';
 
       document.getElementById('route-name-input').value = state.session.Route || '';
       document.getElementById('trip-modal-error').textContent = '';
@@ -3656,24 +3661,18 @@
   function saveTrip() {
     var drivers = [];
     var contacts = [];
-    for (var i = 1; i <= 3; i++) {
+    for (var i = 1; i <= 4; i++) {
       var id = document.getElementById('driver-select-' + i).value;
       var driver = tripModalDriversById[id];
       var phone = document.getElementById('driver-phone-input-' + i).value.trim();
-      if (!driver) continue;
+      if (!driver || drivers.indexOf(driver.Name) !== -1) continue; // same driver picked twice: once
       drivers.push(driver.Name);
       contacts.push(phone);
-    }
-    var manualName = document.getElementById('driver-manual-name-input').value.trim();
-    var manualPhone = document.getElementById('driver-manual-phone-input').value.trim();
-    if (manualName) {
-      drivers.push(manualName);
-      contacts.push(manualPhone);
     }
     var route = document.getElementById('route-name-input').value.trim();
 
     if (drivers.length === 0 || !route) {
-      document.getElementById('trip-modal-error').textContent = 'Enter at least one driver and a route before continuing.';
+      document.getElementById('trip-modal-error').textContent = 'Pick at least one driver from the list and enter a route before continuing.';
       return;
     }
     if (contacts.some(function (c) { return !c; })) {

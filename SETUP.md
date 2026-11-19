@@ -2154,3 +2154,20 @@ At the bottom of each dispatched trip on the driver's screen there's a
   12 delivered - back 08:10") that opens on tap, and open by themselves while
   searching. Headings show the trip number whenever a driver has more than one
   trip.
+
+## Trip drivers: pick from the list only (build-2026-11-19-04)
+
+Checkers had been typing extra names next to (or instead of) the proper
+driver ("Tiyani Mathebula, Tiyani", "Levy", "Johanes"). A typed name doesn't
+match anyone's login, so that driver never saw the trip.
+
+- The trip screen has 4 driver dropdowns (was 3 plus a free-text box). The
+  free-text "New driver not on the list" box is gone.
+- `updateSessionTrip` refuses any name that isn't an active driver on the
+  Drivers list ("X isn't on the Drivers list..."). Names are matched ignoring
+  case and spaces and saved exactly as on the list. The same driver twice is
+  kept once.
+- Opening a trip that already has a typed name shows it in red: "Not on the
+  Drivers list, will be removed when you save".
+- A new driver has to be added by an Admin in Settings > Drivers first
+  (Financials drivers arrive with the nightly sync or Sync now).

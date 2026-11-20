@@ -2294,3 +2294,24 @@ find an order from 12 Oct). Now those records are **moved** to an archive:
   spreadsheet; a new spreadsheet starts each year.
 - Not archived: the Packing-side order details shown in History's "orders
   due" card come from Packing & Production, which keeps its own archive.
+
+## Older History days: Packing's archive and overdue warnings (build-2026-11-20-03, server only)
+
+- **"Orders due" card for an older day:** Packing moves its own finished orders
+  out of its live Orders/OrderItems after 14 days, so this card was empty for
+  older days. In archive mode (see History archive) `getOrderFulfillmentOverview`
+  now also reads Packing's archive (`archivedPackingOrdersForMonth_`), in either
+  layout: today's OrdersArchive/OrderItemsArchive tabs inside Packing's
+  spreadsheet, or the planned yearly file ("ArchiveSpreadsheet_<year>" in
+  Packing's Settings tab, tabs "Orders <yyyy-MM>" / "OrderItems <yyyy-MM>" by
+  DeliveryDate month). Handover sent to the Packing chat on 20 Nov 2026 with
+  that exact layout; keep both sides' names in step.
+- **Overdue warnings:** the Dashboard's overdue list looks back 30 days, but
+  Dispatch's main sheets hold 14, so an older order that had gone out (and
+  that Packing hadn't archived, e.g. Production never marked complete) showed as
+  overdue. Now any overdue candidate older than about 14 days is checked
+  against that month's Dispatch archive first. Only then is it a warning.
+- Tested with Packing's orders live, in the current archive tabs, and in the
+  planned yearly file: identical results for the old day (4 orders, 3
+  dispatched, 1 never sent), and the recent day's overdue list is the same
+  before and after the nightly move.

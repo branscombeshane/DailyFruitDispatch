@@ -1218,6 +1218,8 @@
             <input type="date" id="history-date-picker" onchange="onHistoryDateChanged()">
           </div>
           <p class="hint" style="margin-top:0;">Pick a past day to see that day's trucks, orders due, and overdue warnings - for today, use Dashboard.</p>
+          <!-- Archive note (build-2026-11-20-02) -->
+          <div class="hint" id="history-archive-note" style="display:none; background:#fff8e6; border:1px solid #f0d68a; border-radius:8px; padding:8px 10px; margin-bottom:10px;"></div>
           <div id="dashboard-summary-history" style="display:flex; flex-wrap:wrap; gap:12px;"></div>
         </div>
         <!-- Orders due that day - moved above the Dispatch Timeline
@@ -1388,7 +1390,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-11-19-06';
+  var BUILD_VERSION = 'build-2026-11-20-02';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -5464,6 +5466,10 @@
   // of exactly what happened on the picked day (resolved or not), rather
   // than Dashboard's listOpenPackingIssues/listOpenTruckIssues, which show
   // every still-open one regardless of day.
+  // First day kept in the history archive (build-2026-11-20-02): days before
+  // it were deleted by the old 14-day clean-up before the archive existed.
+  var ARCHIVE_FIRST_DAY = '2026-11-07';
+
   function loadHistory() {
     var dateInput = document.getElementById('history-date-picker');
     var todayStr = todayDateInputValue();
@@ -5474,6 +5480,21 @@
       dateInput.value = y.getFullYear() + '-' + pad(y.getMonth() + 1) + '-' + pad(y.getDate());
     }
     if (!dateInput.max) dateInput.max = todayStr; // no picking a future date - there's nothing there yet
+    // Older than 14 days: read from the archive (build-2026-11-20-02).
+    // Records before ARCHIVE_FIRST_DAY were deleted before the archive existed.
+    var note = document.getElementById('history-archive-note');
+    var ageDays = Math.round((new Date(todayStr + 'T12:00:00') - new Date(dateInput.value + 'T12:00:00')) / 86400000);
+    if (note) {
+      if (dateInput.value < ARCHIVE_FIRST_DAY) {
+        note.textContent = 'Dispatch records from before ' + formatDateForDisplay(ARCHIVE_FIRST_DAY) + ' were deleted after 14 days, before the history archive was set up, so this day shows no trucks or checks. To look one up, open an older copy of the Dispatch spreadsheet (File > Version history).';
+        note.style.display = 'block';
+      } else if (ageDays >= 13) {
+        note.textContent = 'This day comes from the history archive (records older than 14 days), so it can take a little longer to load. Archived days are read-only.';
+        note.style.display = 'block';
+      } else {
+        note.style.display = 'none';
+      }
+    }
     callApi('getDashboardForDate', [dateInput.value]).then(function (data) { renderDashboard(data, '-history'); }).catch(showFatalError);
     callApi('getOrderFulfillmentOverview', [dateInput.value]).then(function (data) { renderFulfillmentOverview(data, '-history'); }).catch(showFatalError);
     callApi('listJobsForDate', [dateInput.value]).then(function (list) { renderJobsToday(list, '-history'); }).catch(showFatalError);

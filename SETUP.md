@@ -2262,3 +2262,35 @@ Tested old code vs new on a 10,000-row ItemChecks: identical answers and
 identical final sheets for list, open order, ticks, a tick whose row moved,
 an old trip's tick and dispatch; rows read per tick 20,033 -> 3,012, per
 order screen 10,023 -> 1,514.
+
+## History archive (build-2026-11-20-02)
+
+Until now the nightly clean-up (`pruneOldRecords`, 02:00) **deleted** trips,
+order checks, item ticks, collections, jobs, resolved issues and driver logs
+older than 14 days, so History showed nothing for older days (Shane couldn't
+find an order from 12 Oct). Now those records are **moved** to an archive:
+
+- **Where:** one Google Sheet per year, "Daily Fruit Dispatch Archive 2026",
+  created automatically in the Drive of the account the script runs as. Its
+  id is saved in Settings as `ArchiveSpreadsheet_2026`. One tab per record
+  type per month ("OrderChecks 2026-11", "ItemChecks 2026-11", ...), so
+  reading a past day reads one month. Order lines go into their order's month.
+- **Safe move:** rows are copied, the tab is read back, and only rows that
+  are really in the archive are removed from the main sheets. If a copy fails
+  the rows stay and are tried again the next night (the clean-up's log says
+  "PROBLEMS: ..."). A row already in the archive is never copied twice.
+  Unresolved packing/truck issues and open driver reports still stay in the
+  main sheets until resolved. The wooden-tray ledger keeps its own year and
+  isn't archived.
+- **Reading:** History (and the order search with a date) for a day within
+  2 days of the 14-day line, or older, reads a read-only view of the main sheet
+  plus that month's archive tab (`archiveView_`, through `getSheet_` /
+  `sheetOrNull_`), so a day is found wherever it is. Anything that tries to
+  write to that view fails ("Older history is read-only").
+- **History screen:** a note says when a day comes from the archive. For days
+  before **7 Nov 2026** (deleted by the old clean-up before the archive
+  existed) it says so and points to the spreadsheet's File > Version history.
+- **Size:** about 6 million cells a year, under Google's 10 million per
+  spreadsheet; a new spreadsheet starts each year.
+- Not archived: the Packing-side order details shown in History's "orders
+  due" card come from Packing & Production, which keeps its own archive.

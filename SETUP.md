@@ -2224,3 +2224,41 @@ first, then fix the biggest number.
   role (build-2026-11-06-01; the "Dispatch API has no auth" note in Packing's
   CLAUDE.md is out of date), and TruckSessions/OrderChecks/ItemChecks are
   pruned to 14 days every night.
+
+## Speed fixes from the first speed log (build-2026-11-20-01, server only)
+
+Speed log 19 Nov 17:40 - 20 Nov 05:30 (~1,400 requests recorded, 03:30-05:30
+peak about 15-17 a minute):
+
+| Request | Calls | Avg | Cause |
+|---|---|---|---|
+| Trucks board | 181 | 15.5 s | Packing read every time; waiting on other rebuilds |
+| Tick an item (`setItemStatus`) | 369 | 4.4 s (36 s peak) | all ~12,800 ItemChecks rows read twice |
+| Open an order (`getOrderForChecking`) | 96 | 12.4 s | ItemChecks in full; Packing, Settings, HiddenCustomers read twice |
+| Truck's order list (`getOrdersForSession`) | 131 | 9.0 s | ItemChecks in full; Packing |
+
+Fixes:
+1. **Packing's orders were never cached.** The 45 s cache stored plain JSON,
+   which is far over CacheService's 100 KB value limit (about 650 KB for
+   1,200 orders), so the save failed silently and every request re-read
+   Packing's Orders and OrderItems. Now gzipped and split if needed
+   (`cachePutBig_`/`cacheGetBig_`, also used for the board), and handed out
+   as copies.
+2. **Read once per request:** Packing's orders and Settings are kept for the
+   rest of the request (`REQ_MEMO_`, reset per request; `writeSetting_`
+   drops Settings).
+3. **Today's ItemChecks only** (`itemChecksToday_`): today's trucks' lines are
+   always at the bottom (appends at the bottom, the nightly prune deletes from
+   the top), so the tab is read upward in blocks of 1,500 rows, stopping at the
+   first block with none of today's rows or where today's rows start. Used by
+   item ticks, order screens, the truck's order list, the status self-heal,
+   the missing-line self-heal and dispatch. Anything about an older trip still
+   reads the whole tab.
+4. **Item ticks write straight to their row** (`updateRowAt_`), after
+   checking the row still holds that line; if it moved, the old whole-sheet
+   search is used.
+
+Tested old code vs new on a 10,000-row ItemChecks: identical answers and
+identical final sheets for list, open order, ticks, a tick whose row moved,
+an old trip's tick and dispatch; rows read per tick 20,033 -> 3,012, per
+order screen 10,023 -> 1,514.

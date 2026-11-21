@@ -2315,3 +2315,27 @@ find an order from 12 Oct). Now those records are **moved** to an archive:
   planned yearly file: identical results for the old day (4 orders, 3
   dispatched, 1 never sent), and the recent day's overdue list is the same
   before and after the nightly move.
+
+## Second speed log (21 Nov 2026) and small-sheet cache (build-2026-11-21-01, server only)
+
+Average server time before the 20 Nov fixes vs after (20 Nov 05:40 - 21 Nov 05:50):
+Trucks board 14.4 s -> 6.5 s, open order 11.3 -> 5.0, allocate 4.4 -> 2.6, search
+7.1 -> 4.5, dispatch 11.7 -> 7.8, order list 8.9 -> 7.4, tick 4.3 -> 3.4, Zoho
+tray pull 21.4 -> 9.7. The first archive run (02:40) took 72 s, fine for once a
+night; History read "TruckSessions 2026-11" from the archive the same morning.
+
+What's left is mostly fixed cost per sheet opened, not rows: Settings (11 rows),
+Trucks (27), HiddenCustomers (3) took 200-800 ms each time, and Google adds
+~2-2.5 s before every request starts.
+
+- **Settings, Trucks and TrayStops are cached between requests** for 5 minutes
+  (`readSheetValues_`, used by `sheetToObjects_` and `perfValues_`). Every write
+  through the helpers (`appendObject_`, `appendObjects_`,
+  `appendObjectForcingText_`, `updateRowById_`, `updateRowAt_`, `deleteRowById_`,
+  `deleteRowsWhere_`, `writeSetting_`, `ensureHeaderCells_`) and the Zoho tray
+  pull clears the copy, and it's cleared again when the request ends; a read
+  that overlapped a write is never stored (generation stamp `svgen_<sheet>`).
+  Dates are kept as dates. **A value typed straight into one of these tabs by
+  hand shows within 5 minutes.**
+- The overdue check that looks in the archive reads the main sheets once per
+  request instead of once per month looked at.

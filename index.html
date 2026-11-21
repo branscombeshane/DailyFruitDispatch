@@ -1185,7 +1185,7 @@
           </div>
           <div class="card">
             <h3 style="margin-top:0;">Trucks Leaving Late</h3>
-            <p class="hint" style="margin-top:0;" id="late-trucks-hint">Trucks whose first trip of the day has left after 07:00 three or more times recently.</p>
+            <p class="hint" style="margin-top:0;" id="late-trucks-hint">Trucks whose first trip of the day has left late three or more times recently.</p>
             <div id="dashboard-late-trucks"></div>
           </div>
         </div>
@@ -1330,9 +1330,21 @@
       </div>
 
       <div class="admin-pane" id="admin-latereasons" style="display:none;">
+        <!-- Leave-by times per day (build-2026-11-21-02) -->
+        <div class="card">
+          <h3 style="margin-top:0;">Late after</h3>
+          <p class="hint" style="margin-top:0;">A truck's first trip counts as late (late-reason prompt, Trucks Leaving Late, red "Late leaving" badge) when it leaves after this time on that day. "Cutting it close" shows from 45 minutes before.</p>
+          <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end;">
+            <label style="margin:0;">Mon - Fri<br><input type="time" id="late-cutoff-weekday" style="width:120px;"></label>
+            <label style="margin:0;">Saturday<br><input type="time" id="late-cutoff-saturday" style="width:120px;"></label>
+            <label style="margin:0;">Sunday<br><input type="time" id="late-cutoff-sunday" style="width:120px;"></label>
+            <button class="btn btn-primary" onclick="saveLateCutoffsUi()">Save times</button>
+          </div>
+          <div class="hint" id="late-cutoff-status"></div>
+        </div>
         <div class="card">
           <h3 style="margin-top:0;">Add late reason</h3>
-          <p class="hint">When a truck's first trip of the day is dispatched after 07:00, the checker must pick one of the active reasons below before it can go. If there are no active reasons, nobody is asked.</p>
+          <p class="hint">When a truck's first trip of the day is dispatched after the "Late after" time above, the checker must pick one of the active reasons below before it can go. If there are no active reasons, nobody is asked.</p>
           <div class="row-inline">
             <input type="text" id="new-late-reason" placeholder="e.g. Waiting on production">
             <button class="btn btn-primary" onclick="addLateReasonUi()">Add</button>
@@ -1390,7 +1402,7 @@
   // bottom of the login screen, so we can both confirm which version is
   // actually loaded on a device (rules cached/stale files in or out) rather
   // than guessing from behavior alone.
-  var BUILD_VERSION = 'build-2026-11-20-02';
+  var BUILD_VERSION = 'build-2026-11-21-02';
   document.getElementById('build-version-tag').textContent = BUILD_VERSION;
 
   // Registers the service worker that makes the app installable on a phone's
@@ -3033,13 +3045,17 @@
   // devices at the depot, so that's always effectively SAST).
   var ON_TIME_GREEN_CUTOFF_MINUTES = 6 * 60 + 15; // 06:15
   var ON_TIME_AMBER_CUTOFF_MINUTES = 7 * 60; // 07:00
-  function onTimeBadge_(dispatchedAt, tripNumber) {
+  // cutoffMinutes: that day's "Late after" time from the server (weekend
+  // times differ, build-2026-11-21-02); amber starts 45 minutes before it.
+  function onTimeBadge_(dispatchedAt, tripNumber, cutoffMinutes) {
     if (tripNumber && tripNumber > 1) return null;
     if (!dispatchedAt) return null;
     var d = new Date(dispatchedAt);
     var minutesOfDay = d.getHours() * 60 + d.getMinutes();
-    if (minutesOfDay <= ON_TIME_GREEN_CUTOFF_MINUTES) return { cls: 'ontime-green', label: 'On time' };
-    if (minutesOfDay <= ON_TIME_AMBER_CUTOFF_MINUTES) return { cls: 'ontime-amber', label: 'Cutting it close' };
+    var amber = typeof cutoffMinutes === 'number' ? cutoffMinutes : ON_TIME_AMBER_CUTOFF_MINUTES;
+    var green = typeof cutoffMinutes === 'number' ? cutoffMinutes - 45 : ON_TIME_GREEN_CUTOFF_MINUTES;
+    if (minutesOfDay <= green) return { cls: 'ontime-green', label: 'On time' };
+    if (minutesOfDay <= amber) return { cls: 'ontime-amber', label: 'Cutting it close' };
     return { cls: 'ontime-red', label: 'Late leaving' };
   }
 
@@ -3083,7 +3099,7 @@
       timelineEl.innerHTML = timeline.map(function (entry) {
         var gapText = entry.packToDispatchSeconds !== null ? formatDurationSeconds(entry.packToDispatchSeconds) : '-';
         var tripSuffix = entry.tripNumber > 1 ? ' (Trip ' + entry.tripNumber + ')' : '';
-        var onTime = onTimeBadge_(entry.dispatchedAt, entry.tripNumber);
+        var onTime = onTimeBadge_(entry.dispatchedAt, entry.tripNumber, entry.lateCutoffMinutes);
         var onTimeBadgeHtml = onTime ? '<span class="ontime-badge ' + onTime.cls + '" title="Based on actual leave time - trip 2+ isn\'t held to a leave-by target">' + onTime.label + '</span>' : '';
         return '<div class="timeline-entry">' +
           '<div class="timeline-main">' +
@@ -3141,7 +3157,7 @@
     var days = (data && data.windowDays) || 14;
     var minLate = (data && data.minLateCount) || 3;
     document.getElementById('late-trucks-hint').textContent =
-      'Trucks whose first trip of the day has left after 07:00 ' + minLate + ' or more times in the last ' + days +
+      'Trucks whose first trip of the day has left late (after that day\'s "Late after" time: Settings > Late Reasons) ' + minLate + ' or more times in the last ' + days +
       ' days (all the history the app keeps). A truck\'s 2nd+ trip isn\'t held to a leave-by target, so only each day\'s first trip counts.';
     if (trucks.length === 0) {
       el.innerHTML = '<div class="empty">No truck has left late ' + minLate + '+ times in the last ' + days + ' days.</div>';
@@ -3151,7 +3167,7 @@
       return '<div class="timeline-entry">' +
         '<div class="timeline-main">' +
           '<div class="timeline-truck">' + escapeHtml(row.truckName) + '</div>' +
-          '<div class="timeline-who">' + row.lateCount + ' of ' + row.trip1Count + ' first trips left after 07:00, last ' + days + ' days</div>' +
+          '<div class="timeline-who">' + row.lateCount + ' of ' + row.trip1Count + ' first trips left late, last ' + days + ' days</div>' +
           lateReasonsLine_(row) +
         '</div>' +
         '<span class="ontime-badge ontime-red">' + row.lateCount + 'x late</span>' +
@@ -4873,7 +4889,27 @@
     }).catch(showFatalError);
   }
 
+  // Leave-by times per day (build-2026-11-21-02).
+  function loadLateCutoffs() {
+    callApi('getLateCutoffs', [], { silent: true }).then(function (c) {
+      document.getElementById('late-cutoff-weekday').value = c.LateCutoffWeekday;
+      document.getElementById('late-cutoff-saturday').value = c.LateCutoffSaturday;
+      document.getElementById('late-cutoff-sunday').value = c.LateCutoffSunday;
+    }).catch(function (err) {
+      if (err && /Unknown action/.test(err.message || '')) document.getElementById('late-cutoff-status').textContent = 'Needs the latest server update.';
+    });
+  }
+  function saveLateCutoffsUi() {
+    var v = function (id) { return document.getElementById(id).value; };
+    var status = document.getElementById('late-cutoff-status');
+    if (!v('late-cutoff-weekday') || !v('late-cutoff-saturday') || !v('late-cutoff-sunday')) { status.textContent = 'Fill in all three times.'; return; }
+    callApi('saveLateCutoffs', [v('late-cutoff-weekday'), v('late-cutoff-saturday'), v('late-cutoff-sunday')]).then(function (c) {
+      status.textContent = 'Saved: Mon-Fri ' + c.LateCutoffWeekday + ', Saturday ' + c.LateCutoffSaturday + ', Sunday ' + c.LateCutoffSunday + '.';
+    }).catch(function (err) { status.textContent = (err && err.message) || 'Could not save.'; });
+  }
+
   function loadLateReasons() {
+    loadLateCutoffs();
     callApi('listLateReasons', [false]).then(function (reasons) {
       var table = document.getElementById('late-reasons-table');
       if (reasons.length === 0) {

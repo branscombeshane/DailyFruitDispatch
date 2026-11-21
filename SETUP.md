@@ -2339,3 +2339,22 @@ Trucks (27), HiddenCustomers (3) took 200-800 ms each time, and Google adds
   hand shows within 5 minutes.**
 - The overdue check that looks in the archive reads the main sheets once per
   request instead of once per month looked at.
+
+## Late times per day of the week (build-2026-11-21-02)
+
+Weekend trucks leave later (first trips 8-21 Nov: Saturday/Sunday median
+08:20-08:40, 80% gone by 08:25-09:20; weekdays median 06:00-06:15, Mondays
+~06:45), so with one 07:00 cutoff nearly every weekend truck got the
+late-reason prompt.
+
+- **Settings > Late Reasons > "Late after"**: Mon-Fri, Saturday and Sunday
+  times (Admin only; defaults 07:00 / 09:00 / 09:00). Settings keys
+  `LateCutoffWeekday`, `LateCutoffSaturday`, `LateCutoffSunday`, saved as text.
+- Used everywhere "late" is decided, always by the **trip's own date**: the
+  late-reason prompt at dispatch (`isLateDispatchNow_`, server clock), the
+  Trucks Leaving Late card, and the timeline's on-time badges ("Cutting it
+  close" from 45 minutes before the day's time). Server:
+  `lateCutoffMinutesFor_`, `getLateCutoffs`, `saveLateCutoffs`; timeline
+  entries carry `lateCutoffMinutes`.
+- Mondays still run late (8-9 trucks after 07:00 each Monday) - a volume
+  issue, not a wrong target, so Monday stays on the weekday time.
